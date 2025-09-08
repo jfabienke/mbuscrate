@@ -55,12 +55,12 @@ fn test_vife_parsing_edge_cases() {
 
     // Test chained VIFEs: Primary + FD extension (simulate extensions beyond single byte)
     use mbus_rs::payload::vif::parse_vib;
-    // Mock input for VIF 0xFD (FD extension) followed by VIFE 0x08 (access number)
-    let mock_input_fd = [0xFD, 0x08];
+    // Mock input for VIF 0xFD (FD extension) followed by VIFE 0x00 (credit)
+    let mock_input_fd = [0xFD, 0x00];
     let (_, vib_fd) = parse_vib(&mock_input_fd).expect("Parse should succeed for valid chain");
     assert_eq!(vib_fd.len(), 2);
     assert_eq!(vib_fd[0].vif, 0xFD as u16);
-    assert_eq!(vib_fd[1].quantity, "Transmission Count"); // From lookup_vife_fd(0x08)
+    assert_eq!(vib_fd[1].quantity, "Credit"); // From lookup_vife_fd(0x00)
 
     // Edge case: Invalid extension bit without valid VIFE (e.g., FD with undefined VIFE)
     let invalid_chain = [0xFD, 0xFF]; // FD with invalid VIFE 0xFF
