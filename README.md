@@ -74,6 +74,29 @@ To enable logging, use the `init_logger()` function at the start of your applica
 
 We welcome contributions to `mbus-rs`! Please feel free to submit issues or pull requests on GitHub.
 
-## License
+## Architecture
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+The crate is structured as follows:
+
+- `src/lib.rs`: Public API and re-exports.
+- `src/mbus/`: M-Bus protocol implementation (frames, serial).
+- `src/payload/`: Data record parsing and VIF handling.
+- `src/wmbus/`: Wireless M-Bus support.
+- `src/error.rs`: Custom error types.
+- `src/logging.rs`: Logging helpers.
+
+Reference: EN 13757-3 for M-Bus physical and link layers.
+
+### Advanced Examples
+
+For advanced usage, see `examples/` directory (to be added).
+
+```rust
+// Example: Parsing a full frame with records
+let frame_bytes = hex::decode("68 0A 0A 68 53 01 78 02 01 00 00 00 00 00 00 00 00 54 16").unwrap();
+let (_, frame) = mbus_rs::mbus::frame::parse_frame(&frame_bytes).unwrap();
+let records = mbus_rs::mbus::mbus_protocol::DataRetrievalManager::default().parse_records(&frame).unwrap();
+for record in records {
+    println!("{:?}", record);
+}
+```

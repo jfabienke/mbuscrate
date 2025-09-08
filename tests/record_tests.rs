@@ -15,4 +15,3 @@ fn test_parse_variable_record() {
     let result = mbus_rs::payload::record::parse_variable_record(&data);
     assert!(result.is_ok());
 }
-

@@ -3,7 +3,7 @@
 //! This module defines the MBusError enum, which represents the different error
 //! types that can occur in the mbus-rs crate.
 
-use thiserror::Error;
+use anyhow::Context;
 
 /// Represents the different error types that can occur in the M-Bus crate.
 #[derive(Debug, Error)]

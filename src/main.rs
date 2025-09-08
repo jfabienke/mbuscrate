@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use mbus_rs::{init_logger, log_info, MBusError, MBusDeviceManager};
+use mbus_rs::{init_logger, log_info, MBusDeviceManager, MBusError};
 
 #[derive(Parser)]
 #[command(name = "mbus-cli")]
@@ -38,7 +38,10 @@ async fn main() -> Result<(), MBusError> {
         Commands::SendRequest { address } => {
             let records = manager.send_request(address).await?;
             for record in records {
-                log_info(&format!("Record: {:?} {} {}", record.value, record.unit, record.quantity));
+                log_info(&format!(
+                    "Record: {:?} {} {}",
+                    record.value, record.unit, record.quantity
+                ));
             }
         }
         Commands::ScanDevices => {

@@ -1,8 +1,9 @@
 use crate::error::MBusError;
 use nom::{number::complete::be_u8, IResult};
 
-#[derive(Debug, Clone)]
-pub struct VifInfo {
+/// Visitor for complex VIF decoding.
+/// 
+/// For now, simple lookup is used, but visitor can be extended for custom decoding.
     pub vif: u16,
     pub unit: &'static str,
     pub exponent: f64,
@@ -24,7 +25,10 @@ fn parse_vife(input: &[u8]) -> IResult<&[u8], VifInfo> {
     // For now, assume FD extension; in full implementation, check extension type
     let vif_info = crate::payload::vif_maps::lookup_vife_fd(vife)
         .or_else(|| crate::payload::vif_maps::lookup_vife_fb(vife))
-        .ok_or(nom::Err::Error(nom::error::Error::new(remaining, nom::error::ErrorKind::Tag)))?;
+        .ok_or(nom::Err::Error(nom::error::Error::new(
+            remaining,
+            nom::error::ErrorKind::Tag,
+        )))?;
 
     Ok((remaining, vif_info))
 }

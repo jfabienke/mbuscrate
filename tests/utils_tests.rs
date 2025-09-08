@@ -21,13 +21,22 @@ fn test_hex_to_bytes_local() {
 fn test_timestamp_to_systemtime() {
     let timestamp: u64 = 1618304400; // 2021-04-12 12:00:00 UTC
     let system_time = SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp);
-    assert_eq!(system_time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), timestamp);
+    assert_eq!(
+        system_time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        timestamp
+    );
 }
 
 /// Tests the `systemtime_to_timestamp()` function, which converts a `SystemTime` instance to a Unix timestamp.
 #[test]
 fn test_systemtime_to_timestamp() {
     let system_time = SystemTime::UNIX_EPOCH + Duration::from_secs(1618304400);
-    let ts = system_time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+    let ts = system_time
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     assert_eq!(ts, 1618304400);
 }

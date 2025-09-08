@@ -101,7 +101,10 @@ fn test_pack_control_frame() {
         more_records_follow: false,
     };
     let packed_data = pack_frame(&frame);
-    assert_eq!(packed_data, &[0x68, 0x03, 0x03, 0x68, 0x53, 0x01, 0x00, 0x54, 0x16]);
+    assert_eq!(
+        packed_data,
+        &[0x68, 0x03, 0x03, 0x68, 0x53, 0x01, 0x00, 0x54, 0x16]
+    );
 }
 
 /// Tests that a Long frame is correctly packed.

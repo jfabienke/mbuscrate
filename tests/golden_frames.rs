@@ -1,5 +1,5 @@
-use mbus_rs::{MBusFrame, MBusFrameType};
 use mbus_rs::mbus::frame::parse_frame;
+use mbus_rs::{MBusFrame, MBusFrameType};
 use nom::IResult;
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {

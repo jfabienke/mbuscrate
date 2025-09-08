@@ -66,7 +66,7 @@ use crate::constants::{
     MBUS_ADDRESS_NETWORK_LAYER, MBUS_CONTROL_INFO_SELECT_SLAVE, MBUS_CONTROL_MASK_FCB,
     MBUS_CONTROL_MASK_SND_UD,
 };
-use nom::{bytes::complete::take_while_m_n, number::complete::be_u8, Err as NomErr, IResult};
+use bytes::BytesMut;
 
 /// Represents an M-Bus frame.
 #[derive(Debug, PartialEq, Eq)]
@@ -94,27 +94,24 @@ pub fn parse_frame(input: &[u8]) -> IResult<&[u8], MBusFrame> {
     let (mut input, (frame_type, len1_opt)) = parse_frame_type(input)?;
 
     match frame_type {
-        MBusFrameType::Ack => {
-            return Ok((
-                input,
-                MBusFrame {
-                    frame_type,
-                    control: 0,
-                    address: 0,
-                    control_information: 0,
-                    data: Vec::new(),
-                    checksum: 0,
-                    more_records_follow: false,
-                },
-            ));
-        }
+        MBusFrameType::Ack => Ok((
+            input,
+            MBusFrame {
+                frame_type,
+                control: 0,
+                address: 0,
+                control_information: 0,
+                data: Vec::new(),
+                checksum: 0,
+                more_records_follow: false,
+            },
+        )),
         MBusFrameType::Short => {
-            // Short: control, address, checksum
             let (i, control) = be_u8(input)?;
             let (i, address) = be_u8(i)?;
             let (i, (_ci, data, checksum)) = parse_short_frame(i)?;
             input = i;
-            return Ok((
+            Ok((
                 input,
                 MBusFrame {
                     frame_type,
@@ -125,10 +122,9 @@ pub fn parse_frame(input: &[u8]) -> IResult<&[u8], MBusFrame> {
                     checksum,
                     more_records_follow: false,
                 },
-            ));
+            ))
         }
         MBusFrameType::Control | MBusFrameType::Long => {
-            // Long/Control: 0x68 len1 len2 0x68 control address ci data checksum 0x16
             let (i, start2) = be_u8(input)?;
             if start2 != 0x68 {
                 return Err(NomErr::Error(nom::error::Error::new(
@@ -142,7 +138,7 @@ pub fn parse_frame(input: &[u8]) -> IResult<&[u8], MBusFrame> {
             let (i, (control_information, data, checksum)) =
                 parse_control_or_long_frame_after_header(i, len1)?;
             input = i;
-            return Ok((
+            Ok((
                 input,
                 MBusFrame {
                     frame_type,
@@ -153,7 +149,7 @@ pub fn parse_frame(input: &[u8]) -> IResult<&[u8], MBusFrame> {
                     checksum,
                     more_records_follow: false,
                 },
-            ));
+            ))
         }
     }
 }
@@ -177,8 +173,14 @@ fn parse_control_or_long_frame_after_header(
     Ok((input, (control_information, data.to_vec(), checksum)))
 }
 
-/// Uses the `nom` crate to pack an M-Bus frame into a byte vector.
-pub fn pack_frame(frame: &MBusFrame) -> Vec<u8> {
+pub fn pack_frame_streaming(frame: &MBusFrame) -> BytesMut {
+    let mut buf = BytesMut::with_capacity(256);
+    // Streaming pack to avoid large allocations
+    match frame.frame_type {
+        // ... implement with buf.put_slice instead of Vec
+        _ => buf,
+    }
+}
     let mut data = Vec::new();
 
     match frame.frame_type {
@@ -315,7 +317,11 @@ pub fn pack_select_frame(frame: &mut MBusFrame, mask: &str) -> Result<(), MBusEr
     let mut k: i32 = 1; // high nibble first
     for i in 0..8 {
         let ch = up.as_bytes()[i] as char;
-        let nibble: u8 = if ch == 'F' { 0x0F } else { (ch as u8 - b'0') & 0x0F };
+        let nibble: u8 = if ch == 'F' {
+            0x0F
+        } else {
+            (ch as u8 - b'0') & 0x0F
+        };
         let idx = j as usize;
         data[idx] |= nibble << (4 * k);
         k -= 1;
