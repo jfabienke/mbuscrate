@@ -61,12 +61,12 @@ fn test_vife_parsing_edge_cases() {
     assert_eq!(vib_fd[0].vif, 0x00 as u16);
     assert_eq!(vib_fd[0].quantity, "Energy");
 
-    // Edge case: Invalid primary VIF (undefined code)
-    let invalid_chain = [0xFF]; // Invalid primary VIF 0xFF
+    // Edge case: Invalid primary VIF (e.g., extension code as primary, which should fail lookup)
+    let invalid_chain = [0xFD]; // FD extension as primary VIF
     let result_invalid = parse_vib(&invalid_chain);
-    assert!(result_invalid.is_err());
+    assert!(result_invalid.is_err()); // Should fail if lookup returns None
 
-    // Test FB extension parsing (should fail if lookup is None)
+    // Test FB extension parsing (should fail on primary lookup for 0xFB if not defined, or on VIFE)
     let fb_mock = [0xFB, 0x40]; // FB extension for voltage
     let result_fb = parse_vib(&fb_mock);
     assert!(result_fb.is_err());
