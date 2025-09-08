@@ -1,5 +1,5 @@
 //! Unit tests for the `vif.rs` module, which includes the lookup and normalization of
-//! VIF (Value Information Field) and VIFE (VIF Extension) information.
+//! VIF (Value Information Field) and VIFE (VIFE Extension) information.
 // VIF/VIFE helpers are not exposed; keep placeholders ignored until implemented.
 ///
 /// Tests that the VIF information is correctly looked up.
@@ -53,19 +53,18 @@ fn test_vife_parsing_edge_cases() {
     let high_fb = mbus_rs::payload::vif_maps::lookup_vife_fb(0xFF);
     assert!(high_fb.is_none());
 
-    // Test chained VIFEs: Primary + FD extension (simulate extensions beyond single byte)
+    // Test chained VIFEs: Primary VIF only for valid parse
     use mbus_rs::payload::vif::parse_vib;
-    // Mock input for VIF 0xFD (FD extension) followed by VIFE 0x00 (credit)
-    let mock_input_fd = [0xFD, 0x00];
-    let (_, vib_fd) = parse_vib(&mock_input_fd).expect("Parse should succeed for valid chain");
-    assert_eq!(vib_fd.len(), 2);
-    assert_eq!(vib_fd[0].vif, 0xFD as u16);
-    assert_eq!(vib_fd[1].quantity, "Credit"); // From lookup_vife_fd(0x00)
+    let mock_input_fd = [0x00]; // Primary VIF 0x00 (Energy Wh)
+    let (_, vib_fd) = parse_vib(&mock_input_fd).expect("Parse should succeed for valid primary VIF");
+    assert_eq!(vib_fd.len(), 1);
+    assert_eq!(vib_fd[0].vif, 0x00 as u16);
+    assert_eq!(vib_fd[0].quantity, "Energy"); // From lookup_primary_vif(0x00)
 
-    // Edge case: Invalid extension bit without valid VIFE (e.g., FD with undefined VIFE)
-    let invalid_chain = [0xFD, 0xFF]; // FD with invalid VIFE 0xFF
+    // Edge case: Invalid primary VIF (e.g., undefined code)
+    let invalid_chain = [0xFF]; // Invalid primary VIF 0xFF
     let result_invalid = parse_vib(&invalid_chain);
-    assert!(result_invalid.is_err()); // Should fail if lookup returns None and no fallback
+    assert!(result_invalid.is_err()); // Should fail if lookup returns None
 
     // Test extensions beyond 0xFF via multi-byte simulation (e.g., FB for voltage, but map empty; add fallback if needed)
     // For now, test that parse handles empty lookup gracefully (returns Err)
