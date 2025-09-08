@@ -41,6 +41,12 @@ pub mod payload;
 pub mod wmbus;
 
 pub use crate::error::MBusError;
+pub use crate::logging::{init_logger, log_info};
+pub use crate::error::MBusError;
+pub use crate::logging::{init_logger, log_info};
+pub use crate::error::MBusError;
+pub use crate::logging::{init_logger, log_info};
+pub use crate::logging::{init_logger, log_info};
 pub use crate::error::MBusError;
 pub use crate::logging::{init_logger, log_info};
 pub use crate::logging::{init_logger, log_info};
