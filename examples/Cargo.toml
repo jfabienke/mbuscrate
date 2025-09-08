@@ -1,0 +1,14 @@
+name = "mbus-rs-examples"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+mbus-rs = { path = "../mbus-rs" }
+
+[[bin]]
+name = "parse_frame_example"
+path = "examples/parse_frame.rs"
+
+[[bin]]
+name = "tcp_client"
+path = "examples/tcp_client.rs"
