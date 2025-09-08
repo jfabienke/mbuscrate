@@ -11,12 +11,6 @@ pub struct VifInfo {
     pub quantity: &'static str,
 }
 
-impl VifInfo {
-    fn new(vif: u16, unit: &'static str, exponent: f64, quantity: &'static str) -> Self {
-        Self { vif, unit, exponent, quantity }
-    }
-}
-
 fn parse_vif(input: &[u8]) -> IResult<&[u8], VifInfo> {
     let (remaining, vif) = be_u8(input)?;
 
