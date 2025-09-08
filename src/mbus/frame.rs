@@ -61,12 +61,17 @@
 //!
 //! Note: Replace example byte slices and frame values with actual data as needed.
 
-use crate::MBusError;
+use crate::error::MBusError;
 use crate::constants::{
     MBUS_ADDRESS_NETWORK_LAYER, MBUS_CONTROL_INFO_SELECT_SLAVE, MBUS_CONTROL_MASK_FCB,
     MBUS_CONTROL_MASK_SND_UD,
 };
-use bytes::BytesMut;
+use nom::{
+    bytes::complete::take_while_m_n,
+    number::complete::be_u8,
+    IResult,
+    Err as NomErr,
+};
 
 /// Represents an M-Bus frame.
 #[derive(Debug, PartialEq, Eq)]
@@ -173,14 +178,7 @@ fn parse_control_or_long_frame_after_header(
     Ok((input, (control_information, data.to_vec(), checksum)))
 }
 
-pub fn pack_frame_streaming(frame: &MBusFrame) -> BytesMut {
-    let mut buf = BytesMut::with_capacity(256);
-    // Streaming pack to avoid large allocations
-    match frame.frame_type {
-        // ... implement with buf.put_slice instead of Vec
-        _ => buf,
-    }
-}
+pub fn pack_frame(frame: &MBusFrame) -> Vec<u8> {
     let mut data = Vec::new();
 
     match frame.frame_type {
@@ -196,12 +194,8 @@ pub fn pack_frame_streaming(frame: &MBusFrame) -> BytesMut {
             data.push(frame.checksum);
             data.push(0x16);
         }
-        MBusFrameType::Control => {
-            // Control frame: 0x68 | length1 | length2 | 0x68 | control | address | control_information | data | checksum | 0x16
-            pack_control_or_long_frame(&mut data, frame);
-        }
-        MBusFrameType::Long => {
-            // Long frame: 0x68 | length1 | length2 | 0x68 | control | address | control_information | data | checksum | 0x16
+        MBusFrameType::Control | MBusFrameType::Long => {
+            // Control/Long frame: 0x68 | length1 | length2 | 0x68 | control | address | control_information | data | checksum | 0x16
             pack_control_or_long_frame(&mut data, frame);
         }
     }

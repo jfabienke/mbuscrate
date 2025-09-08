@@ -117,11 +117,11 @@ fn mbus_data_record_value_decode(dif: u8, data: &[u8]) -> Result<f64, MBusError>
 fn mbus_data_record_storage_number(vib: &[VifInfo]) -> u32 {
     let mut storage_number = 0;
     for info in vib {
-        if (info.vif & (MBUS_DATA_RECORD_DIF_MASK_STORAGE_NO as u16)) >> 6 != 0 {
-            storage_number |= ((info.vif & (MBUS_DATA_RECORD_DIF_MASK_STORAGE_NO as u16)) >> 6) as u32;
+        if ((info.vif as u8) & (MBUS_DATA_RECORD_DIF_MASK_STORAGE_NO as u8)) >> 6 != 0 {
+            storage_number |= (((info.vif as u8) & (MBUS_DATA_RECORD_DIF_MASK_STORAGE_NO as u8)) >> 6) as u32;
         }
-        if (info.vif & (MBUS_DATA_RECORD_DIFE_MASK_STORAGE_NO as u16)) != 0 {
-            storage_number |= ((info.vif & (MBUS_DATA_RECORD_DIFE_MASK_STORAGE_NO as u16)) as u32) << 4;
+        if ((info.vif as u8) & (MBUS_DATA_RECORD_DIFE_MASK_STORAGE_NO as u8)) != 0 {
+            storage_number |= (((info.vif as u8) & (MBUS_DATA_RECORD_DIFE_MASK_STORAGE_NO as u8)) as u32) << 4;
         }
     }
     storage_number
@@ -130,8 +130,8 @@ fn mbus_data_record_storage_number(vib: &[VifInfo]) -> u32 {
 fn mbus_data_record_tariff(vib: &[VifInfo]) -> i32 {
     let mut tariff = 0;
     for info in vib {
-        if (info.vif & (MBUS_DATA_RECORD_DIFE_MASK_TARIFF as u16)) >> 4 != 0 {
-            tariff |= ((info.vif & (MBUS_DATA_RECORD_DIFE_MASK_TARIFF as u16)) >> 4) as i32;
+        if ((info.vif as u8) & (MBUS_DATA_RECORD_DIFE_MASK_TARIFF as u8)) >> 4 != 0 {
+            tariff |= (((info.vif as u8) & (MBUS_DATA_RECORD_DIFE_MASK_TARIFF as u8)) >> 4) as i32;
         }
     }
     tariff
@@ -140,8 +140,8 @@ fn mbus_data_record_tariff(vib: &[VifInfo]) -> i32 {
 fn mbus_data_record_device(vib: &[VifInfo]) -> i32 {
     let mut device = 0;
     for info in vib {
-        if (info.vif & (MBUS_DATA_RECORD_DIFE_MASK_DEVICE as u16)) >> 6 != 0 {
-            device |= ((info.vif & (MBUS_DATA_RECORD_DIFE_MASK_DEVICE as u16)) >> 6) as i32;
+        if ((info.vif as u8) & (MBUS_DATA_RECORD_DIFE_MASK_DEVICE as u8)) >> 6 != 0 {
+            device |= (((info.vif as u8) & (MBUS_DATA_RECORD_DIFE_MASK_DEVICE as u8)) >> 6) as i32;
         }
     }
     device

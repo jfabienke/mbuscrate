@@ -21,7 +21,7 @@ Focus: Complete core functionality, eliminate gaps, ensure basic quality.
   - [x] Add doc comments to all public APIs (functions, structs, enums)
   - [x] Expand README.md with architecture diagram, spec references (EN 13757), and advanced examples
   - [x] Generate and review `cargo doc` output; fix inconsistencies
-  - [ ] Host generated docs on docs.rs
+  - [x] Host generated docs on docs.rs
   - [x] Add comprehensive rustdoc examples for parsing/encoding
 
 ### Metrics

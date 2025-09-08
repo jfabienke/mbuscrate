@@ -13,7 +13,7 @@
 - Run `cargo clippy --all-targets` for lints.
 
 ## Reporting Bugs
-Use the bug report template in .github/ISSUE_TEMPLATE/bug_report.md.
+Use the bug report template.
 
 ## Suggesting Enhancements
-Use the feature request template in .github/ISSUE_TEMPLATE/feature_request.md.
+Use the feature request template.

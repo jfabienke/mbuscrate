@@ -4,10 +4,17 @@ use nom::{number::complete::be_u8, IResult};
 /// Visitor for complex VIF decoding.
 /// 
 /// For now, simple lookup is used, but visitor can be extended for custom decoding.
+pub struct VifInfo {
     pub vif: u16,
     pub unit: &'static str,
     pub exponent: f64,
     pub quantity: &'static str,
+}
+
+impl VifInfo {
+    fn new(vif: u16, unit: &'static str, exponent: f64, quantity: &'static str) -> Self {
+        Self { vif, unit, exponent, quantity }
+    }
 }
 
 fn parse_vif(input: &[u8]) -> IResult<&[u8], VifInfo> {
@@ -42,25 +49,13 @@ pub fn parse_vib(input: &[u8]) -> IResult<&[u8], Vec<VifInfo>> {
 
 pub fn normalize_vib(vib: &[VifInfo]) -> Result<(String, f64, String), MBusError> {
     let mut unit = String::new();
-    let mut value = 0.0;
+    let mut value = 1.0;  // Initialize to 1.0 as multiplier starts neutral
     let mut quantity = String::new();
 
     for info in vib {
-        if info.vif == 0xFD {
-            // First type of VIF extension
-            unit = info.unit.to_string();
-            value *= info.exponent;
-            quantity = info.quantity.to_string();
-        } else if info.vif == 0xFB {
-            // Second type of VIF extension
-            unit = info.unit.to_string();
-            value *= info.exponent;
-            quantity = info.quantity.to_string();
-        } else {
-            unit = info.unit.to_string();
-            value *= info.exponent;
-            quantity = info.quantity.to_string();
-        }
+        unit = info.unit.to_string();
+        value *= info.exponent;
+        quantity = info.quantity.to_string();
     }
 
     Ok((unit, value, quantity))
