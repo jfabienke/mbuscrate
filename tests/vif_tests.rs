@@ -55,7 +55,7 @@ fn test_vife_parsing_edge_cases() {
     assert!(high_fb.is_none());
 
     // Test chained VIFEs: Primary + FD extension (simulate extensions beyond single byte)
-    use mbus_rs::payload::vif::{parse_vib, VifInfo};
+    use mbus_rs::payload::vif::parse_vib;
     // Mock input for VIF 0xFD (FD extension) followed by VIFE 0x08 (access number)
     let mock_input_fd = [0xFD, 0x08];
     let (_, vib_fd) = parse_vib(&mock_input_fd).expect("Parse should succeed for valid chain");
@@ -71,6 +71,6 @@ fn test_vife_parsing_edge_cases() {
     // Test extensions beyond 0xFF via multi-byte simulation (e.g., FB for voltage, but map empty; add fallback if needed)
     // For now, test that parse handles empty lookup gracefully (returns Err)
     let fb_mock = [0xFB, 0x40]; // FB extension for voltage
-    let (_, vib_fb) = parse_vib(&fb_mock).expect_err("Should err on undefined FB");
+    parse_vib(&fb_mock).expect_err("Should err on undefined FB");
     // Note: Current impl may need enhancement for dynamic FB calculation (e.g., exponent from code)
 }
