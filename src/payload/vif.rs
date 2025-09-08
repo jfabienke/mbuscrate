@@ -6,6 +6,7 @@ use nom::{number::complete::be_u8, IResult};
 /// For now, simple lookup is used, but visitor can be extended for custom decoding.
 #[derive(Debug)]
 #[derive(Debug)]
+#[derive(Debug)]
 pub struct VifInfo {
     pub vif: u16,
     pub unit: &'static str,
