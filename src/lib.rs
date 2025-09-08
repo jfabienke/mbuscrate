@@ -40,7 +40,9 @@ pub mod mbus_device_manager;
 pub mod payload;
 pub mod wmbus;
 
-use crate::error::MBusError;
+pub pub use crate::error::MBusError;
+pub use crate::logging::{init_logger, log_info};
+pub use crate::logging::{init_logger, log_info};
 
 pub use mbus::{MBusFrame, MBusFrameType};
 pub use mbus::serial::MBusDeviceHandle;
