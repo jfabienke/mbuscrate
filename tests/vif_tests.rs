@@ -1,5 +1,5 @@
 //! Unit tests for the `vif.rs` module, which includes the lookup and normalization of
-//! VIF (Value Information Field) and VIFE (VIFE Extension) information.
+//! VIF (Value Information Field) and VIFE (VIF Extension) information.
 // VIF/VIFE helpers are not exposed; keep placeholders ignored until implemented.
 ///
 /// Tests that the VIF information is correctly looked up.
@@ -53,22 +53,21 @@ fn test_vife_parsing_edge_cases() {
     let high_fb = mbus_rs::payload::vif_maps::lookup_vife_fb(0xFF);
     assert!(high_fb.is_none());
 
-    // Test chained VIFEs: Primary VIF only for valid parse
+    // Test primary VIF parsing (no VIFE)
     use mbus_rs::payload::vif::parse_vib;
     let mock_input_fd = [0x00]; // Primary VIF 0x00 (Energy Wh)
     let (_, vib_fd) = parse_vib(&mock_input_fd).expect("Parse should succeed for valid primary VIF");
     assert_eq!(vib_fd.len(), 1);
     assert_eq!(vib_fd[0].vif, 0x00 as u16);
-    assert_eq!(vib_fd[0].quantity, "Energy"); // From lookup_primary_vif(0x00)
+    assert_eq!(vib_fd[0].quantity, "Energy");
 
-    // Edge case: Invalid primary VIF (e.g., undefined code)
+    // Edge case: Invalid primary VIF (undefined code)
     let invalid_chain = [0xFF]; // Invalid primary VIF 0xFF
     let result_invalid = parse_vib(&invalid_chain);
-    assert!(result_invalid.is_err()); // Should fail if lookup returns None
+    assert!(result_invalid.is_err());
 
-    // Test extensions beyond 0xFF via multi-byte simulation (e.g., FB for voltage, but map empty; add fallback if needed)
-    // For now, test that parse handles empty lookup gracefully (returns Err)
+    // Test FB extension parsing (should fail if lookup is None)
     let fb_mock = [0xFB, 0x40]; // FB extension for voltage
-    parse_vib(&fb_mock).expect_err("Should err on undefined FB");
-    // Note: Current impl may need enhancement for dynamic FB calculation (e.g., exponent from code)
+    let result_fb = parse_vib(&fb_mock);
+    assert!(result_fb.is_err());
 }
