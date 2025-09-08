@@ -1,6 +1,5 @@
 //! Unit tests for the `vif.rs` module, which includes the lookup and normalization of
 //! VIF (Value Information Field) and VIFE (VIF Extension) information.
-//
 // VIF/VIFE helpers are not exposed; keep placeholders ignored until implemented.
 ///
 /// Tests that the VIF information is correctly looked up.
