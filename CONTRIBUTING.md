@@ -1,17 +1,19 @@
 # Contributing to mbus-rs
 
 ## How to Contribute
+1. Fork the repo.
+2. Create your feature branch (`git checkout -b feature/foo`).
+3. Commit your changes (`git commit -am 'Add some foo'`).
+4. Push to the branch (`git push origin feature/foo`).
+5. Create a new Pull Request.
 
-1. Fork the repo
-2. Create a feature branch
-3. Run `cargo test`
-4. Commit changes
-5. PR with description
+## Development Setup
+- Run `cargo test` to run tests.
+- Use `cargo fmt --all` to format code.
+- Run `cargo clippy --all-targets` for lints.
 
-## Code Style
+## Reporting Bugs
+Use the bug report template in .github/ISSUE_TEMPLATE/bug_report.md.
 
-Use `cargo fmt` and `cargo clippy`.
-
-## Issue Templates
-
-Use the templates for bugs/features.
+## Suggesting Enhancements
+Use the feature request template in .github/ISSUE_TEMPLATE/feature_request.md.

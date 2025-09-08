@@ -1,0 +1,61 @@
+---
+name: Bug report
+description: File a bug report
+title: '[Bug]'
+labels: bug
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+    validations:
+      required: false
+---
+
+---
+name: Feature request
+description: Suggest an idea for this project
+title: '[Feature]'
+labels: enhancement
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Brief description of the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this important?
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Detailed design
+      description: Any design details?
+    validations:
+      required: false
+---

@@ -40,15 +40,10 @@ pub mod mbus_device_manager;
 pub mod payload;
 pub mod wmbus;
 
-pub use error::MBusError;
-pub use logging::{init_logger, log_debug, log_error, log_info, log_warn};
 pub use mbus::{MBusFrame, MBusFrameType};
 pub use mbus::serial::MBusDeviceHandle;
 pub use mbus_device_manager::MBusDeviceManager;
-pub use payload::{
-    mbus_data_record_decode, normalize_vib, MBusRecord, MBusRecordValue,
-};
-pub use wmbus::WMBusFrame;
+pub use payload::{mbus_data_record_decode, normalize_vib, MBusRecord, MBusRecordValue};
 
 /// Connect to M-Bus device (stub).
 pub async fn connect(_port: &str) -> Result<MBusDeviceHandle, MBusError> {
