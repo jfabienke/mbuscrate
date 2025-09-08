@@ -104,33 +104,40 @@ Focus: Add advanced features for usability and performance.
 Focus: Polish for production and community.
 
 ### Tasks
-- [ ] **Audits/Reviews**
-  - [ ] Run `cargo-audit`, `clippy`, `rustfmt`
-  - [ ] Perform external code review or security audit
-  - [ ] Fix all lints and format issues
-  - [ ] Set up pre-commit hooks for `cargo fmt --check` and `clippy`
-  - [ ] Run `cargo udeps` for unused dependencies
-  - [ ] Use selective `pub use` in `lib.rs` for cleaner API
-- [ ] **CI/CD**
-  - [ ] Set up GitHub Actions for tests, coverage, releases
-  - [ ] Add matrix for OS/architecture testing
-  - [ ] Automate publishing on tag
-  - [ ] Integrate configurable logging levels in binary
-- [ ] **Publishing**
-  - [ ] Bump version to 1.0.0
-  - [ ] Publish to crates.io
-  - [ ] Create examples repository or demo app
-  - [ ] Add an `examples/` crate for advanced usage demos
-- [ ] **Maintenance**
-  - [ ] Add CONTRIBUTING.md and issue templates
-  - [ ] Set up code of conduct and license checks
-  - [ ] Monitor for bugs via GitHub issues
-  - [ ] Add protocol diagrams to `docs/design.md`
+- [x] **Audits/Reviews**
+  - [x] Run `cargo-audit`, `clippy`, `rustfmt`
+  - [x] Perform external code review or security audit
+  - [x] Fix all lints and format issues
+  - [x] Set up pre-commit hooks for `cargo fmt --check` and `clippy`
+  - [x] Run `cargo udeps` for unused dependencies
+  - [x] Use selective `pub use` in `lib.rs` for cleaner API
+- [x] **CI/CD**
+  - [x] Set up GitHub Actions for tests, coverage, releases
+  - [x] Add matrix for OS/architecture testing
+  - [x] Automate publishing on tag
+  - [x] Integrate configurable logging levels in binary
+- [x] **Publishing**
+  - [x] Bump version to 1.0.0
+  - [x] Publish to crates.io
+  - [x] Create examples repository or demo app
+  - [x] Add an `examples/` crate for advanced usage demos
+- [x] **Maintenance**
+  - [x] Add CONTRIBUTING.md and issue templates
+  - [x] Set up code of conduct and license checks
+  - [x] Monitor for bugs via GitHub issues
+  - [x] Add protocol diagrams to `docs/design.md`
 
 ### Metrics
-- [ ] Crate published on crates.io
-- [ ] CI passing on all targets
-- [ ] >90% coverage
+- [x] Crate published on crates.io
+- [x] CI passing on all targets
+- [x] >90% coverage
+
+## Overall Notes
+- **Dependencies**: Update crates (nom, tokio) regularly; test compatibility. Pin versions to avoid breakage (e.g., `tokio = \"1.0\"`).
+- **Risks**: Hardware access limitations; resolve spec ambiguities by referencing EN 13757.
+- **Tracking**: Update checkboxes as tasks complete. Reassess timelines based on progress.
+- **Resources**: Use libmbus C code as reference; leverage tools like `cargo-fuzz`, `criterion`.
+- **Additional**: Ensure thread-safety in `mbus_device_manager.rs` with mutexes if needed. Add configurable timeouts/keys in `handle.rs`.
 
 ## Overall Notes
 - **Dependencies**: Update crates (nom, tokio) regularly; test compatibility. Pin versions to avoid breakage (e.g., `tokio = \"1.0\"`).
