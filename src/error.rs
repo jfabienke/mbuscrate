@@ -44,8 +44,8 @@ pub enum MBusError {
     NomError(String),
 
     /// Indicates a device discovery error.
-    #[error("Device discovery error")]
-    DeviceDiscoveryError,
+    #[error("Device discovery error: {0}")]
+    DeviceDiscoveryError(String),
 
     /// Indicates a checksum mismatch.
     #[error("Invalid checksum: expected {expected}, calculated {calculated}")]
@@ -62,4 +62,14 @@ pub enum MBusError {
     /// Invalid manufacturer ID value.
     #[error("Invalid manufacturer id")]
     InvalidManufacturerId,
+
+    /// Wireless M-Bus (wM-Bus) related error
+    #[error("Wireless M-Bus error: {0}")]
+    WMBusError(String),
+}
+
+impl From<crate::wmbus::handle::WMBusError> for MBusError {
+    fn from(err: crate::wmbus::handle::WMBusError) -> Self {
+        MBusError::WMBusError(format!("{}", err))
+    }
 }

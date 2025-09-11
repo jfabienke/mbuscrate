@@ -1,0 +1,33 @@
+# Cargo configuration for cross-compilation targets
+
+[target.aarch64-unknown-linux-gnu]
+# Raspberry Pi 4 (64-bit) / Raspberry Pi 5
+linker = "aarch64-linux-gnu-gcc"
+
+[target.armv7-unknown-linux-gnueabihf]  
+# Raspberry Pi 4 (32-bit) / Raspberry Pi 3/2/Zero
+linker = "arm-linux-gnueabihf-gcc"
+
+[target.arm-unknown-linux-gnueabihf]
+# Raspberry Pi 1/Zero (original ARM11)
+linker = "arm-linux-gnueabihf-gcc"
+
+# Build optimizations for embedded targets
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+
+# Raspberry Pi specific features
+[features]
+default = []
+raspberry-pi = ["rppal"]
+raspberry-pi-4 = ["raspberry-pi"]
+raspberry-pi-5 = ["raspberry-pi"] 
+gpio-interrupt = ["raspberry-pi"]
+hardware-spi = ["raspberry-pi"]

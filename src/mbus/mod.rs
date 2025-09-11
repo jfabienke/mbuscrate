@@ -3,10 +3,17 @@
 
 pub mod frame;
 pub mod mbus_protocol;
+pub mod secondary_addressing;
 pub mod serial;
+
+#[cfg(test)]
+pub mod serial_mock;
+#[cfg(test)]
+pub mod serial_testable;
 
 pub use frame::*;
 pub use mbus_protocol::*;
+pub use secondary_addressing::*;
 pub use serial::*;
 
 /// Represents an M-Bus frame.

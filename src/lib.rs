@@ -38,42 +38,90 @@ pub mod logging;
 pub mod mbus;
 pub mod mbus_device_manager;
 pub mod payload;
+pub mod util;
 pub mod wmbus;
 
 pub use crate::error::MBusError;
 pub use crate::logging::{init_logger, log_info};
 
-pub use mbus::{MBusFrame, MBusFrameType};
 pub use mbus::serial::MBusDeviceHandle;
+pub use mbus::{MBusFrame, MBusFrameType};
 pub use mbus_device_manager::MBusDeviceManager;
 pub use payload::{mbus_data_record_decode, normalize_vib, MBusRecord, MBusRecordValue};
 
-/// Connect to M-Bus device (stub).
-pub async fn connect(_port: &str) -> Result<MBusDeviceHandle, MBusError> {
-    Err(MBusError::Other("Not implemented".to_string()))
+/// Connect to M-Bus device via serial port.
+/// 
+/// # Arguments
+/// * `port` - Serial port path (e.g., "/dev/ttyUSB0" on Linux, "COM3" on Windows)
+/// 
+/// # Returns
+/// * `Ok(MBusDeviceHandle)` - Connected device handle for communication
+/// * `Err(MBusError)` - Connection failed
+pub async fn connect(port: &str) -> Result<MBusDeviceHandle, MBusError> {
+    MBusDeviceHandle::connect(port).await
 }
 
-/// Disconnect from M-Bus device (stub).
-pub async fn disconnect(_handle: &mut MBusDeviceHandle) -> Result<(), MBusError> {
-    Err(MBusError::Other("Not implemented".to_string()))
+/// Disconnect from M-Bus device.
+/// 
+/// # Arguments
+/// * `handle` - Device handle to disconnect
+/// 
+/// # Returns
+/// * `Ok(())` - Successfully disconnected
+/// * `Err(MBusError)` - Disconnection failed
+pub async fn disconnect(handle: &mut MBusDeviceHandle) -> Result<(), MBusError> {
+    handle.disconnect().await
 }
 
-/// Receive frame (stub).
-pub async fn recv_frame(_handle: &mut MBusDeviceHandle) -> Result<MBusFrame, MBusError> {
-    Err(MBusError::Other("Not implemented".to_string()))
+/// Receive a frame from the M-Bus device.
+/// 
+/// # Arguments
+/// * `handle` - Device handle to receive from
+/// 
+/// # Returns
+/// * `Ok(MBusFrame)` - Received and parsed frame
+/// * `Err(MBusError)` - Reception or parsing failed
+pub async fn recv_frame(handle: &mut MBusDeviceHandle) -> Result<MBusFrame, MBusError> {
+    handle.recv_frame().await
 }
 
-/// Scan devices (stub).
-pub async fn scan_devices(_handle: &mut MBusDeviceHandle) -> Result<Vec<String>, MBusError> {
-    Err(MBusError::Other("Not implemented".to_string()))
+/// Scan for available M-Bus devices on the network.
+/// 
+/// # Arguments
+/// * `handle` - Device handle to use for scanning
+/// 
+/// # Returns
+/// * `Ok(Vec<String>)` - List of discovered device addresses
+/// * `Err(MBusError)` - Scanning failed
+pub async fn scan_devices(handle: &mut MBusDeviceHandle) -> Result<Vec<String>, MBusError> {
+    handle.scan_devices().await
 }
 
-/// Send frame (stub).
-pub async fn send_frame(_handle: &mut MBusDeviceHandle, _frame: &MBusFrame) -> Result<(), MBusError> {
-    Err(MBusError::Other("Not implemented".to_string()))
+/// Send a frame to the M-Bus device.
+/// 
+/// # Arguments
+/// * `handle` - Device handle to send through
+/// * `frame` - Frame to send
+/// 
+/// # Returns
+/// * `Ok(())` - Frame sent successfully
+/// * `Err(MBusError)` - Send failed
+pub async fn send_frame(
+    handle: &mut MBusDeviceHandle,
+    frame: &MBusFrame,
+) -> Result<(), MBusError> {
+    handle.send_frame(frame).await
 }
 
-/// Send request (stub).
-pub async fn send_request(_handle: &mut MBusDeviceHandle, _address: u8) -> Result<Vec<MBusRecord>, MBusError> {
-    Err(MBusError::Other("Not implemented".to_string()))
+/// Send a data request to a specific M-Bus device and retrieve records.
+/// 
+/// # Arguments
+/// * `handle` - Device handle to communicate through
+/// * `address` - Target device address (1-250)
+/// 
+/// # Returns
+/// * `Ok(Vec<MBusRecord>)` - Parsed data records from the device
+/// * `Err(MBusError)` - Request failed
+pub async fn send_request(handle: &mut MBusDeviceHandle, address: u8) -> Result<Vec<MBusRecord>, MBusError> {
+    handle.send_request(address).await
 }

@@ -54,7 +54,7 @@ pub const MBUS_CONTROL_MASK_SND_NKE: u8 = 0x40;
 pub const MBUS_CONTROL_MASK_SND_UD: u8 = 0x53; // includes DIR M2S
 pub const MBUS_CONTROL_MASK_REQ_UD2: u8 = 0x5B; // includes DIR M2S
 pub const MBUS_CONTROL_MASK_REQ_UD1: u8 = 0x5A; // includes DIR M2S
-pub const MBUS_CONTROL_MASK_RSP_UD: u8 = 0x08;  // S2M response
+pub const MBUS_CONTROL_MASK_RSP_UD: u8 = 0x08; // S2M response
 
 // Control flag bits
 pub const MBUS_CONTROL_MASK_FCB: u8 = 0x20;

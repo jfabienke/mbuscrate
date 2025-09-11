@@ -56,9 +56,10 @@ fn test_vife_parsing_edge_cases() {
     // Test primary VIF parsing (no VIFE)
     use mbus_rs::payload::vif::parse_vib;
     let mock_input_fd = [0x00]; // Primary VIF 0x00 (Energy Wh)
-    let (_, vib_fd) = parse_vib(&mock_input_fd).expect("Parse should succeed for valid primary VIF");
+    let (_, vib_fd) =
+        parse_vib(&mock_input_fd).expect("Parse should succeed for valid primary VIF");
     assert_eq!(vib_fd.len(), 1);
-    assert_eq!(vib_fd[0].vif, 0x00 as u16);
+    assert_eq!(vib_fd[0].vif, 0x00_u16);
     assert_eq!(vib_fd[0].quantity, "Energy");
 
     // Edge case: Invalid primary VIF (e.g., extension code as primary, which should fail lookup)

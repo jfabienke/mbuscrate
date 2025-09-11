@@ -61,17 +61,12 @@
 //!
 //! Note: Replace example byte slices and frame values with actual data as needed.
 
-use crate::error::MBusError;
 use crate::constants::{
     MBUS_ADDRESS_NETWORK_LAYER, MBUS_CONTROL_INFO_SELECT_SLAVE, MBUS_CONTROL_MASK_FCB,
     MBUS_CONTROL_MASK_SND_UD,
 };
-use nom::{
-    bytes::complete::take_while_m_n,
-    number::complete::be_u8,
-    IResult,
-    Err as NomErr,
-};
+use crate::error::MBusError;
+use nom::{bytes::complete::take_while_m_n, number::complete::be_u8, Err as NomErr, IResult};
 
 /// Represents an M-Bus frame.
 #[derive(Debug, PartialEq, Eq)]
@@ -163,6 +158,14 @@ pub fn parse_frame(input: &[u8]) -> IResult<&[u8], MBusFrame> {
 fn parse_short_frame(input: &[u8]) -> IResult<&[u8], (u8, Vec<u8>, u8)> {
     // Short frames do not carry control information or data; next byte is checksum.
     let (input, checksum) = be_u8(input)?;
+    // Parse and validate stop byte (0x16)
+    let (input, stop) = be_u8(input)?;
+    if stop != 0x16 {
+        return Err(NomErr::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
     Ok((input, (0, Vec::new(), checksum)))
 }
 
@@ -175,6 +178,14 @@ fn parse_control_or_long_frame_after_header(
     let payload_len = length1.saturating_sub(3);
     let (input, data) = take_while_m_n(payload_len, payload_len, |_| true)(input)?;
     let (input, checksum) = be_u8(input)?;
+    // Parse and validate stop byte (0x16)
+    let (input, stop) = be_u8(input)?;
+    if stop != 0x16 {
+        return Err(NomErr::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
     Ok((input, (control_information, data.to_vec(), checksum)))
 }
 
@@ -206,8 +217,11 @@ pub fn pack_frame(frame: &MBusFrame) -> Vec<u8> {
 /// Packs a control or long M-Bus frame into a byte vector.
 fn pack_control_or_long_frame(data: &mut Vec<u8>, frame: &MBusFrame) {
     data.push(0x68);
-    data.push(frame.data.len() as u8 + 3);
-    data.push(frame.data.len() as u8 + 3);
+    // Length field is control + address + CI + data, max 255
+    // Maximum data length is 252 (255 - 3 for control/address/CI)
+    let length = ((frame.data.len() + 3).min(255)) as u8;
+    data.push(length);
+    data.push(length);
     data.push(0x68);
     data.push(frame.control);
     data.push(frame.address);
@@ -286,7 +300,7 @@ fn parse_frame_type(input: &[u8]) -> IResult<&[u8], (MBusFrameType, Option<u8>)>
 
 /// Packs a select frame for secondary address selection.
 pub fn pack_select_frame(frame: &mut MBusFrame, mask: &str) -> Result<(), MBusError> {
-    // Pack a 16-hex-digit secondary address mask into 8 bytes, per libmbus.
+    // Pack a 16-hex-digit secondary address mask into 8 bytes following EN 13757-3 specification.
     let cleaned: String = mask.chars().filter(|c| !c.is_whitespace()).collect();
     if cleaned.len() != 16 || !cleaned.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(crate::error::MBusError::InvalidHexString);

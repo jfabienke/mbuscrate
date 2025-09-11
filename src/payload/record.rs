@@ -1,7 +1,7 @@
 use crate::constants::*;
 use crate::error::MBusError;
 use crate::payload::data_encoding::mbus_data_str_decode;
-use nom::{bytes::complete::{tag, take}, combinator::map, multi::many0, number::complete::be_u8, IResult, sequence::tuple};
+use nom::{bytes::complete::take, number::complete::be_u8, IResult};
 use std::time::SystemTime;
 
 /// Represents an M-Bus data record.
@@ -189,17 +189,26 @@ const FIXED_MEDIUM_UNITS: &[(u8, &str, f64, &str)] = &[
 /// Parses a fixed-length M-Bus data record.
 pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
     if input.len() < crate::constants::MBUS_DATA_FIXED_LENGTH {
-        return Err(MBusError::FrameParseError("Fixed data too short".to_string()));
+        return Err(MBusError::FrameParseError(
+            "Fixed data too short".to_string(),
+        ));
     }
 
     let device_id_bcd = match crate::payload::data_encoding::decode_bcd(&input[0..4]) {
         Ok((_, val)) => val,
-        Err(_) => return Err(MBusError::FrameParseError("Invalid BCD device ID".to_string())),
+        Err(_) => {
+            return Err(MBusError::FrameParseError(
+                "Invalid BCD device ID".to_string(),
+            ))
+        }
     };
-    let _manufacturer = match crate::payload::data_encoding::decode_int(&input[4..6], 2) {
-        Ok((_, val)) => val,
-        Err(_) => return Err(MBusError::FrameParseError("Invalid manufacturer".to_string())),
-    };
+    let manufacturer_val = u16::from_be_bytes([input[4], input[5]]);
+    if !(0x0421..=0x6B5A).contains(&manufacturer_val) {
+        return Err(MBusError::FrameParseError(
+            "Invalid manufacturer".to_string(),
+        ));
+    }
+    let _manufacturer = manufacturer_val as i32;
     let _version = input[6];
     let medium = input[7];
     let _access_number = input[8];
@@ -208,15 +217,25 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
         Ok((_, val)) => val,
         Err(_) => return Err(MBusError::FrameParseError("Invalid signature".to_string())),
     };
-    let counter1 = if (status & crate::constants::MBUS_DATA_FIXED_STATUS_FORMAT_MASK) == crate::constants::MBUS_DATA_FIXED_STATUS_FORMAT_BCD {
+    let counter1 = if (status & crate::constants::MBUS_DATA_FIXED_STATUS_FORMAT_MASK)
+        == crate::constants::MBUS_DATA_FIXED_STATUS_FORMAT_BCD
+    {
         match crate::payload::data_encoding::decode_bcd(&input[12..16]) {
             Ok((_, val)) => val as i32,
-            Err(_) => return Err(MBusError::FrameParseError("Invalid BCD counter".to_string())),
+            Err(_) => {
+                return Err(MBusError::FrameParseError(
+                    "Invalid BCD counter".to_string(),
+                ))
+            }
         }
     } else {
         match crate::payload::data_encoding::decode_int(&input[12..16], 4) {
             Ok((_, val)) => val,
-            Err(_) => return Err(MBusError::FrameParseError("Invalid int counter".to_string())),
+            Err(_) => {
+                return Err(MBusError::FrameParseError(
+                    "Invalid int counter".to_string(),
+                ))
+            }
         }
     };
     let counter2 = 0; // Assuming no second counter for simplicity
@@ -231,9 +250,9 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
         device: -1,
         is_numeric: true,
         value: MBusRecordValue::Numeric(value1 + value2),
-        unit: format!("{}, {}", unit1, unit2),
+        unit: format!("{unit1}, {unit2}"),
         function_medium: "Fixed".to_string(),
-        quantity: format!("{}, {}", quantity1, quantity2),
+        quantity: format!("{quantity1}, {quantity2}"),
         drh: MBusDataRecordHeader {
             dib: MBusDataInformationBlock {
                 dif: 0,
@@ -261,20 +280,26 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
 
 /// Parses a variable-length M-Bus data record.
 pub fn parse_variable_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
-    let (mut remaining, mut record) = parse_variable_record_inner(input).map_err(|e| MBusError::FrameParseError(format!("Nom error: {:?}", e)))?;
+    let (mut remaining, mut record) = parse_variable_record_inner(input)
+        .map_err(|e| MBusError::FrameParseError(format!("Nom error: {e:?}")))?;
 
-    // re-calculate data length, if of variable length type
-    if (record.drh.dib.dif & MBUS_DATA_RECORD_DIF_MASK_DATA) == 0x0D {
-        record.data_len = parse_variable_data_length(*remaining.get(0).unwrap_or(&0))?;
-        remaining = &remaining[1..];
-    }
+    // For manufacturer-specific or more-records-follow, data is already populated
+    if record.drh.dib.dif != MBUS_DIB_DIF_MANUFACTURER_SPECIFIC
+        && record.drh.dib.dif != MBUS_DIB_DIF_MORE_RECORDS_FOLLOW
+    {
+        // re-calculate data length, if of variable length type
+        if (record.drh.dib.dif & MBUS_DATA_RECORD_DIF_MASK_DATA) == 0x0D {
+            record.data_len = parse_variable_data_length(*remaining.first().unwrap_or(&0))?;
+            remaining = &remaining[1..];
+        }
 
-    if record.data_len > remaining.len() {
-        return Err(MBusError::PrematureEndAtData);
-    }
+        if record.data_len > remaining.len() {
+            return Err(MBusError::PrematureEndAtData);
+        }
 
-    for j in 0..record.data_len {
-        record.data[j] = *remaining.get(j).unwrap_or(&0);
+        for j in 0..record.data_len {
+            record.data[j] = *remaining.get(j).unwrap_or(&0);
+        }
     }
 
     Ok(record)
@@ -309,7 +334,9 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
         more_records_follow: 0,
     };
 
-    let (i, _) = map(tag(&[MBUS_DIB_DIF_IDLE_FILLER]), |_| ())(input)?;
+    // Skip idle filler bytes if present (they are optional)
+    let i = input;
+    let (i, _) = nom::bytes::complete::take_while(|b| b == MBUS_DIB_DIF_IDLE_FILLER)(i)?;
 
     let (i, dif) = be_u8(i)?;
     record.drh.dib.dif = dif;
@@ -317,32 +344,41 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
     if record.drh.dib.dif == MBUS_DIB_DIF_MANUFACTURER_SPECIFIC
         || record.drh.dib.dif == MBUS_DIB_DIF_MORE_RECORDS_FOLLOW
     {
-        if (record.drh.dib.dif & 0xFF) == MBUS_DIB_DIF_MORE_RECORDS_FOLLOW {
+        if record.drh.dib.dif == MBUS_DIB_DIF_MORE_RECORDS_FOLLOW {
             record.more_records_follow = 1;
         }
 
-        let (i2, data) = take(i.len())(i)?;
-        record.data_len = data.len();
-        record.data[..data.len()].copy_from_slice(data);
+        // For manufacturer-specific or more-records-follow,
+        // all remaining data belongs to this record
+        record.data_len = i.len();
+        record.data[..i.len()].copy_from_slice(i);
 
         mbus_data_record_append(&mut record);
-        return Ok((i2, record));
+        return Ok((&[], record));
     }
 
     record.data_len = mbus_dif_datalength_lookup(record.drh.dib.dif);
 
-    let (i, ndife) = map(
-        many0(map(
-            tuple((tag(&[MBUS_DIB_DIF_EXTENSION_BIT]), be_u8)),
-            |(_, dife)| dife,
-        )),
-        |dife| dife.len(),
-    )(i)?;
-    record.drh.dib.ndife = ndife;
-
-    for j in 0..record.drh.dib.ndife {
-        record.drh.dib.dife[j] = *i.get(j + 1).unwrap_or(&0);
+    // Parse DIF extensions if DIF has extension bit set
+    let mut i_temp = i;
+    if (record.drh.dib.dif & MBUS_DIB_DIF_EXTENSION_BIT) != 0 {
+        let mut dife_count = 0;
+        loop {
+            if i_temp.is_empty() || dife_count >= 10 {
+                break;
+            }
+            let dife = i_temp[0];
+            record.drh.dib.dife[dife_count] = dife;
+            dife_count += 1;
+            i_temp = &i_temp[1..];
+            // Continue if this DIFE also has extension bit
+            if (dife & MBUS_DIB_DIF_EXTENSION_BIT) == 0 {
+                break;
+            }
+        }
+        record.drh.dib.ndife = dife_count;
     }
+    let i = i_temp;
 
     let (i, vif) = be_u8(i)?;
     record.drh.vib.vif = vif;
@@ -350,25 +386,36 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
     if (record.drh.vib.vif & MBUS_DIB_VIF_WITHOUT_EXTENSION) == 0x7C {
         let (i, var_vif_len) = be_u8(i)?;
         if var_vif_len > MBUS_VALUE_INFO_BLOCK_CUSTOM_VIF_SIZE {
-            return Err(nom::Err::Error(nom::error::Error::new(i, nom::error::ErrorKind::Tag)));
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Tag,
+            )));
         }
 
         let (_i, custom_vif) = take(var_vif_len)(i)?;
         mbus_data_str_decode(&mut record.drh.vib.custom_vif, custom_vif, custom_vif.len());
     }
 
-    let (i, nvife) = map(
-        many0(map(
-            tuple((tag(&[MBUS_DIB_VIF_EXTENSION_BIT]), be_u8)),
-            |(_, vife)| vife,
-        )),
-        |vife| vife.len(),
-    )(i)?;
-    record.drh.vib.nvife = nvife;
-
-    for j in 0..record.drh.vib.nvife {
-        record.drh.vib.vife[j] = *i.get(j + 1).unwrap_or(&0);
+    // Parse VIF extensions if VIF has extension bit set
+    let mut i_temp = i;
+    if (record.drh.vib.vif & MBUS_DIB_VIF_EXTENSION_BIT) != 0 {
+        let mut vife_count = 0;
+        loop {
+            if i_temp.is_empty() || vife_count >= 10 {
+                break;
+            }
+            let vife = i_temp[0];
+            record.drh.vib.vife[vife_count] = vife;
+            vife_count += 1;
+            i_temp = &i_temp[1..];
+            // Continue if this VIFE also has extension bit
+            if (vife & MBUS_DIB_VIF_EXTENSION_BIT) == 0 {
+                break;
+            }
+        }
+        record.drh.vib.nvife = vife_count;
     }
+    let i = i_temp;
 
     Ok((i, record))
 }
@@ -385,16 +432,19 @@ fn normalize_fixed(
     let (unit2, value2, quantity2) = normalize_fixed_unit(medium_unit2, counter2 as f64)?;
 
     Ok((
-        format!("{}, {}", unit1, unit2),
+        format!("{unit1}, {unit2}"),
         value1 + value2,
-        format!("{}, {}", quantity1, quantity2),
+        format!("{quantity1}, {quantity2}"),
     ))
 }
 
 /// Normalizes a single fixed-length M-Bus data record unit.
 #[allow(dead_code)]
 fn normalize_fixed_unit(medium_unit: u8, value: f64) -> Result<(String, f64, String), MBusError> {
-    if let Some((_, unit, exponent, quantity)) = FIXED_MEDIUM_UNITS.iter().find(|(code, _, _, _)| *code == medium_unit) {
+    if let Some((_, unit, exponent, quantity)) = FIXED_MEDIUM_UNITS
+        .iter()
+        .find(|(code, _, _, _)| *code == medium_unit)
+    {
         Ok((unit.to_string(), value * exponent, quantity.to_string()))
     } else {
         Err(MBusError::UnknownVif(medium_unit))
@@ -424,28 +474,215 @@ pub fn mbus_dif_datalength_lookup(dif: u8) -> usize {
     }
 }
 
-/// Appends a data record to the list.
 pub fn mbus_data_record_append(record: &mut MBusRecord) {
     // For manufacturer-specific or more records follow, set appropriate fields
     if record.drh.dib.dif == MBUS_DIB_DIF_MANUFACTURER_SPECIFIC {
         record.quantity = "Manufacturer specific".to_string();
     }
+    if record.drh.dib.dif == MBUS_DIB_DIF_MORE_RECORDS_FOLLOW {
+        record.more_records_follow = 1;
+    }
     // Additional logic can be added here as needed
 }
 
-/// Parses the variable data length from the input byte.
 fn parse_variable_data_length(input: u8) -> Result<usize, MBusError> {
     if input <= 0xBF {
         Ok(input as usize)
-    } else if input >= 0xC0 && input <= 0xCF {
-        Ok(((input - 0xC0) * 2) as usize)
-    } else if input >= 0xD0 && input <= 0xDF {
-        Ok(((input - 0xD0) * 2) as usize)
-    } else if input >= 0xE0 && input <= 0xEF {
-        Ok((input - 0xE0) as usize)
-    } else if input >= 0xF0 && input <= 0xFA {
-        Ok((input - 0xF0) as usize)
+    } else if (0xC0..=0xCF).contains(&input) {
+        Ok((input - 0xC0) as usize * 2)
+    } else if (0xD0..=0xDF).contains(&input) {
+        Ok(((input - 0xD0) as usize * 2) + 1)
+    } else if (0xE0..=0xEF).contains(&input) {
+        Ok(((input - 0xE0) as usize) + 64)
+    } else if (0xF0..=0xFA).contains(&input) {
+        Ok(((input - 0xF0) as usize) + 1120)
     } else {
         Err(MBusError::UnknownDif(input))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::MBusError;
+    use std::time::SystemTime;
+
+    #[test]
+    fn test_mbus_dif_datalength_lookup_all_cases() {
+        // Table-driven test for all DIF values
+        let test_cases = vec![
+            (0x00, 0),
+            (0x01, 1),
+            (0x02, 2),
+            (0x03, 3),
+            (0x04, 4),
+            (0x05, 6),
+            (0x06, 8),
+            (0x07, 0), // Special case
+            (0x08, 0), // Special case
+            (0x09, 1),
+            (0x0A, 2),
+            (0x0B, 3),
+            (0x0C, 4),
+            (0x0D, 0), // Variable length
+            (0x0E, 6),
+            (0x0F, 8),
+            (0x10, 0), // Out of range, defaults to 0
+        ];
+        for (dif, expected) in test_cases {
+            assert_eq!(mbus_dif_datalength_lookup(dif), expected);
+        }
+    }
+
+    #[test]
+    fn test_parse_variable_data_length_edge_cases() -> Result<(), MBusError> {
+        // Direct length
+        assert_eq!(parse_variable_data_length(0xBF)?, 191);
+
+        // Even lengths (C0-CF)
+        assert_eq!(parse_variable_data_length(0xC0)?, 0);
+        assert_eq!(parse_variable_data_length(0xCF)?, 30);
+
+        // Odd lengths (D0-DF)
+        assert_eq!(parse_variable_data_length(0xD0)?, 1);
+        assert_eq!(parse_variable_data_length(0xDF)?, 31);
+
+        // Large even (E0-EF)
+        assert_eq!(parse_variable_data_length(0xE0)?, 64);
+        assert_eq!(parse_variable_data_length(0xEF)?, 79);
+
+        // Large odd (F0-FA)
+        assert_eq!(parse_variable_data_length(0xF0)?, 1120);
+        assert_eq!(parse_variable_data_length(0xFA)?, 1130);
+
+        // Invalid
+        assert!(matches!(
+            parse_variable_data_length(0xFB),
+            Err(MBusError::UnknownDif(0xFB))
+        ));
+        assert!(matches!(
+            parse_variable_data_length(0xFF),
+            Err(MBusError::UnknownDif(0xFF))
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_fixed_unit_all_cases() -> Result<(), MBusError> {
+        // Test all defined units
+        for (code, unit, exponent, quantity) in FIXED_MEDIUM_UNITS.iter() {
+            let result = normalize_fixed_unit(*code, 100.0)?;
+            assert_eq!(result.0, unit.to_string());
+            assert_eq!(result.1, 100.0 * *exponent);
+            assert_eq!(result.2, quantity.to_string());
+        }
+
+        // Test unknown unit
+        assert!(matches!(
+            normalize_fixed_unit(0xFF, 100.0),
+            Err(MBusError::UnknownVif(0xFF))
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_fixed_record_invalid_cases() {
+        // Too short input
+        let short_input = [0u8; 11];
+        assert!(matches!(
+            parse_fixed_record(&short_input),
+            Err(MBusError::FrameParseError(_))
+        ));
+
+        // Invalid BCD device ID
+        let invalid_bcd = [
+            0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert!(matches!(
+            parse_fixed_record(&invalid_bcd),
+            Err(MBusError::FrameParseError(_))
+        ));
+
+        // Invalid manufacturer
+        let invalid_man = [
+            0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert!(matches!(
+            parse_fixed_record(&invalid_man),
+            Err(MBusError::FrameParseError(_))
+        ));
+
+        // Invalid signature
+        let invalid_sig = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+        assert!(matches!(
+            parse_fixed_record(&invalid_sig),
+            Err(MBusError::FrameParseError(_))
+        ));
+
+        // Invalid BCD counter
+        let invalid_bcd_counter = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0xFF, 0xFF,
+            0xFF, 0xFF,
+        ]; // Status for BCD
+        assert!(matches!(
+            parse_fixed_record(&invalid_bcd_counter),
+            Err(MBusError::FrameParseError(_))
+        ));
+
+        // Invalid int counter
+        let invalid_int_counter = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
+            0xFF, 0xFF,
+        ]; // Status for int
+        assert!(matches!(
+            parse_fixed_record(&invalid_int_counter),
+            Err(MBusError::FrameParseError(_))
+        ));
+    }
+
+    #[test]
+    fn test_mbus_data_record_append() {
+        let mut record = MBusRecord {
+            // Minimal record
+            timestamp: SystemTime::now(),
+            storage_number: 0,
+            tariff: -1,
+            device: -1,
+            is_numeric: true,
+            value: MBusRecordValue::Numeric(0.0),
+            unit: String::new(),
+            function_medium: String::new(),
+            quantity: String::new(),
+            drh: MBusDataRecordHeader {
+                dib: MBusDataInformationBlock {
+                    dif: MBUS_DIB_DIF_MANUFACTURER_SPECIFIC,
+                    ndife: 0,
+                    dife: [0; 10],
+                },
+                vib: MBusValueInformationBlock {
+                    vif: 0,
+                    nvife: 0,
+                    vife: [0; 10],
+                    custom_vif: String::new(),
+                },
+            },
+            data_len: 0,
+            data: [0; 256],
+            more_records_follow: 0,
+        };
+        mbus_data_record_append(&mut record);
+        assert_eq!(record.quantity, "Manufacturer specific");
+
+        // Test more records follow
+        record.drh.dib.dif = MBUS_DIB_DIF_MORE_RECORDS_FOLLOW;
+        mbus_data_record_append(&mut record);
+        assert_eq!(record.more_records_follow, 1);
     }
 }

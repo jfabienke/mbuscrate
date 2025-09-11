@@ -47,7 +47,7 @@ async fn main() -> Result<(), MBusError> {
         Commands::ScanDevices => {
             let addresses = manager.scan_devices().await?;
             for addr in addresses {
-                log_info(&format!("Device: {}", addr));
+                log_info(&format!("Device: {addr}"));
             }
         }
         Commands::Disconnect => {

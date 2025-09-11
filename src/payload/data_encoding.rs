@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Decodes a string from the input data.
 pub fn mbus_data_str_decode(dst: &mut String, src: &[u8], len: usize) {
     dst.clear();
-    for i in (0..len).rev() {
-        dst.push(src[i] as char);
+    for item in src.iter().take(len).rev() {
+        dst.push(*item as char);
     }
 }
 
@@ -85,8 +85,8 @@ pub fn decode_mbus_time(input: &[u8]) -> Result<SystemTime, MBusTimeDecodeError>
 pub fn mbus_data_bin_decode(dst: &mut String, src: &[u8], len: usize, max_len: usize) {
     dst.clear();
     let mut pos = 0;
-    for i in 0..len {
-        let hex = format!("{:02X} ", src[i]);
+    for item in src.iter().take(len) {
+        let hex = format!("{:02X} ", *item);
         if pos + hex.len() > max_len {
             break;
         }
@@ -100,31 +100,49 @@ pub fn mbus_data_bin_decode(dst: &mut String, src: &[u8], len: usize, max_len: u
 
 /// Decodes a binary-coded decimal (BCD) value to a 32-bit unsigned integer.
 pub fn decode_bcd(input: &[u8]) -> IResult<&[u8], u32> {
-    map(take(4usize), |bytes: &[u8]| {
-        let mut value = 0;
-        let mut shift = 0;
+    let (input, bytes) = take(4usize)(input)?;
 
-        for byte in bytes.iter().rev() {
-            value += (byte & 0xF) as u32 * 10_u32.pow(shift / 4);
-            shift += 4;
+    for byte in bytes {
+        if (byte & 0xF) > 9 || ((byte >> 4) & 0xF) > 9 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
         }
+    }
 
-        value
-    })(input)
+    let mut value = 0u32;
+    let mut multiplier = 1u32;
+    // Process bytes in forward order (big-endian) to match encode_bcd
+    for &byte in bytes.iter().rev() {
+        // Low nibble is ones digit, high nibble is tens digit in BCD
+        value += (byte as u32 & 0xF) * multiplier;
+        multiplier *= 10;
+        value += ((byte >> 4) as u32 & 0xF) * multiplier;
+        multiplier *= 10;
+    }
+
+    Ok((input, value))
 }
 
 /// Encodes a 32-bit unsigned integer to a binary-coded decimal (BCD) representation.
+/// Returns bytes compatible with decode_bcd's little-endian processing.
 pub fn encode_bcd(mut input: u32) -> Vec<u8> {
-    let mut bcd = 0;
-    let mut shift = 0;
+    let mut result = vec![0u8; 4];
 
-    while input > 0 {
-        bcd |= (input % 10) << shift;
-        input /= 10;
-        shift += 4;
+    // Extract each pair of decimal digits and store in BCD format
+    for idx in (0..4).rev() {
+        if input > 0 {
+            let ones = (input % 10) as u8;
+            input /= 10;
+            let tens = (input % 10) as u8;
+            input /= 10;
+
+            result[idx] = (tens << 4) | ones;
+        }
     }
 
-    bcd.to_be_bytes().to_vec()
+    result
 }
 
 /// Decodes an integer value from the input data.
@@ -134,7 +152,10 @@ pub fn decode_int(input: &[u8], size: usize) -> IResult<&[u8], i32> {
         2 => map(be_u16, |v| v as i32)(input),
         4 => map(be_u32, |v| v as i32)(input),
         8 => map(be_u64, |v| v as i32)(input),
-        _ => Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        ))),
     }
 }
 
@@ -157,15 +178,11 @@ pub fn decode_long_long(input: &[u8], size: usize) -> IResult<&[u8], i64> {
 }
 pub fn decode_bcd_hex(input: &[u8]) -> IResult<&[u8], u32> {
     map(take(4usize), |bytes: &[u8]| {
-        let mut value = 0;
-        let mut shift = 0;
-
-        for byte in bytes.iter().rev() {
-            value += ((byte & 0xF) as u32) * 10_u32.pow(shift / 4);
-            value += (((byte >> 4) & 0xF) as u32) * 10_u32.pow((shift + 4) / 4);
-            shift += 8;
+        // Interpret as little-endian hex value
+        let mut value = 0u32;
+        for (i, &byte) in bytes.iter().enumerate() {
+            value |= (byte as u32) << (i * 8);
         }
-
         value
     })(input)
 }
@@ -195,7 +212,7 @@ pub fn encode_int_u64(value: u64, output: &mut [u8]) -> Result<(), MBusIntEncode
             Ok(())
         }
         8 => {
-            output.copy_from_slice(&(value as u64).to_be_bytes());
+            output.copy_from_slice(&value.to_be_bytes());
             Ok(())
         }
         _ => Err(MBusIntEncodeError::InvalidIntegerSize),
@@ -245,7 +262,11 @@ pub fn decode_time(input: &[u8], size: usize) -> IResult<&[u8], SystemTime> {
                 let month = u64::from((bytes[3] & 0x0F) - 1);
                 let year = u64::from(100 + (((bytes[2] & 0xE0) >> 5) | ((bytes[3] & 0xF0) >> 1)));
                 time += Duration::from_secs(
-                    year * 31_536_000 + month * 2_592_000 + day * 86_400 + hour * 3_600 + minute * 60,
+                    year * 31_536_000
+                        + month * 2_592_000
+                        + day * 86_400
+                        + hour * 3_600
+                        + minute * 60,
                 );
             }
             6 => {
@@ -274,7 +295,7 @@ pub fn decode_time(input: &[u8], size: usize) -> IResult<&[u8], SystemTime> {
 
 /// Encodes the manufacturer ID according to the manufacturer's 3-byte ASCII code.
 pub fn mbus_data_manufacturer_encode(manufacturer: &str) -> Result<[u8; 2], MBusError> {
-    if manufacturer.len() < 3 || !manufacturer.chars().all(|c| c.is_ascii_alphabetic()) {
+    if manufacturer.len() != 3 || !manufacturer.chars().all(|c| c.is_ascii_alphabetic()) {
         return Err(MBusError::InvalidManufacturer);
     }
 
@@ -282,7 +303,7 @@ pub fn mbus_data_manufacturer_encode(manufacturer: &str) -> Result<[u8; 2], MBus
         + (((manufacturer.chars().nth(1).unwrap() as u32 - 64) & 0x1F) * 32)
         + ((manufacturer.chars().nth(2).unwrap() as u32 - 64) & 0x1F);
 
-    if !(0x0421 <= id && id <= 0x6B5A) {
+    if !(0x0421..=0x6B5A).contains(&id) {
         return Err(MBusError::InvalidManufacturerId);
     }
 

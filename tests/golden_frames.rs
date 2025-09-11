@@ -28,7 +28,7 @@ fn test_example_data_01() {
             assert_eq!(frame.frame_type, MBusFrameType::Long);
             // Add more checks
         }
-        Err(e) => panic!("Failed to parse: {:?}", e),
+        Err(e) => panic!("Failed to parse: {e:?}"),
     }
 }
 
@@ -41,7 +41,7 @@ fn test_edc() {
             assert_eq!(frame.frame_type, MBusFrameType::Long);
             // Add more assertions based on expected data
         }
-        Err(e) => panic!("Failed to parse: {:?}", e),
+        Err(e) => panic!("Failed to parse: {e:?}"),
     }
 }
 
@@ -54,7 +54,7 @@ fn test_application_busy_error() {
             assert_eq!(frame.control_information, 0x70); // Error general
             assert_eq!(frame.data, vec![0x08]); // Application busy
         }
-        Err(e) => panic!("Failed to parse: {:?}", e),
+        Err(e) => panic!("Failed to parse: {e:?}"),
     }
 }
 
@@ -67,7 +67,7 @@ fn test_efe_engelmann() {
             assert_eq!(frame.frame_type, MBusFrameType::Long);
             // Add more checks as needed
         }
-        Err(e) => panic!("Failed to parse: {:?}", e),
+        Err(e) => panic!("Failed to parse: {e:?}"),
     }
 }
 
@@ -80,6 +80,6 @@ fn test_els_elster() {
             assert_eq!(frame.frame_type, MBusFrameType::Long);
             // Add more checks as needed
         }
-        Err(e) => panic!("Failed to parse: {:?}", e),
+        Err(e) => panic!("Failed to parse: {e:?}"),
     }
 }

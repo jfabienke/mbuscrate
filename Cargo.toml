@@ -8,21 +8,64 @@ repository = "https://github.com/jfabienke/mbus-rs"
 license = "MIT"
 
 [dependencies]
+hex = "0.4"
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
 nom = "7.1"
+proptest = "1.7.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-serial = "5.4"
 bytes = "1.5"
 thiserror = "1.0"
+async-trait = "0.1"
+bitflags = "2.4"
+
+# Enhanced crypto dependencies
+aes = { version = "0.8", optional = true }
+cipher = { version = "0.4", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+
+# Raspberry Pi HAL dependencies (optional)
+rppal = { version = "0.14", optional = true }
+
+# RFM69 driver dependencies (optional)
+crc = { version = "3.0", optional = true }
+
+# Enhanced GPIO and logging dependencies
+tracing = { version = "0.1", optional = true }
+
+# Serialization for cache persistence
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [dev-dependencies]
 criterion = "0.5"
-proptest = "1.7.0"
 tokio-test = "0.4.4"
+tempfile = "3.8"
 
 [[bench]]
 name = "parsing_benchmark"
 harness = false
+
+# Feature flags for platform support
+[features]
+default = []
+
+# Platform support
+raspberry-pi = ["rppal"]
+raspberry-pi-4 = ["raspberry-pi"]
+raspberry-pi-5 = ["raspberry-pi"]
+
+# Hardware features
+gpio-interrupt = ["raspberry-pi"]
+hardware-spi = ["raspberry-pi"]
+rfm69 = ["raspberry-pi", "crc"]
+
+# Enhanced features for robust operation
+crypto = ["dep:aes", "dep:cipher", "dep:aes-gcm"]
+wmbus-crypto = ["crypto"]
+enhanced-gpio = ["raspberry-pi", "dep:tracing"]
+lorawan = []
+tracing = ["dep:tracing"]

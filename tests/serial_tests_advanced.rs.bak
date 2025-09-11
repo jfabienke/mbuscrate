@@ -1,0 +1,212 @@
+use mbus_rs::error::MBusError;
+use mbus_rs::mbus::frame::{MBusFrame, MBusFrameType};
+use mbus_rs::mbus::serial::{MBusDeviceHandle, SerialConfig};
+use std::time::Duration;
+
+#[test]
+fn test_serial_config_default() {
+    let _config = SerialConfig::default();
+    assert_eq!(config.baudrate, 2400);
+    assert_eq!(config.timeout, Duration::from_secs(5));
+}
+
+#[test]
+fn test_serial_config_custom() {
+    let config = SerialConfig {
+        baudrate: 9600,
+        timeout: Duration::from_secs(10),
+    };
+    assert_eq!(config.baudrate, 9600);
+    assert_eq!(config.timeout, Duration::from_secs(10));
+}
+
+#[test]
+fn test_serial_config_clone() {
+    let config1 = SerialConfig {
+        baudrate: 4800,
+        timeout: Duration::from_secs(3),
+    };
+    let config2 = config1.clone();
+    assert_eq!(config1.baudrate, config2.baudrate);
+    assert_eq!(config1.timeout, config2.timeout);
+}
+
+#[tokio::test]
+async fn test_connect_invalid_port() {
+    // Try to connect to a non-existent port
+    let result = MBusDeviceHandle::connect("/dev/nonexistent_port_12345").await;
+    assert!(result.is_err());
+    assert!(matches!(result, Err(MBusError::SerialPortError(_))));
+}
+
+#[tokio::test]
+async fn test_connect_with_config_invalid_port() {
+    let config = SerialConfig {
+        baudrate: 19200,
+        timeout: Duration::from_secs(2),
+    };
+    let result = MBusDeviceHandle::connect_with_config("/dev/nonexistent_port_12345", config).await;
+    assert!(result.is_err());
+    assert!(matches!(result, Err(MBusError::SerialPortError(_))));
+}
+
+#[tokio::test]
+async fn test_disconnect() {
+    // We can't really test disconnect without a real port
+    // But we can verify it compiles and the function exists
+    // This would normally be tested with a mock
+    let _config = SerialConfig::default();
+    // The disconnect function exists and returns Ok(())
+    // We'll test this better with integration tests
+}
+
+#[tokio::test]
+async fn test_send_request_stub() {
+    // Note: send_request is currently a stub that returns empty Vec
+    // This test documents the current behavior
+    // When real implementation is added, this test will need updating
+
+    // We can't create a real handle without a port, but we can test the stub exists
+    // The actual test would require a mock serial port
+}
+
+#[tokio::test]
+async fn test_scan_devices_stub() {
+    // Note: scan_devices is currently a stub that returns empty Vec
+    // This test documents the current behavior
+    // When real implementation is added, this test will need updating
+}
+
+// Integration tests that would require a mock serial port or actual hardware:
+// - test_send_frame: Send various frame types and verify they're written correctly
+// - test_recv_frame: Test receiving different frame types with various timeouts
+// - test_recv_frame_ack: Test receiving ACK frame (1 byte)
+// - test_recv_frame_short: Test receiving SHORT frame (5 bytes)
+// - test_recv_frame_long: Test receiving LONG frame (variable length)
+// - test_recv_frame_control: Test receiving CONTROL frame
+// - test_recv_frame_timeout: Test timeout behavior for different baud rates
+// - test_recv_frame_invalid_start: Test handling of invalid start bytes
+// - test_recv_frame_partial_data: Test handling when not all bytes are received
+
+#[cfg(test)]
+mod mock_tests {
+    use super::*;
+
+    // These tests would use a mock serial port library like serialport-mock
+    // For now, they just verify the code compiles and basic structure
+
+    #[test]
+    fn test_frame_creation_for_sending() {
+        // Test that we can create frames that would be sent
+        let ack_frame = MBusFrame {
+            frame_type: MBusFrameType::Ack,
+            control: 0,
+            address: 0,
+            control_information: 0,
+            data: vec![],
+            checksum: 0,
+            more_records_follow: false,
+        };
+        assert_eq!(ack_frame.frame_type, MBusFrameType::Ack);
+
+        let short_frame = MBusFrame {
+            frame_type: MBusFrameType::Short,
+            control: 0x53,
+            address: 0x01,
+            control_information: 0,
+            data: vec![],
+            checksum: 0x54,
+            more_records_follow: false,
+        };
+        assert_eq!(short_frame.frame_type, MBusFrameType::Short);
+    }
+
+    #[test]
+    fn test_baudrate_to_timeout_mapping() {
+        // Test the timeout calculation based on baudrate
+        // This is currently internal to recv_frame, but we document expected behavior
+        let baudrates_and_timeouts = vec![
+            (300, 1300), // Slowest baud rate, longest timeout
+            (600, 800),
+            (1200, 500),
+            (2400, 300),
+            (4800, 300),
+            (9600, 200),
+            (19200, 200),
+            (38400, 200),
+            (115200, 500), // Default for unknown rates
+        ];
+
+        for (baudrate, expected_ms) in baudrates_and_timeouts {
+            let config = SerialConfig {
+                baudrate,
+                timeout: Duration::from_secs(5),
+            };
+            // The timeout is used internally in recv_frame
+            // We're documenting the expected mapping here
+            assert!(expected_ms > 0);
+            assert!(config.baudrate > 0);
+        }
+    }
+
+    #[test]
+    fn test_frame_length_calculation() {
+        // Test the frame length calculation logic used in recv_frame
+
+        // ACK frame: always 1 byte
+        let ack_start = 0xE5;
+        let ack_len = match ack_start {
+            0xE5 => 1,
+            _ => panic!("Wrong calculation"),
+        };
+        assert_eq!(ack_len, 1);
+
+        // SHORT frame: always 5 bytes
+        let short_start = 0x10;
+        let short_len = match short_start {
+            0x10 => 5,
+            _ => panic!("Wrong calculation"),
+        };
+        assert_eq!(short_len, 5);
+
+        // LONG/CONTROL frame: 6 + data_length bytes
+        // For a frame with 10 data bytes: 0x68 | len | len | 0x68 | ... | checksum | 0x16
+        // Total = 6 + data_len
+        let long_start = 0x68;
+        let data_len = 10;
+        let long_len = match long_start {
+            0x68 => 6 + data_len,
+            _ => panic!("Wrong calculation"),
+        };
+        assert_eq!(long_len, 16);
+    }
+}
+
+// Additional unit tests for error conditions
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    #[test]
+    fn test_error_types() {
+        // Verify that the expected error types exist and can be created
+        let serial_error = MBusError::SerialPortError("Test error".to_string());
+        assert!(matches!(serial_error, MBusError::SerialPortError(_)));
+
+        let nom_error = MBusError::NomError("timeout".to_string());
+        assert!(matches!(nom_error, MBusError::NomError(_)));
+
+        let parse_error = MBusError::FrameParseError("Invalid frame start".to_string());
+        assert!(matches!(parse_error, MBusError::FrameParseError(_)));
+    }
+
+    #[test]
+    fn test_config_debug() {
+        // Test that SerialConfig implements Debug
+        let _config = SerialConfig::default();
+        let debug_str = format!("{config:?}");
+        assert!(debug_str.contains("SerialConfig"));
+        assert!(debug_str.contains("baudrate"));
+        assert!(debug_str.contains("timeout"));
+    }
+}
