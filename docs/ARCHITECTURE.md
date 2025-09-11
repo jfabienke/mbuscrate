@@ -320,47 +320,65 @@ impl MBusDeviceManager {
 
 ```
 src/
-├── lib.rs                 # Public API and re-exports
-├── main.rs                # CLI application
-├── constants.rs           # Protocol constants
-├── error.rs               # Error types
-├── logging.rs             # Logging utilities
-├── mbus_device_manager.rs # Device management (active)
+├── lib.rs                   # Public API and re-exports
+├── main.rs                  # CLI application
+├── constants.rs             # Protocol constants
+├── error.rs                 # Error types (MBusError with thiserror)
+├── logging.rs               # Logging utilities
+├── mbus_device_manager.rs  # Device management with caching
 │
-├── mbus/                  # Core M-Bus implementation
-│   ├── mod.rs             # Module exports
-│   ├── frame.rs           # Frame parsing/packing
-│   ├── mbus_protocol.rs   # Protocol logic
-│   ├── serial.rs          # Serial communication
-│   ├── serial_mock.rs     # Testing mock
-│   ├── serial_testable.rs # Testable wrapper
+├── mbus/                    # Core M-Bus implementation
+│   ├── mod.rs               # Module exports
+│   ├── frame.rs             # Frame parsing/packing (nom-based)
+│   ├── mbus_protocol.rs     # Protocol state machine
+│   ├── secondary_addressing.rs # Secondary address handling
+│   ├── serial.rs            # Async serial communication (tokio)
+│   ├── serial_mock.rs       # Mock for testing
+│   └── serial_testable.rs   # Testable wrapper
 │
-├── payload/               # Data processing
-│   ├── mod.rs             # Module exports
-│   ├── data.rs            # Data record decoding
-│   ├── data_encoding.rs   # Type encoding/decoding
-│   ├── record.rs          # Record parsing
-│   ├── vif.rs             # VIF processing
-│   └── vif_maps.rs        # VIF lookup tables
+├── payload/                 # Data processing
+│   ├── mod.rs               # Module exports
+│   ├── data.rs              # Enhanced data record decoding
+│   ├── data_encoding.rs     # BCD/integer/float encoding
+│   ├── record.rs            # Record parsing with DIF/VIF chains
+│   ├── vif.rs               # VIF processing with extensions
+│   └── vif_maps.rs          # Complete VIF lookup tables
 │
-└── wmbus/                 # Wireless M-Bus (Active)
-    ├── mod.rs             # Module exports
-    ├── encryption.rs      # AES-128 encryption support
-    ├── encoding.rs        # wM-Bus data encoding (3-of-6, Manchester, NRZ)
-    ├── frame.rs           # Wireless frame handling
-    ├── handle.rs          # High-level wM-Bus operations
-    ├── network.rs         # Network management
-    ├── protocol.rs        # Wireless protocol logic
-    └── radio/             # SX126x radio driver
-        ├── mod.rs         # Radio module exports
-        ├── driver.rs      # Main SX126x driver (Sx126xDriver)
-        ├── hal.rs         # Hardware abstraction layer
-        ├── irq.rs         # Interrupt handling (IrqStatus, IrqMaskBit)
-        ├── modulation.rs  # GFSK modulation parameters
-        ├── calib.rs       # Radio calibration
-        └── hal/           # Platform-specific HAL implementations
-            ├── mod.rs     # HAL implementation exports
-            └── raspberry_pi.rs  # Raspberry Pi 4/5 HAL
+├── util/                    # Utility modules
+│   ├── mod.rs               # Module exports
+│   ├── bitrev.rs            # Bit reversal utilities
+│   ├── hex.rs               # Hex encoding/decoding
+│   ├── iobuffer.rs          # I/O buffer management
+│   └── logging.rs           # Performance logging utilities
+│
+└── wmbus/                   # Wireless M-Bus implementation
+    ├── mod.rs               # Module exports
+    ├── compact_cache.rs     # LRU cache for compact frames
+    ├── crypto.rs            # AES-128 Modes 5/7/9 implementation
+    ├── encoding.rs          # 3-of-6, Manchester, NRZ encoding
+    ├── encryption.rs        # Legacy encryption wrapper
+    ├── frame.rs             # Wireless frame types
+    ├── frame_decode.rs      # Frame decoder with CRC
+    ├── handle.rs            # High-level wM-Bus API
+    ├── mode_switching.rs    # S/T/C mode negotiation
+    ├── network.rs           # Network management
+    ├── protocol.rs          # Wireless protocol logic
+    ├── wmbus_protocol.rs    # Additional protocol handling
+    └── radio/               # Radio driver implementation
+        ├── mod.rs           # Radio module exports
+        ├── driver.rs        # SX126x driver implementation
+        ├── calib.rs         # Radio calibration routines
+        ├── irq.rs           # IRQ handling and status
+        ├── modulation.rs    # GFSK modulation config
+        ├── modulation_tests.rs # Modulation unit tests
+        ├── radio_driver.rs  # Radio driver trait
+        ├── rfm69.rs         # RFM69 support
+        ├── rfm69_packet.rs  # RFM69 packet handling
+        ├── rfm69_registers.rs # RFM69 register definitions
+        └── hal/             # Hardware abstraction layer
+            ├── mod.rs       # HAL exports
+            ├── enhanced_gpio.rs # Enhanced GPIO with events
+            └── raspberry_pi.rs  # Raspberry Pi HAL (rppal)
 ```
 
 ## Error Handling
@@ -485,7 +503,7 @@ pub async fn poll_multiple_devices(
         let mut h = handle.clone();
         h.send_request(addr).await
     });
-    
+
     futures::future::join_all(futures).await
 }
 ```
@@ -598,14 +616,6 @@ This architecture design is validated by:
 - **Cons**: Mixed paradigms require architectural understanding
 - **Verdict**: Selected as optimal balance
 
-### Future Considerations
-
-This boundary may evolve if:
-
-1. **WebAssembly deployment**: May require all-async for thread limitations
-2. **GPU acceleration**: Parallel data processing may benefit from async coordination
-3. **Streaming protocols**: Large data streams may need async processing pipelines
-
 However, for typical M-Bus deployment scenarios, this hybrid architecture provides the optimal balance of performance, simplicity, and scalability.
 
 ## Wireless M-Bus (wM-Bus) Architecture ✅ COMPLETE
@@ -680,40 +690,15 @@ loop {
 
 The implementation follows a dual-platform strategy, starting with Raspberry Pi 4B for development and transitioning to resource-constrained platforms like RP2040.
 
-### Platform Considerations
+### Platform Support
 
-#### Raspberry Pi 4B/5 (Development Platform)
+#### Raspberry Pi 4B/5 (Target Platforms)
 - **CPU**: ARM Cortex-A72/A76, 1.5-2.4 GHz
 - **Memory**: 2-8 GB RAM
 - **Advantages**: Rich debugging, full Linux environment
 - **Use Case**: Development, testing, gateway deployments
 
-#### RP2040 (Target Platform)
-- **CPU**: Dual ARM Cortex-M0+, 133 MHz
-- **Memory**: 264KB SRAM, 2MB Flash
-- **Advantages**: Low cost (~$4), low power, dual-core
-- **Use Case**: Edge devices, battery-powered sensors
-
 ### Implementation Strategy
-
-#### Core Utilization (RP2040)
-```
-Core 0: Communication Tasks
-├── UART/SPI handling
-├── Frame assembly
-└── Protocol state machine
-
-Core 1: Data Processing
-├── Frame parsing
-├── Data decoding
-└── Application logic
-```
-
-#### Memory Optimization
-- Memory pooling for frame buffers
-- Stack-based parsing where possible
-- Minimal heap allocations
-- External flash for configuration
 
 #### Cross-Compilation Support
 - **armv7-unknown-linux-gnueabihf**: Raspberry Pi 32-bit
