@@ -40,7 +40,11 @@
       "Bash(RUST_BACKTRACE=1 cargo test --lib test_mode9_gcm_round_trip --features crypto -- --nocapture)",
       "Bash(RUST_BACKTRACE=1 cargo test --lib test_vife_chain_limit -- --nocapture)",
       "Bash(RUST_BACKTRACE=1 cargo test --features crypto --lib test_vife_chain_limit -- --nocapture)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(awk:*)",
+      "Bash(xargs:*)"
     ],
     "deny": [],
     "ask": []

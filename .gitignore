@@ -1,1 +1,26 @@
+# Build artifacts
 /target
+
+# Coverage files
+*.profraw
+*.profdata
+lcov.info
+coverage/
+
+# IDE and editor files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test artifacts
+test_*.rs
+/tmp/
+
+# Pre-commit hooks
+pre-commit.sh
+
+# OpenCode database
+.opencode/

@@ -18,13 +18,13 @@ This guide covers deploying M-Bus applications built with mbus-rs in production 
 
 ### Minimum Requirements
 
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| **CPU** | 1 core, 1 GHz | 2+ cores, 2 GHz |
-| **RAM** | 512 MB | 2 GB |
-| **Storage** | 100 MB (app) | 10 GB (with logs) |
-| **OS** | Linux kernel 3.10+ | Ubuntu 20.04+ / Debian 11+ |
-| **Rust** | 1.70+ | Latest stable |
+| Component   | Minimum            | Recommended                |
+|-------------|--------------------|----------------------------|
+| **CPU**     | 1 core, 1 GHz      | 2+ cores, 2 GHz            |
+| **RAM**     | 512 MB             | 2 GB                       |
+| **Storage** | 100 MB (app)       | 10 GB (with logs)          |
+| **OS**      | Linux kernel 3.10+ | Ubuntu 20.04+ / Debian 11+ |
+| **Rust**    | 1.70+              | Latest stable              |
 
 ### Operating Systems
 
@@ -35,8 +35,6 @@ This guide covers deploying M-Bus applications built with mbus-rs in production 
 - Alpine Linux 3.16+ (for containers)
 - Raspberry Pi OS (ARM)
 
-**Experimental:**
-- Windows Server 2019+
 - macOS 12+ (development only)
 
 ## Installation Methods
@@ -375,7 +373,7 @@ fn load_config() -> Result<AppConfig, ConfigError> {
         .add_source(File::with_name("/etc/mbus/config.toml"))
         .add_source(Environment::with_prefix("MBUS"))
         .build()?;
-    
+
     config.try_deserialize()
 }
 ```
@@ -389,15 +387,15 @@ use prometheus::{Encoder, TextEncoder, Counter, Gauge, Histogram};
 
 lazy_static! {
     static ref DEVICES_TOTAL: Gauge = register_gauge!(
-        "mbus_devices_total", 
+        "mbus_devices_total",
         "Total number of M-Bus devices"
     ).unwrap();
-    
+
     static ref READS_TOTAL: Counter = register_counter!(
         "mbus_reads_total",
         "Total number of successful reads"
     ).unwrap();
-    
+
     static ref READ_DURATION: Histogram = register_histogram!(
         "mbus_read_duration_seconds",
         "Time taken to read from device"
@@ -430,7 +428,7 @@ fn setup_logging() {
 #[instrument(skip(handle))]
 async fn read_device(handle: &mut MBusDeviceHandle, address: u8) {
     info!(device_address = address, "Reading device");
-    
+
     match send_request(handle, address).await {
         Ok(records) => {
             info!(
@@ -533,7 +531,7 @@ async fn cache_device_data(
 ) -> Result<(), Box<dyn Error>> {
     let key = format!("mbus:device:{}", address);
     let json = serde_json::to_string(data)?;
-    
+
     redis.set_ex(key, json, 300).await?;  // 5 minute TTL
     Ok(())
 }
@@ -580,7 +578,7 @@ fn create_pool() -> Pool {
         },
         ..Default::default()
     });
-    
+
     cfg.create_pool(tokio_postgres::NoTls).unwrap()
 }
 
@@ -590,7 +588,7 @@ async fn batch_read_devices(
     addresses: Vec<u8>
 ) -> Vec<Result<Vec<MBusRecord>, MBusError>> {
     use futures::stream::{self, StreamExt};
-    
+
     stream::iter(addresses)
         .map(|addr| async move {
             read_device(&handle, addr).await
@@ -631,24 +629,24 @@ Create `/etc/apparmor.d/usr.local.bin.mbus-rs`:
 /usr/local/bin/mbus-rs {
   #include <abstractions/base>
   #include <abstractions/nameservice>
-  
+
   # Binary
   /usr/local/bin/mbus-rs mr,
-  
+
   # Configuration
   /etc/mbus/** r,
-  
+
   # Data directories
   /var/lib/mbus/** rw,
   /var/log/mbus/** rw,
-  
+
   # Serial ports
   /dev/ttyUSB* rw,
   /dev/ttyS* rw,
-  
+
   # Temp files
   /tmp/** rw,
-  
+
   # Network
   network inet stream,
   network inet6 stream,
@@ -675,7 +673,7 @@ async fn get_vault_secret(path: &str) -> Result<String, Box<dyn Error>> {
             .token("your-vault-token")
             .build()?
     )?;
-    
+
     let secret: Value = client.kv2.read_secret("secret/data/mbus", path).await?;
     Ok(secret["password"].as_str().unwrap().to_string())
 }
