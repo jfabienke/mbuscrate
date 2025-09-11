@@ -1,0 +1,299 @@
+name: Enhanced CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run intensive tests weekly
+    - cron: '0 0 * * 0'
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Basic CI remains fast for PRs
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust: [stable, beta]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.rust }}
+        components: clippy, rustfmt
+    
+    - uses: Swatinem/rust-cache@v2
+    
+    - name: Format check
+      run: cargo fmt --all -- --check
+    
+    - name: Clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+    
+    - name: Build
+      run: cargo build --verbose --all-features
+    
+    - name: Test
+      run: cargo test --verbose --all-features
+    
+    - name: Doc tests
+      run: cargo test --doc --all-features
+
+  # Fuzzing - runs on every PR but with limited iterations
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: dtolnay/rust-toolchain@nightly
+    
+    - uses: Swatinem/rust-cache@v2
+      with:
+        cache-targets: false
+    
+    - name: Install cargo-fuzz
+      run: cargo install cargo-fuzz
+    
+    - name: Fuzz frame parser (smoke test)
+      run: |
+        cd fuzz
+        cargo +nightly fuzz run fuzz_parse_frame -- -max_total_time=30 -max_len=512
+    
+    - name: Fuzz VIF decoder (smoke test)
+      run: |
+        cd fuzz
+        cargo +nightly fuzz run fuzz_vif_decode -- -max_total_time=30 -max_len=256
+    
+    - name: Fuzz data encoding (smoke test)
+      run: |
+        cd fuzz
+        cargo +nightly fuzz run fuzz_data_encoding -- -max_total_time=30 -max_len=128
+    
+    - name: Upload fuzz artifacts
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: fuzz-artifacts
+        path: fuzz/artifacts/
+
+  # Benchmarks - check for performance regressions
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: dtolnay/rust-toolchain@stable
+    
+    - uses: Swatinem/rust-cache@v2
+    
+    - name: Install cargo-criterion
+      run: cargo install cargo-criterion
+    
+    - name: Run benchmarks
+      run: |
+        cargo bench --bench parsing_benchmark -- --save-baseline current
+        cargo bench --bench vif_benchmark -- --save-baseline current
+    
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results
+        path: target/criterion/
+    
+    - name: Check performance targets
+      run: |
+        # Extract benchmark results and check against targets
+        cargo bench --bench parsing_benchmark -- --load-baseline current --baseline main 2>&1 | tee bench_output.txt
+        
+        # Fail if regression detected (>10% slower)
+        if grep -q "Performance has regressed" bench_output.txt; then
+          echo "Performance regression detected!"
+          exit 1
+        fi
+
+  # E2E tests with mocks
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: dtolnay/rust-toolchain@stable
+    
+    - uses: Swatinem/rust-cache@v2
+    
+    - name: Run E2E tests
+      run: cargo test --test e2e_scenarios -- --test-threads=1 --nocapture
+    
+    - name: Run integration tests
+      run: cargo test --test '*_integration_*' --all-features
+
+  # Coverage analysis
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install tarpaulin
+      run: cargo install cargo-tarpaulin
+    
+    - name: Run coverage
+      run: cargo tarpaulin --out Lcov --all-features --ignore-tests --timeout 300
+    
+    - name: Upload to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./lcov.info
+        fail_ci_if_error: true
+    
+    - name: Check coverage threshold
+      run: |
+        # Extract coverage percentage
+        coverage=$(cargo tarpaulin --print-summary 2>&1 | grep "Coverage" | awk '{print $2}' | sed 's/%//')
+        echo "Coverage: $coverage%"
+        
+        # Fail if below 80%
+        if (( $(echo "$coverage < 80" | bc -l) )); then
+          echo "Coverage below 80% threshold!"
+          exit 1
+        fi
+
+  # Mutation testing - weekly only due to time
+  mutation:
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[mutation]')
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install cargo-mutants
+      run: cargo install cargo-mutants
+    
+    - name: Run mutation testing
+      run: |
+        cargo mutants --package mbus-rs \
+          --file src/mbus/frame.rs \
+          --file src/payload/vif.rs \
+          --file src/payload/data_encoding.rs \
+          --timeout 300 \
+          --jobs 2
+    
+    - name: Upload mutation report
+      uses: actions/upload-artifact@v3
+      with:
+        name: mutation-report
+        path: mutants.out/
+
+  # Security audit
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: dtolnay/rust-toolchain@stable
+    
+    - uses: EmbarkStudios/cargo-deny-action@v1
+      with:
+        command: check
+        arguments: --all-features
+    
+    - name: Run cargo-audit
+      run: |
+        cargo install cargo-audit
+        cargo audit
+
+  # Deep fuzzing - weekly intensive run
+  deep-fuzz:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # 6 hours max
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: dtolnay/rust-toolchain@nightly
+    
+    - name: Install cargo-fuzz
+      run: cargo install cargo-fuzz
+    
+    - name: Deep fuzz all targets
+      run: |
+        cd fuzz
+        for target in fuzz_parse_frame fuzz_vif_decode fuzz_data_encoding fuzz_multi_telegram; do
+          echo "Deep fuzzing $target..."
+          cargo +nightly fuzz run $target -- -max_total_time=3600 -max_len=1024 || true
+        done
+    
+    - name: Minimize corpus
+      run: |
+        cd fuzz
+        for target in fuzz_parse_frame fuzz_vif_decode fuzz_data_encoding fuzz_multi_telegram; do
+          cargo +nightly fuzz cmin $target || true
+        done
+    
+    - name: Upload corpus
+      uses: actions/upload-artifact@v3
+      with:
+        name: fuzz-corpus
+        path: fuzz/corpus/
+
+  # Optional: Raspberry Pi hardware test (self-hosted runner)
+  pi-hardware:
+    if: contains(github.event.head_commit.message, '[pi-test]')
+    runs-on: [self-hosted, raspberry-pi]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build for Pi
+      run: |
+        cargo build --release --features raspberry-pi --examples
+    
+    - name: Run Pi integration tests
+      run: |
+        cargo test --features raspberry-pi --test raspberry_pi_integration
+    
+    - name: Test examples
+      run: |
+        cargo run --example pi_quick_start --features raspberry-pi -- test
+
+  # Release preparation
+  release-check:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, fuzz, benchmark, e2e, coverage, audit]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: dtolnay/rust-toolchain@stable
+    
+    - name: Check version
+      run: |
+        # Ensure Cargo.toml version matches tag
+        VERSION=$(grep "^version" Cargo.toml | head -1 | cut -d'"' -f2)
+        TAG=${GITHUB_REF#refs/tags/v}
+        if [ "$VERSION" != "$TAG" ]; then
+          echo "Version mismatch: Cargo.toml has $VERSION but tag is $TAG"
+          exit 1
+        fi
+    
+    - name: Dry run publish
+      run: cargo publish --dry-run
+    
+    - name: Generate changelog
+      run: |
+        # Extract changelog for this version
+        awk '/^## \['"$VERSION"'\]/,/^## \[/' CHANGELOG.md | head -n -1 > RELEASE_NOTES.md
+    
+    - name: Upload release notes
+      uses: actions/upload-artifact@v3
+      with:
+        name: release-notes
+        path: RELEASE_NOTES.md

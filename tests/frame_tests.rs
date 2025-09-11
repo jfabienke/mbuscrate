@@ -11,7 +11,7 @@ fn test_parse_ack_frame() {
     assert_eq!(frame.control, 0);
     assert_eq!(frame.address, 0);
     assert_eq!(frame.control_information, 0);
-    assert_eq!(frame.data, Vec::new());
+    assert_eq!(frame.data, Vec::<u8>::new());
     assert_eq!(frame.checksum, 0);
 }
 
@@ -24,7 +24,7 @@ fn test_parse_short_frame() {
     assert_eq!(frame.control, 0x53);
     assert_eq!(frame.address, 0x01);
     assert_eq!(frame.control_information, 0);
-    assert_eq!(frame.data, Vec::new());
+    assert_eq!(frame.data, Vec::<u8>::new());
     assert_eq!(frame.checksum, 0x54);
 }
 
@@ -37,7 +37,7 @@ fn test_parse_control_frame() {
     assert_eq!(frame.control, 0x53);
     assert_eq!(frame.address, 0x01);
     assert_eq!(frame.control_information, 0x00);
-    assert_eq!(frame.data, Vec::new());
+    assert_eq!(frame.data, Vec::<u8>::new());
     assert_eq!(frame.checksum, 0x54);
 }
 

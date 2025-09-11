@@ -95,7 +95,7 @@ impl PacketBuffer {
 
         let buf = self.as_slice();
         let want = packet_size(&buf);
-        
+
         match want {
             size if size > 0 => {
                 self.expected_size = Some(size as usize);
@@ -126,7 +126,7 @@ impl PacketBuffer {
     /// Extract completed packet data
     pub fn extract_packet(&mut self) -> Result<Vec<u8>, PacketError> {
         let expected = self.expected_size.ok_or(PacketError::NoSizeSet)?;
-        
+
         if self.data.len() < expected {
             return Err(PacketError::IncompletePacket {
                 expected,
@@ -137,7 +137,7 @@ impl PacketBuffer {
         let packet: Vec<u8> = self.data.drain(..expected).collect();
         self.expected_size = None;
         self.stats.packets_received += 1;
-        
+
         Ok(packet)
     }
 
@@ -169,7 +169,7 @@ impl PacketBuffer {
             PacketEvent::FifoOverrun => self.stats.fifo_overruns += 1,
         }
     }
-    
+
     /// Get current packet statistics
     pub fn get_stats(&self) -> &PacketStats {
         &self.stats
@@ -186,11 +186,10 @@ pub enum PacketEvent {
     FifoOverrun,
 }
 
-
 /// Calculate wM-Bus CRC using the standard polynomial
 pub fn calculate_wmbus_crc(data: &[u8]) -> u16 {
     let mut crc = 0u16;
-    
+
     for &byte in data {
         crc ^= (byte as u16) << 8;
         for _ in 0..8 {
@@ -201,7 +200,7 @@ pub fn calculate_wmbus_crc(data: &[u8]) -> u16 {
             }
         }
     }
-    
+
     crc
 }
 
@@ -210,11 +209,11 @@ pub fn verify_wmbus_crc(frame: &[u8]) -> bool {
     if frame.len() < 3 {
         return false; // Too short to have CRC
     }
-    
+
     let data_len = frame.len() - 2; // Exclude 2-byte CRC
     let calculated_crc = calculate_wmbus_crc(&frame[..data_len]);
     let frame_crc = ((frame[data_len] as u16) << 8) | (frame[data_len + 1] as u16);
-    
+
     calculated_crc == frame_crc
 }
 
@@ -223,16 +222,16 @@ pub fn verify_wmbus_crc(frame: &[u8]) -> bool {
 pub enum PacketError {
     #[error("Invalid packet header - not a wM-Bus frame")]
     InvalidHeader,
-    
+
     #[error("Packet size not determined yet")]
     NoSizeSet,
-    
+
     #[error("Incomplete packet: expected {expected} bytes, got {actual}")]
     IncompletePacket { expected: usize, actual: usize },
-    
+
     #[error("CRC validation failed")]
     CrcError,
-    
+
     #[error("Packet too short: {0} bytes")]
     TooShort(usize),
 }
@@ -242,7 +241,7 @@ pub enum PacketError {
 // =============================================================================
 
 /// Reverse bits in a byte (MSB-first to LSB-first conversion)
-/// 
+///
 /// wM-Bus transmits data MSB-first on the wire, but RFM69 expects LSB-first.
 /// This function performs the necessary bit reversal.
 pub fn rev8(mut byte: u8) -> u8 {
@@ -254,7 +253,6 @@ pub fn rev8(mut byte: u8) -> u8 {
     byte = (byte & 0xAA) >> 1 | (byte & 0x55) << 1;
     byte
 }
-
 
 // =============================================================================
 // Fix #2: Robust PacketSize() with 4 Header Cases
@@ -270,10 +268,10 @@ pub fn sync_norm(sync: u8) -> u8 {
 }
 
 /// Determine packet size from header bytes with robust validation
-/// 
+///
 /// Handles all 4 possible header arrangements:
-/// - Case A/B: [SYNC][LEN] → L + (A:3, B:2)
-/// - Case C/D: [LEN][SYNC] → L + (A:3, B:2)
+/// - Case A/B: \[SYNC\]\[LEN\] → L + (A:3, B:2)
+/// - Case C/D: \[LEN\]\[SYNC\] → L + (A:3, B:2)
 pub fn packet_size(data: &[u8]) -> i32 {
     if data.len() < 2 {
         return -1; // Need more data
@@ -305,7 +303,7 @@ pub fn packet_size(data: &[u8]) -> i32 {
 // =============================================================================
 
 /// Extract and process C-field from wM-Bus payload
-/// 
+///
 /// Returns both raw and normalized C-field values for proper switching
 pub fn extract_c_field(payload: &[u8]) -> Option<(u8, u8)> {
     if payload.is_empty() {
@@ -314,7 +312,7 @@ pub fn extract_c_field(payload: &[u8]) -> Option<(u8, u8)> {
 
     let c_raw = payload[0];
     let c_normalized = c_raw; // Already normalized if fix #1 applied at FIFO level
-    
+
     Some((c_raw, c_normalized))
 }
 
@@ -328,11 +326,11 @@ pub fn is_valid_c_field(c_field: u8) -> bool {
 // =============================================================================
 
 /// Calculate CRC window for Type A frames (Fix #5)
-/// 
+///
 /// For Type A: CRC covers block0 which is L-2 bytes before the CRC
 pub fn validate_type_a_crc(payload: &[u8], length_field: u8) -> Result<bool, PacketError> {
     let l = length_field as usize;
-    
+
     if l < 2 {
         return Err(PacketError::TooShort(l));
     }
@@ -346,18 +344,18 @@ pub fn validate_type_a_crc(payload: &[u8], length_field: u8) -> Result<bool, Pac
 
     // Block length is L-2 (bytes covered by CRC)
     let block_len = l - 2;
-    
+
     // CRC is stored in the last 2 bytes of the L-length payload
     let crc_read = u16::from_le_bytes([payload[l - 2], payload[l - 1]]);
     let crc_calculated = wmbus_crc(&payload[..block_len]);
-    
+
     Ok(crc_read == crc_calculated)
 }
 
 /// Calculate CRC for Type B frames
 pub fn validate_type_b_crc(payload: &[u8], length_field: u8) -> Result<bool, PacketError> {
     let l = length_field as usize;
-    
+
     if payload.len() < l + 2 {
         return Err(PacketError::IncompletePacket {
             expected: l + 2,
@@ -368,7 +366,7 @@ pub fn validate_type_b_crc(payload: &[u8], length_field: u8) -> Result<bool, Pac
     // For Type B, CRC is the last 2 bytes after the L-length payload
     let crc_read = u16::from_le_bytes([payload[l], payload[l + 1]]);
     let crc_calculated = wmbus_crc(&payload[..l]);
-    
+
     Ok(crc_read == crc_calculated)
 }
 
@@ -377,20 +375,20 @@ pub fn validate_type_b_crc(payload: &[u8], length_field: u8) -> Result<bool, Pac
 // =============================================================================
 
 /// Check for encryption flag in wM-Bus frame (Fix #6)
-/// 
+///
 /// Peeks at CI and ACC fields to detect encrypted frames early,
 /// allowing CRC validation to be bypassed before decryption.
 pub fn is_encrypted_frame(payload: &[u8]) -> bool {
     // Need enough bytes for header: C(1) + M(2) + ID(4) + VER(1) + TYPE(1) + CI(1) + ACC(1)
     let header_len = 1 + 2 + 4 + 1 + 1 + 1 + 1; // 11 bytes total
-    
+
     if payload.len() < header_len {
         return false;
     }
 
-    let ci = payload[10];  // CI field at offset 10
+    let ci = payload[10]; // CI field at offset 10
     let acc = payload[11]; // ACC field at offset 11
-    
+
     // Check for encryption: CI=0x7A and ACC has encryption bit set (0x80)
     ci == 0x7A && (acc & 0x80) != 0
 }
@@ -402,7 +400,7 @@ pub fn is_encrypted_frame(payload: &[u8]) -> bool {
 /// Calculate wM-Bus CRC using polynomial 0x3D65
 fn wmbus_crc(data: &[u8]) -> u16 {
     let mut remainder: u16 = 0;
-    
+
     for &byte in data {
         remainder ^= (byte as u16) << 8;
         for _ in 0..8 {
@@ -413,7 +411,7 @@ fn wmbus_crc(data: &[u8]) -> u16 {
             }
         }
     }
-    
+
     !remainder // Bitwise NOT for final result
 }
 
@@ -444,12 +442,12 @@ impl LogThrottle {
     pub fn allow(&mut self) -> bool {
         let now = std::time::Instant::now();
         let elapsed_ms = now.duration_since(self.t0).as_millis() as u64;
-        
+
         if elapsed_ms > self.window_ms {
             self.t0 = now;
             self.count = 0;
         }
-        
+
         self.count += 1;
         self.count <= self.cap
     }
@@ -484,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_packet_size_case_b() {
-        // Case B: [SYNC_B][LEN] → L + 2  
+        // Case B: [SYNC_B][LEN] → L + 2
         let data = [SYNC_B, 15]; // Sync B, length 15
         assert_eq!(packet_size(&data), 17); // 15 + 2
     }
@@ -499,7 +497,7 @@ mod tests {
     #[test]
     fn test_packet_size_case_d() {
         // Case D: [LEN][SYNC_B] → L + 2
-        let data = [12, SYNC_B]; // Length 12, Sync B  
+        let data = [12, SYNC_B]; // Length 12, Sync B
         assert_eq!(packet_size(&data), 14); // 12 + 2
     }
 
@@ -521,9 +519,9 @@ mod tests {
         let mut payload = vec![0; 12];
         payload[10] = 0x7A; // CI field
         payload[11] = 0x80; // ACC with encryption bit set
-        
+
         assert!(is_encrypted_frame(&payload));
-        
+
         // Test without encryption
         payload[11] = 0x00; // ACC without encryption bit
         assert!(!is_encrypted_frame(&payload));
@@ -541,24 +539,24 @@ mod tests {
     #[test]
     fn test_packet_buffer() {
         let mut buffer = PacketBuffer::new();
-        
+
         // Add sync byte 0xB3 which gets bit-reversed to 0xCD (Type A sync)
         buffer.push_byte(0xB3);
         // Add length byte that when bit-reversed gives us length 10
         // rev8(0x50) = 0x0A = 10, so we need to pass 0x50
         buffer.push_byte(0x50); // Will be bit-reversed to 0x0A (10) internally
-        
+
         assert_eq!(buffer.len(), 2);
-        
+
         // Determine size
         let size = buffer.determine_packet_size();
         assert_eq!(size, Some(13)); // Type A: 10 + 3
-        
+
         // Add more bytes to complete packet
         for _ in 0..11 {
             buffer.push_byte(0x00);
         }
-        
+
         assert!(buffer.is_complete());
         let packet = buffer.extract_packet().unwrap();
         assert_eq!(packet.len(), 13);
@@ -567,9 +565,9 @@ mod tests {
     #[test]
     fn test_log_throttle() {
         let mut throttle = LogThrottle::new(1000, 3); // 3 messages per second
-        
+
         assert!(throttle.allow()); // 1st message
-        assert!(throttle.allow()); // 2nd message  
+        assert!(throttle.allow()); // 2nd message
         assert!(throttle.allow()); // 3rd message
         assert!(!throttle.allow()); // 4th message should be throttled
     }

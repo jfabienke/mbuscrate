@@ -22,7 +22,7 @@
 
 /// Reverse bits in a byte (MSB-first to LSB-first conversion)
 ///
-/// This addresses the common bit ordering challenge between wM-Bus protocol 
+/// This addresses the common bit ordering challenge between wM-Bus protocol
 /// specification and radio hardware implementation.
 ///
 /// wM-Bus transmits data MSB-first on the wire, but RFM69 expects LSB-first.
@@ -47,16 +47,16 @@
 pub fn rev8(mut byte: u8) -> u8 {
     // Efficient bit reversal using bit manipulation
     // This is faster than table lookups for single bytes
-    
+
     // Swap nibbles (4-bit groups)
     byte = (byte & 0xF0) >> 4 | (byte & 0x0F) << 4;
-    
+
     // Swap pairs within nibbles (2-bit groups)
     byte = (byte & 0xCC) >> 2 | (byte & 0x33) << 2;
-    
+
     // Swap individual bits within pairs (1-bit groups)
     byte = (byte & 0xAA) >> 1 | (byte & 0x55) << 1;
-    
+
     byte
 }
 
@@ -126,28 +126,27 @@ pub enum BitContext {
 
 /// Utilities for working with bit patterns in wM-Bus frames
 pub mod patterns {
-    use super::*;
-    
+
     /// wM-Bus Type A sync byte (before bit reversal)
     pub const WMBUS_SYNC_A_RAW: u8 = 0xB3;
     /// wM-Bus Type B sync byte (before bit reversal)
     pub const WMBUS_SYNC_B_RAW: u8 = 0xBC;
-    
+
     /// wM-Bus Type A sync byte (after bit reversal)
     pub const WMBUS_SYNC_A_NORM: u8 = 0xCD;
     /// wM-Bus Type B sync byte (after bit reversal)
     pub const WMBUS_SYNC_B_NORM: u8 = 0x3D;
-    
+
     /// Check if a byte is a raw wM-Bus sync pattern
     pub fn is_raw_sync(byte: u8) -> bool {
         matches!(byte, WMBUS_SYNC_A_RAW | WMBUS_SYNC_B_RAW)
     }
-    
+
     /// Check if a byte is a normalized wM-Bus sync pattern
     pub fn is_normalized_sync(byte: u8) -> bool {
         matches!(byte, WMBUS_SYNC_A_NORM | WMBUS_SYNC_B_NORM)
     }
-    
+
     /// Normalize a sync byte (apply bit reversal if needed)
     pub fn normalize_sync(byte: u8) -> u8 {
         match byte {
@@ -160,15 +159,15 @@ pub mod patterns {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::patterns::*;
+    use super::*;
 
     #[test]
     fn test_rev8_basic() {
         // Test with all zeros and all ones
         assert_eq!(rev8(0b00000000), 0b00000000);
         assert_eq!(rev8(0b11111111), 0b11111111);
-        
+
         // Test single bit positions
         assert_eq!(rev8(0b10000000), 0b00000001);
         assert_eq!(rev8(0b01000000), 0b00000010);
@@ -185,7 +184,7 @@ mod tests {
         // Test alternating patterns
         assert_eq!(rev8(0b10101010), 0b01010101);
         assert_eq!(rev8(0b01010101), 0b10101010);
-        
+
         // Test other common patterns
         assert_eq!(rev8(0b11110000), 0b00001111);
         assert_eq!(rev8(0b00001111), 0b11110000);
@@ -196,7 +195,7 @@ mod tests {
         // Test wM-Bus sync byte conversion (critical for Fix #1)
         assert_eq!(rev8(WMBUS_SYNC_A_RAW), WMBUS_SYNC_A_NORM); // 0xB3 → 0xCD
         assert_eq!(rev8(WMBUS_SYNC_B_RAW), WMBUS_SYNC_B_NORM); // 0xBC → 0x3D
-        
+
         // Test reverse direction
         assert_eq!(rev8(WMBUS_SYNC_A_NORM), WMBUS_SYNC_A_RAW);
         assert_eq!(rev8(WMBUS_SYNC_B_NORM), WMBUS_SYNC_B_RAW);
@@ -216,7 +215,7 @@ mod tests {
         assert_eq!(rev16(0xFFFF), 0xFFFF);
         assert_eq!(rev16(0x8000), 0x0001);
         assert_eq!(rev16(0x0080), 0x0100);
-        
+
         // Test with wM-Bus sync pattern
         let sync_16 = (WMBUS_SYNC_A_RAW as u16) << 8 | (WMBUS_SYNC_B_RAW as u16);
         let expected = (WMBUS_SYNC_B_NORM as u16) << 8 | (WMBUS_SYNC_A_NORM as u16);
@@ -235,7 +234,7 @@ mod tests {
     fn test_rev8_slice() {
         let mut data = vec![WMBUS_SYNC_A_RAW, WMBUS_SYNC_B_RAW, 0x12, 0x34];
         let expected = vec![WMBUS_SYNC_A_NORM, WMBUS_SYNC_B_NORM, rev8(0x12), rev8(0x34)];
-        
+
         rev8_slice(&mut data);
         assert_eq!(data, expected);
     }
@@ -244,7 +243,7 @@ mod tests {
     fn test_rev8_vec() {
         let data = vec![WMBUS_SYNC_A_RAW, WMBUS_SYNC_B_RAW, 0x12, 0x34];
         let expected = vec![WMBUS_SYNC_A_NORM, WMBUS_SYNC_B_NORM, rev8(0x12), rev8(0x34)];
-        
+
         let result = rev8_vec(&data);
         assert_eq!(result, expected);
         assert_eq!(data, vec![WMBUS_SYNC_A_RAW, WMBUS_SYNC_B_RAW, 0x12, 0x34]); // Original unchanged
@@ -256,7 +255,7 @@ mod tests {
         assert!(needs_reversal(WMBUS_SYNC_B_RAW, BitContext::WMBusSync));
         assert!(!needs_reversal(WMBUS_SYNC_A_NORM, BitContext::WMBusSync));
         assert!(!needs_reversal(0x12, BitContext::WMBusSync));
-        
+
         assert!(needs_reversal(0x12, BitContext::Always));
         assert!(!needs_reversal(0x12, BitContext::Never));
     }
@@ -267,7 +266,7 @@ mod tests {
         assert!(is_raw_sync(WMBUS_SYNC_B_RAW));
         assert!(!is_raw_sync(WMBUS_SYNC_A_NORM));
         assert!(!is_raw_sync(0x12));
-        
+
         assert!(is_normalized_sync(WMBUS_SYNC_A_NORM));
         assert!(is_normalized_sync(WMBUS_SYNC_B_NORM));
         assert!(!is_normalized_sync(WMBUS_SYNC_A_RAW));

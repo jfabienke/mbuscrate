@@ -18,13 +18,13 @@
 //! use mbus_rs::wmbus::mode_switching::{ModeSwitcher, WMBusMode};
 //!
 //! let mut switcher = ModeSwitcher::new();
-//! 
+//!
 //! // Try next mode in sequence
 //! let next_mode = switcher.next_mode();
-//! 
+//!
 //! // Configure radio for mode
 //! radio.configure_mode(next_mode);
-//! 
+//!
 //! // On successful communication
 //! switcher.mode_established(next_mode);
 //! ```
@@ -58,7 +58,7 @@ impl WMBusMode {
             WMBusMode::C1 | WMBusMode::C2 => 100_000,
         }
     }
-    
+
     /// Get the effective data rate after encoding
     pub fn data_rate(&self) -> u32 {
         match self {
@@ -67,17 +67,17 @@ impl WMBusMode {
             WMBusMode::C1 | WMBusMode::C2 => 100_000, // No encoding overhead
         }
     }
-    
+
     /// Get the preamble requirements for this mode
     pub fn preamble_chips(&self) -> u16 {
         match self {
-            WMBusMode::T1 | WMBusMode::T2 => 19,   // ≥19 chips
-            WMBusMode::S1 => 279,                   // ≥279 chips
-            WMBusMode::S2 => 15,                    // ≥15 chips  
-            WMBusMode::C1 | WMBusMode::C2 => 64,   // 8×0x55 bytes = 64 bits
+            WMBusMode::T1 | WMBusMode::T2 => 19, // ≥19 chips
+            WMBusMode::S1 => 279,                // ≥279 chips
+            WMBusMode::S2 => 15,                 // ≥15 chips
+            WMBusMode::C1 | WMBusMode::C2 => 64, // 8×0x55 bytes = 64 bits
         }
     }
-    
+
     /// Get the sync word for this mode
     pub fn sync_word(&self) -> Vec<u8> {
         match self {
@@ -86,7 +86,7 @@ impl WMBusMode {
             WMBusMode::C1 | WMBusMode::C2 => vec![0x54, 0xCD], // C-mode sync
         }
     }
-    
+
     /// Get the frequency for this mode (in MHz)
     pub fn frequency_mhz(&self) -> f32 {
         868.95 // All modes use same frequency, switching is time-based
@@ -144,13 +144,13 @@ impl ModeSwitcher {
             stats: SwitchingStats::default(),
         }
     }
-    
+
     /// Create a mode switcher with custom sequence
     pub fn with_sequence(sequence: Vec<WMBusMode>) -> Self {
         if sequence.is_empty() {
             panic!("Mode sequence cannot be empty");
         }
-        
+
         Self {
             current_mode: sequence[0],
             established_mode: None,
@@ -163,57 +163,57 @@ impl ModeSwitcher {
             stats: SwitchingStats::default(),
         }
     }
-    
+
     /// Get the next mode in the switching sequence
     pub async fn next_mode(&mut self) -> Option<WMBusMode> {
         // If mode is established, keep using it
         if let Some(mode) = self.established_mode {
             return Some(mode);
         }
-        
+
         // Check if we've exceeded max cycles
         if self.cycle_count >= self.max_cycles {
             return None;
         }
-        
+
         // Wait for switch delay
         let elapsed = self.last_switch.elapsed();
         let delay_duration = Duration::from_millis(self.switch_delay_ms);
         if elapsed < delay_duration {
             sleep(delay_duration - elapsed).await;
         }
-        
+
         // Move to next mode in sequence
         self.sequence_index = (self.sequence_index + 1) % self.mode_sequence.len();
-        
+
         // Track complete cycles
         if self.sequence_index == 0 {
             self.cycle_count += 1;
-            
+
             // Exponential backoff after failed cycles
             if self.cycle_count > 1 {
                 self.switch_delay_ms = (self.switch_delay_ms * 2).min(1000);
             }
         }
-        
+
         self.current_mode = self.mode_sequence[self.sequence_index];
         self.last_switch = Instant::now();
         self.stats.switches_attempted += 1;
-        
+
         Some(self.current_mode)
     }
-    
+
     /// Mark a mode as successfully established
     pub fn mode_established(&mut self, mode: WMBusMode) {
         self.established_mode = Some(mode);
         self.stats.switches_successful += 1;
-        
+
         // Update time tracking
         let mode_index = mode_to_index(mode);
         let elapsed = self.last_switch.elapsed().as_millis() as u64;
         self.stats.time_per_mode[mode_index] += elapsed;
     }
-    
+
     /// Reset the switcher to try again
     pub fn reset(&mut self) {
         self.established_mode = None;
@@ -223,27 +223,27 @@ impl ModeSwitcher {
         self.current_mode = self.mode_sequence[0];
         self.last_switch = Instant::now();
     }
-    
+
     /// Get the current mode being tried
     pub fn current_mode(&self) -> WMBusMode {
         self.current_mode
     }
-    
+
     /// Get the established mode (if any)
     pub fn established_mode(&self) -> Option<WMBusMode> {
         self.established_mode
     }
-    
+
     /// Get switching statistics
     pub fn stats(&self) -> &SwitchingStats {
         &self.stats
     }
-    
+
     /// Set custom switch delay (milliseconds)
     pub fn set_switch_delay(&mut self, delay_ms: u64) {
         self.switch_delay_ms = delay_ms;
     }
-    
+
     /// Set maximum cycles before giving up
     pub fn set_max_cycles(&mut self, max_cycles: u32) {
         self.max_cycles = max_cycles;
@@ -262,8 +262,10 @@ pub struct ModeNegotiator {
     /// Supported modes by this device
     supported_modes: Vec<WMBusMode>,
     /// Preferred mode for communication
+    #[allow(dead_code)]
     preferred_mode: WMBusMode,
     /// Mode switcher instance
+    #[allow(dead_code)]
     switcher: ModeSwitcher,
 }
 
@@ -273,14 +275,14 @@ impl ModeNegotiator {
         if supported_modes.is_empty() {
             panic!("Must support at least one mode");
         }
-        
+
         Self {
             preferred_mode: supported_modes[0],
             supported_modes: supported_modes.clone(),
             switcher: ModeSwitcher::with_sequence(supported_modes),
         }
     }
-    
+
     /// Build mode capability frame for advertising supported modes
     ///
     /// Frame format:
@@ -288,10 +290,10 @@ impl ModeNegotiator {
     /// - Data: Bitmask of supported modes
     pub fn build_capability_frame(&self) -> Vec<u8> {
         let mut frame = Vec::new();
-        
+
         // CI field for mode capabilities
         frame.push(0x7A);
-        
+
         // Build capability bitmask
         let mut capabilities = 0u8;
         for mode in &self.supported_modes {
@@ -304,30 +306,42 @@ impl ModeNegotiator {
                 WMBusMode::C2 => capabilities |= 0x20,
             }
         }
-        
+
         frame.push(capabilities);
         frame
     }
-    
+
     /// Parse mode capability frame from remote device
     pub fn parse_capability_frame(&self, data: &[u8]) -> Option<Vec<WMBusMode>> {
         if data.len() < 2 || data[0] != 0x7A {
             return None;
         }
-        
+
         let capabilities = data[1];
         let mut modes = Vec::new();
-        
-        if capabilities & 0x01 != 0 { modes.push(WMBusMode::T1); }
-        if capabilities & 0x02 != 0 { modes.push(WMBusMode::T2); }
-        if capabilities & 0x04 != 0 { modes.push(WMBusMode::S1); }
-        if capabilities & 0x08 != 0 { modes.push(WMBusMode::S2); }
-        if capabilities & 0x10 != 0 { modes.push(WMBusMode::C1); }
-        if capabilities & 0x20 != 0 { modes.push(WMBusMode::C2); }
-        
+
+        if capabilities & 0x01 != 0 {
+            modes.push(WMBusMode::T1);
+        }
+        if capabilities & 0x02 != 0 {
+            modes.push(WMBusMode::T2);
+        }
+        if capabilities & 0x04 != 0 {
+            modes.push(WMBusMode::S1);
+        }
+        if capabilities & 0x08 != 0 {
+            modes.push(WMBusMode::S2);
+        }
+        if capabilities & 0x10 != 0 {
+            modes.push(WMBusMode::C1);
+        }
+        if capabilities & 0x20 != 0 {
+            modes.push(WMBusMode::C2);
+        }
+
         Some(modes)
     }
-    
+
     /// Select best mode from intersection of local and remote capabilities
     pub fn select_best_mode(&self, remote_modes: &[WMBusMode]) -> Option<WMBusMode> {
         // Prefer modes in this order: C1, T1, S1 (fastest to slowest data rate)
@@ -339,13 +353,13 @@ impl ModeNegotiator {
             WMBusMode::S1,
             WMBusMode::S2,
         ];
-        
+
         for mode in preference_order {
             if self.supported_modes.contains(&mode) && remote_modes.contains(&mode) {
                 return Some(mode);
             }
         }
-        
+
         None
     }
 }
@@ -365,95 +379,87 @@ fn mode_to_index(mode: WMBusMode) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_mode_switching_sequence() {
         let mut switcher = ModeSwitcher::new();
-        
+
         // Initial mode should be T1
         assert_eq!(switcher.current_mode(), WMBusMode::T1);
-        
+
         // Next should be S1
         let next = switcher.next_mode().await;
         assert_eq!(next, Some(WMBusMode::S1));
-        
+
         // Next should be C1
         let next = switcher.next_mode().await;
         assert_eq!(next, Some(WMBusMode::C1));
-        
+
         // Should cycle back to T1
         let next = switcher.next_mode().await;
         assert_eq!(next, Some(WMBusMode::T1));
     }
-    
+
     #[tokio::test]
     async fn test_mode_establishment() {
         let mut switcher = ModeSwitcher::new();
-        
+
         // Try a few modes
         switcher.next_mode().await;
         switcher.next_mode().await;
-        
+
         // Establish S1 mode
         switcher.mode_established(WMBusMode::S1);
-        
+
         // Next mode should still be S1 (established)
         let next = switcher.next_mode().await;
         assert_eq!(next, Some(WMBusMode::S1));
         assert_eq!(switcher.established_mode(), Some(WMBusMode::S1));
     }
-    
+
     #[test]
     fn test_mode_parameters() {
         // Test T1 mode
         assert_eq!(WMBusMode::T1.chip_rate(), 100_000);
         assert_eq!(WMBusMode::T1.data_rate(), 66_667);
         assert_eq!(WMBusMode::T1.preamble_chips(), 19);
-        
+
         // Test S1 mode
         assert_eq!(WMBusMode::S1.chip_rate(), 32_768);
         assert_eq!(WMBusMode::S1.data_rate(), 16_384);
         assert_eq!(WMBusMode::S1.preamble_chips(), 279);
-        
+
         // Test C1 mode
         assert_eq!(WMBusMode::C1.chip_rate(), 100_000);
         assert_eq!(WMBusMode::C1.data_rate(), 100_000);
         assert_eq!(WMBusMode::C1.preamble_chips(), 64);
     }
-    
+
     #[test]
     fn test_capability_frame() {
-        let negotiator = ModeNegotiator::new(vec![
-            WMBusMode::T1,
-            WMBusMode::S1,
-            WMBusMode::C1,
-        ]);
-        
+        let negotiator = ModeNegotiator::new(vec![WMBusMode::T1, WMBusMode::S1, WMBusMode::C1]);
+
         let frame = negotiator.build_capability_frame();
         assert_eq!(frame[0], 0x7A); // CI field
         assert_eq!(frame[1] & 0x01, 0x01); // T1 bit
         assert_eq!(frame[1] & 0x04, 0x04); // S1 bit
         assert_eq!(frame[1] & 0x10, 0x10); // C1 bit
     }
-    
+
     #[test]
     fn test_mode_selection() {
-        let negotiator = ModeNegotiator::new(vec![
-            WMBusMode::T1,
-            WMBusMode::S1,
-            WMBusMode::C1,
-        ]);
-        
+        let negotiator = ModeNegotiator::new(vec![WMBusMode::T1, WMBusMode::S1, WMBusMode::C1]);
+
         // Remote supports T1 and S1
         let remote_modes = vec![WMBusMode::T1, WMBusMode::S1];
         let best = negotiator.select_best_mode(&remote_modes);
         assert_eq!(best, Some(WMBusMode::T1)); // T1 preferred over S1
-        
+
         // Remote only supports S1
         let remote_modes = vec![WMBusMode::S1];
         let best = negotiator.select_best_mode(&remote_modes);
         assert_eq!(best, Some(WMBusMode::S1));
-        
+
         // No common modes
         let remote_modes = vec![WMBusMode::T2];
         let best = negotiator.select_best_mode(&remote_modes);

@@ -45,7 +45,7 @@ fn test_mbus_data_record_decode_2byte_value() {
     let (_, record) = mbus_data_record_decode(&input).unwrap();
 
     match record.value {
-        MBusRecordValue::Numeric(val) => assert_eq!(val as u32, 0xA1A2),
+        MBusRecordValue::Numeric(val) => assert_eq!(val as u32, 0xA2A1), // Little-endian: 0xA1, 0xA2 -> 0xA2A1
         _ => panic!("Expected numeric value"),
     }
 }
@@ -63,8 +63,8 @@ fn test_mbus_data_record_decode_4byte_value() {
     let (_, record) = mbus_data_record_decode(&input).unwrap();
 
     match record.value {
-        // Implementation casts to i32 then f64, so 0xA1A2A3A4 becomes negative
-        MBusRecordValue::Numeric(val) => assert_eq!(val as i32, 0xA1A2A3A4u32 as i32),
+        // Little-endian: 0xA1, 0xA2, 0xA3, 0xA4 -> 0xA4A3A2A1
+        MBusRecordValue::Numeric(val) => assert_eq!(val as u32, 0xA4A3A2A1),
         _ => panic!("Expected numeric value"),
     }
 }
@@ -75,7 +75,7 @@ fn test_mbus_data_record_decode_float() {
         0x00, 0x00, 0x00, 0x00, // Timestamp
         0x05, // DIF: 4-byte float
         0x00, // VIF
-        0x41, 0x20, 0x00, 0x00, // Data: 10.0 in IEEE 754
+        0x00, 0x00, 0x20, 0x41, // Data: 10.0 in IEEE 754 little-endian
         0xFF, // Extra byte
     ];
 
@@ -103,8 +103,8 @@ fn test_mbus_data_record_decode_6byte_value() {
 
     match record.value {
         MBusRecordValue::Numeric(val) => {
-            // Implementation casts to i64 then f64
-            let expected = 0xA1A2A3A4A5A6u64 as i64 as f64;
+            // Little-endian: 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6 -> 0xA6A5A4A3A2A1
+            let expected = 0xA6A5A4A3A2A1u64 as f64;
             assert!((val - expected).abs() < 0.001);
         }
         _ => panic!("Expected numeric value"),
@@ -125,8 +125,8 @@ fn test_mbus_data_record_decode_8byte_value() {
 
     match record.value {
         MBusRecordValue::Numeric(val) => {
-            // Implementation casts to i64 then f64, so high bit set makes it negative
-            let expected = 0xA1A2A3A4A5A6A7A8u64 as i64 as f64;
+            // Little-endian: 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8 -> 0xA8A7A6A5A4A3A2A1
+            let expected = 0xA8A7A6A5A4A3A2A1u64 as f64;
             assert_eq!(val, expected);
         }
         _ => panic!("Expected numeric value"),

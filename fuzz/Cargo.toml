@@ -1,0 +1,36 @@
+[package]
+name = "mbus-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mbus-rs = { path = ".." }
+
+[[bin]]
+name = "fuzz_parse_frame"
+path = "fuzz_targets/fuzz_parse_frame.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_vif_decode"
+path = "fuzz_targets/fuzz_vif_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_data_encoding"
+path = "fuzz_targets/fuzz_data_encoding.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_multi_telegram"
+path = "fuzz_targets/fuzz_multi_telegram.rs"
+test = false
+doc = false

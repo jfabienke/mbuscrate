@@ -37,6 +37,7 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
   - Optional CRC addition before encryption
   - Access number extraction from frames
 - **Mode 13 TLS Documentation** (OMS 7.3.7): Comprehensive documentation explaining IP-only nature
+- **Multi-Telegram Support**: Infrastructure for handling multi-frame responses with FCB toggling and data accumulation (requires CI bit 4 detection activation)
 
 #### Previously Added (Pre-1.0)
 - **Wireless M-Bus Support**: Complete SX126x radio driver implementation with GFSK modulation

@@ -29,13 +29,13 @@
 //! log_frame_hex("Received frame", &frame_data);
 //! ```
 
-use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// Throttling structure for rate-limiting log messages
 ///
-/// This prevents log spam in production environments where high-frequency 
-/// events can overwhelm the logging system, a common challenge in 
+/// This prevents log spam in production environments where high-frequency
+/// events can overwhelm the logging system, a common challenge in
 /// continuous monitoring applications.
 #[derive(Debug)]
 pub struct LogThrottle {
@@ -79,12 +79,12 @@ impl LogThrottle {
     pub fn allow(&mut self) -> bool {
         let now = Instant::now();
         let elapsed_ms = now.duration_since(self.t0).as_millis() as u64;
-        
+
         if elapsed_ms > self.window_ms {
             self.t0 = now;
             self.count = 0;
         }
-        
+
         self.count += 1;
         self.count <= self.cap
     }
@@ -95,9 +95,9 @@ impl LogThrottle {
             window_ms: self.window_ms,
             cap: self.cap,
             count: self.count,
-            window_remaining_ms: self.window_ms.saturating_sub(
-                self.t0.elapsed().as_millis() as u64
-            ),
+            window_remaining_ms: self
+                .window_ms
+                .saturating_sub(self.t0.elapsed().as_millis() as u64),
         }
     }
 
@@ -136,10 +136,11 @@ impl ThrottleManager {
 
     /// Check if logging is allowed for a specific category
     pub fn allow(&mut self, category: &str, window_ms: u64, cap: u32) -> bool {
-        let throttle = self.throttles
+        let throttle = self
+            .throttles
             .entry(category.to_string())
             .or_insert_with(|| LogThrottle::new(window_ms, cap));
-        
+
         throttle.allow()
     }
 
@@ -171,20 +172,20 @@ impl Default for ThrottleManager {
 /// with optional length limits to prevent excessive log output.
 pub fn log_frame_hex(prefix: &str, data: &[u8]) {
     const MAX_LOG_BYTES: usize = 64; // Limit hex output to prevent log spam
-    
+
     let display_data = if data.len() > MAX_LOG_BYTES {
         &data[..MAX_LOG_BYTES]
     } else {
         data
     };
-    
+
     let hex_str = crate::util::hex::format_hex_compact(display_data);
     let suffix = if data.len() > MAX_LOG_BYTES {
         format!(" ... ({} bytes total)", data.len())
     } else {
         String::new()
     };
-    
+
     log::debug!("{}: {}{}", prefix, hex_str, suffix);
 }
 
@@ -222,26 +223,29 @@ pub fn span_frame_processing(frame_type: &str) -> tracing::Span {
 
 /// Fallback span creation when tracing is not available
 #[cfg(not(feature = "tracing"))]
-pub fn span_frame_processing(_frame_type: &str) -> () {
-    () // No-op when tracing is disabled
+pub fn span_frame_processing(_frame_type: &str) {
+    // No-op when tracing is disabled
 }
 
 /// Create a tracing span for CRC operations
 #[cfg(feature = "tracing")]
 pub fn span_crc_validation(expected: u16, calculated: u16) -> tracing::Span {
-    tracing::debug_span!("crc_validation", expected = expected, calculated = calculated)
+    tracing::debug_span!(
+        "crc_validation",
+        expected = expected,
+        calculated = calculated
+    )
 }
 
 #[cfg(not(feature = "tracing"))]
-pub fn span_crc_validation(_expected: u16, _calculated: u16) -> () {
-    ()
+pub fn span_crc_validation(_expected: u16, _calculated: u16) {
+    // No-op when tracing is disabled
 }
 
 /// Macros for convenient throttled logging
 ///
 /// These macros combine throttling with standard logging levels
 /// for common use cases.
-
 /// Log an error with throttling
 #[macro_export]
 macro_rules! log_error_throttled {
@@ -274,7 +278,6 @@ macro_rules! log_info_throttled {
 
 /// Debug logging utilities for protocol analysis
 pub mod debug {
-    use super::*;
 
     /// Log packet statistics in a formatted way
     pub fn log_packet_stats(stats: &crate::wmbus::radio::rfm69_packet::PacketStats) {
@@ -294,20 +297,30 @@ pub mod debug {
         if valid {
             log::debug!("CRC valid: {:04X}", expected);
         } else {
-            log::warn!("CRC mismatch: expected {:04X}, calculated {:04X}", expected, calculated);
+            log::warn!(
+                "CRC mismatch: expected {:04X}, calculated {:04X}",
+                expected,
+                calculated
+            );
         }
     }
 
     /// Log frame type detection
     pub fn log_frame_type_detection(sync_byte: u8, frame_type: &str) {
-        log::debug!("Frame type detected: sync={:02X} -> {}", sync_byte, frame_type);
+        log::debug!(
+            "Frame type detected: sync={:02X} -> {}",
+            sync_byte,
+            frame_type
+        );
     }
 
     /// Log encryption detection
     pub fn log_encryption_detection(ci: u8, acc: u8, encrypted: bool) {
         log::debug!(
             "Encryption check: CI={:02X}, ACC={:02X} -> encrypted={}",
-            ci, acc, encrypted
+            ci,
+            acc,
+            encrypted
         );
     }
 }
@@ -352,10 +365,12 @@ pub mod perf {
         } else {
             0.0
         };
-        
+
         log::debug!(
             "Frame processing: {} bytes in {:?} ({:.1} bytes/sec)",
-            frame_len, duration, throughput
+            frame_len,
+            duration,
+            throughput
         );
     }
 }
@@ -368,12 +383,12 @@ mod tests {
     #[test]
     fn test_log_throttle_basic() {
         let mut throttle = LogThrottle::new(1000, 3); // 3 messages per second
-        
+
         // First 3 messages should be allowed
         assert!(throttle.allow());
         assert!(throttle.allow());
         assert!(throttle.allow());
-        
+
         // 4th message should be throttled
         assert!(!throttle.allow());
         assert!(!throttle.allow());
@@ -382,12 +397,12 @@ mod tests {
     #[test]
     fn test_log_throttle_reset() {
         let mut throttle = LogThrottle::new(1000, 2);
-        
+
         // Use up the quota
         assert!(throttle.allow());
         assert!(throttle.allow());
         assert!(!throttle.allow());
-        
+
         // Reset should allow new messages
         throttle.reset();
         assert!(throttle.allow());
@@ -398,7 +413,7 @@ mod tests {
     #[test]
     fn test_throttle_manager() {
         let mut manager = ThrottleManager::new();
-        
+
         // Different categories should have independent throttles
         assert!(manager.allow("crc_errors", 1000, 2));
         assert!(manager.allow("frame_errors", 1000, 2));
@@ -412,7 +427,7 @@ mod tests {
         let mut throttle = LogThrottle::new(1000, 5);
         throttle.allow();
         throttle.allow();
-        
+
         let stats = throttle.stats();
         assert_eq!(stats.window_ms, 1000);
         assert_eq!(stats.cap, 5);

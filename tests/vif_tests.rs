@@ -10,7 +10,7 @@ fn test_lookup_vif() {
     let info = vif_info.unwrap();
     assert_eq!(info.unit, "Wh");
     assert_eq!(info.quantity, "Energy");
-    assert_eq!(info.exponent, 1e-3);
+    assert_eq!(info.exponent, 1.0);
 }
 
 /// Tests that the VIFE information is correctly looked up.

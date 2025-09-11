@@ -13,6 +13,7 @@ coverage/
 .idea/
 *.swp
 *.swo
+*.rs.bak
 *~
 
 # Test artifacts
@@ -24,3 +25,33 @@ pre-commit.sh
 
 # OpenCode database
 .opencode/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# AI/Claude tools
+.claude/
+
+# Cross-compilation outputs
+arm/
+aarch64/
+cross/
+
+# Generated documentation
+/target/doc/
+
+# Cache directories
+.cache/
+Cargo.lock~  # Backup lockfiles
+

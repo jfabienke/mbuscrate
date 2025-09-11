@@ -50,8 +50,8 @@ impl StateMachine {
     /// Selects a device using primary addressing (direct) or secondary addressing (selection sequence).
     /// 
     /// # Arguments
-    /// * `address` - For primary addressing (1-250): the device's primary address
-    ///               For secondary addressing: use 253, requires prior secondary address selection
+    /// * `address` - For primary addressing (1-250): the device's primary address.
+    ///   For secondary addressing: use 253, requires prior secondary address selection
     /// 
     /// # Returns
     /// * `Ok(())` - Device successfully selected or primary address validated

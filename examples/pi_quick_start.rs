@@ -2,13 +2,24 @@
 //!
 //! A minimal example showing how to get started with SX126x radio on Raspberry Pi.
 //! This example demonstrates the simplest possible setup for wM-Bus reception.
+//!
+//! Run with: cargo run --example pi_quick_start --features raspberry-pi
 
+#[cfg(not(feature = "raspberry-pi"))]
+fn main() {
+    eprintln!("This example requires the 'raspberry-pi' feature.");
+    eprintln!("Run with: cargo run --example pi_quick_start --features raspberry-pi");
+}
+
+#[cfg(feature = "raspberry-pi")]
 use mbus_rs::wmbus::radio::{
     driver::Sx126xDriver,
     hal::{RaspberryPiHalBuilder, GpioPins},
 };
+#[cfg(feature = "raspberry-pi")]
 use std::time::Duration;
 
+#[cfg(feature = "raspberry-pi")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Enable logging
     env_logger::init();

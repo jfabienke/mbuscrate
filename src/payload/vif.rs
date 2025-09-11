@@ -9,7 +9,7 @@ pub struct VifInfo {
     pub quantity: &'static str,
 }
 
-fn parse_vif(input: &[u8]) -> IResult<&[u8], VifInfo> {
+pub fn parse_vif(input: &[u8]) -> IResult<&[u8], VifInfo> {
     let (remaining, vif) = be_u8(input)?;
 
     let vif_info = crate::payload::vif_maps::lookup_primary_vif(vif).ok_or(nom::Err::Error(
@@ -19,7 +19,7 @@ fn parse_vif(input: &[u8]) -> IResult<&[u8], VifInfo> {
     Ok((remaining, vif_info))
 }
 
-fn parse_vife(input: &[u8]) -> IResult<&[u8], VifInfo> {
+pub fn parse_vife(input: &[u8]) -> IResult<&[u8], VifInfo> {
     let (remaining, first) = be_u8(input)?;
 
     if first == 0xFD {
@@ -46,8 +46,23 @@ fn parse_vife(input: &[u8]) -> IResult<&[u8], VifInfo> {
 }
 
 pub fn parse_vib(input: &[u8]) -> IResult<&[u8], Vec<VifInfo>> {
-    let (remaining, vif) = parse_vif(input)?;
-    let (remaining, vifes) = nom::multi::many0(parse_vife)(remaining)?;
+    let (mut remaining, vif) = parse_vif(input)?;
+    let mut vifes = Vec::new();
+    
+    // Parse VIFEs if present (check for FD or FB extension codes)
+    while !remaining.is_empty() {
+        if remaining[0] == 0xFD || remaining[0] == 0xFB {
+            match parse_vife(remaining) {
+                Ok((new_remaining, vife)) => {
+                    vifes.push(vife);
+                    remaining = new_remaining;
+                }
+                Err(_) => break, // Stop on parse error
+            }
+        } else {
+            break; // No more extensions
+        }
+    }
 
     Ok((remaining, std::iter::once(vif).chain(vifes).collect()))
 }

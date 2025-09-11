@@ -28,50 +28,50 @@
 //! use mbus_rs::wmbus::radio::hal::enhanced_gpio::{EnhancedGpio, GpioEventType, EdgeType};
 //!
 //! let mut gpio = EnhancedGpio::new()?;
-//! 
+//!
 //! // Setup interrupt-driven DIO1 monitoring
 //! gpio.setup_interrupt(24, EdgeType::Rising, GpioEventType::HighPriority).await?;
-//! 
+//!
 //! // Wait for GPIO event asynchronously
 //! let event = gpio.wait_for_event().await?;
 //! println!("GPIO {} triggered", event.pin);
 //! ```
 
-use crate::util::{IoBuffer, logging};
-use thiserror::Error;
+use crate::util::{logging, IoBuffer};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 #[cfg(feature = "raspberry-pi")]
-use rppal::gpio::{Gpio, InputPin, OutputPin, Level, Trigger, Error as GpioError};
+use rppal::gpio::{Error as GpioError, Gpio, InputPin, Level, OutputPin, Trigger};
 
 /// Enhanced GPIO errors with specific failure types
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum EnhancedGpioError {
     #[error("GPIO initialization failed: {reason}")]
     InitializationFailed { reason: String },
-    
+
     #[error("Pin {pin} not configured for operation: {operation}")]
     PinNotConfigured { pin: u8, operation: String },
-    
+
     #[error("Interrupt setup failed for pin {pin}: {reason}")]
     InterruptSetupFailed { pin: u8, reason: String },
-    
+
     #[error("Event timeout after {timeout_ms}ms")]
     EventTimeout { timeout_ms: u64 },
-    
+
     #[error("Event queue overflow: {lost_events} events lost")]
     EventQueueOverflow { lost_events: usize },
-    
+
     #[error("Invalid edge type for pin {pin}: {edge:?}")]
     InvalidEdgeType { pin: u8, edge: EdgeType },
-    
+
     #[error("GPIO operation failed: {reason}")]
     OperationFailed { reason: String },
-    
+
     #[error("Pin {pin} already in use by another handler")]
     PinInUse { pin: u8 },
 }
@@ -181,6 +181,7 @@ pub struct GpioStats {
 #[derive(Debug)]
 pub struct EnhancedGpio {
     /// Event transmission channel
+    #[allow(dead_code)]
     event_tx: mpsc::UnboundedSender<GpioEvent>,
     /// Event reception channel
     event_rx: Arc<Mutex<mpsc::UnboundedReceiver<GpioEvent>>>,
@@ -192,8 +193,10 @@ pub struct EnhancedGpio {
     /// Statistics tracking
     stats: Arc<Mutex<GpioStats>>,
     /// Event buffer for high-frequency operations
+    #[allow(dead_code)]
     event_buffer: Arc<Mutex<IoBuffer>>,
     /// Error throttling for production use
+    #[allow(dead_code)]
     error_throttle: logging::LogThrottle,
     /// Last event times for debouncing
     last_event_times: Arc<Mutex<HashMap<u8, Instant>>>,
@@ -203,7 +206,7 @@ impl EnhancedGpio {
     /// Create a new enhanced GPIO instance
     pub fn new() -> Result<Self, EnhancedGpioError> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        
+
         Ok(Self {
             event_tx,
             event_rx: Arc::new(Mutex::new(event_rx)),
@@ -218,12 +221,9 @@ impl EnhancedGpio {
     }
 
     /// Setup interrupt-driven monitoring for a GPIO pin
-    pub async fn setup_interrupt(
-        &mut self,
-        config: GpioConfig,
-    ) -> Result<(), EnhancedGpioError> {
+    pub async fn setup_interrupt(&mut self, config: GpioConfig) -> Result<(), EnhancedGpioError> {
         let pin = config.pin;
-        
+
         // Check if pin is already configured
         if self.pin_configs.contains_key(&pin) {
             return Err(EnhancedGpioError::PinInUse { pin });
@@ -243,9 +243,7 @@ impl EnhancedGpio {
             });
         }
 
-        self.pin_configs.insert(pin, config.clone());
-        log::info!("GPIO {} interrupt configured: {:?}", pin, config);
-        
+        #[cfg(feature = "raspberry-pi")]
         Ok(())
     }
 
@@ -258,10 +256,13 @@ impl EnhancedGpio {
             reason: format!("GPIO initialization failed: {}", e),
         })?;
 
-        let mut pin = gpio.get(config.pin).map_err(|e| EnhancedGpioError::InterruptSetupFailed {
-            pin: config.pin,
-            reason: format!("Pin access failed: {}", e),
-        })?.into_input();
+        let mut pin = gpio
+            .get(config.pin)
+            .map_err(|e| EnhancedGpioError::InterruptSetupFailed {
+                pin: config.pin,
+                reason: format!("Pin access failed: {}", e),
+            })?
+            .into_input();
 
         // Convert edge type to rppal trigger
         let trigger = match config.edge {
@@ -280,7 +281,7 @@ impl EnhancedGpio {
 
         pin.set_async_interrupt(trigger, move |level| {
             let now = Instant::now();
-            
+
             // Debouncing check
             if let Some(debounce_time) = debounce_us {
                 if let Ok(mut times) = last_times.lock() {
@@ -313,7 +314,8 @@ impl EnhancedGpio {
                 // Event channel closed, log but don't panic
                 log::warn!("GPIO event channel closed for pin {}", pin_num);
             }
-        }).map_err(|e| EnhancedGpioError::InterruptSetupFailed {
+        })
+        .map_err(|e| EnhancedGpioError::InterruptSetupFailed {
             pin: config.pin,
             reason: format!("Interrupt setup failed: {}", e),
         })?;
@@ -328,8 +330,9 @@ impl EnhancedGpio {
         timeout_ms: u64,
     ) -> Result<GpioEvent, EnhancedGpioError> {
         let timeout_duration = Duration::from_millis(timeout_ms);
-        
-        timeout(timeout_duration, self.wait_for_event()).await
+
+        timeout(timeout_duration, self.wait_for_event())
+            .await
             .map_err(|_| EnhancedGpioError::EventTimeout { timeout_ms })?
     }
 
@@ -361,10 +364,10 @@ impl EnhancedGpio {
         let timeout_duration = Duration::from_millis(timeout_ms);
 
         while start.elapsed() < timeout_duration {
-            let event = self.wait_for_event_timeout(
-                timeout_ms - start.elapsed().as_millis() as u64
-            ).await?;
-            
+            let event = self
+                .wait_for_event_timeout(timeout_ms - start.elapsed().as_millis() as u64)
+                .await?;
+
             if event.pin == pin {
                 return Ok(event);
             }
@@ -377,14 +380,14 @@ impl EnhancedGpio {
     /// Check for GPIO events without blocking
     pub fn poll_events(&mut self) -> Vec<GpioEvent> {
         let mut events = Vec::new();
-        
+
         if let Ok(mut rx) = self.event_rx.try_lock() {
             while let Ok(event) = rx.try_recv() {
                 self.update_stats(&event);
                 events.push(event);
             }
         }
-        
+
         events
     }
 
@@ -424,7 +427,7 @@ impl EnhancedGpio {
         }
 
         self.pin_configs.remove(&pin);
-        
+
         if let Ok(mut times) = self.last_event_times.lock() {
             times.remove(&pin);
         }
@@ -435,7 +438,8 @@ impl EnhancedGpio {
 
     /// Get current GPIO statistics
     pub fn get_stats(&self) -> Result<GpioStats, EnhancedGpioError> {
-        self.stats.lock()
+        self.stats
+            .lock()
             .map(|stats| *stats)
             .map_err(|_| EnhancedGpioError::OperationFailed {
                 reason: "Stats lock failed".to_string(),
@@ -458,7 +462,7 @@ impl EnhancedGpio {
     fn update_stats(&self, event: &GpioEvent) {
         if let Ok(mut stats) = self.stats.lock() {
             stats.total_events += 1;
-            
+
             match event.priority {
                 GpioEventType::HighPriority | GpioEventType::Critical => {
                     stats.high_priority_events += 1;
@@ -516,14 +520,14 @@ pub mod helpers {
         // DIO1 for FIFO level interrupt (high priority)
         let dio1_config = GpioConfig::new(dio1_pin, EdgeType::Rising, GpioEventType::HighPriority)
             .with_debounce(10); // 10µs debounce for radio signals
-        
+
         gpio.setup_interrupt(dio1_config).await?;
 
         // DIO2 for sync word detection (critical priority)
         if let Some(dio2) = dio2_pin {
-            let dio2_config = GpioConfig::new(dio2, EdgeType::Rising, GpioEventType::Critical)
-                .with_debounce(5); // 5µs debounce for fast sync detection
-            
+            let dio2_config =
+                GpioConfig::new(dio2, EdgeType::Rising, GpioEventType::Critical).with_debounce(5); // 5µs debounce for fast sync detection
+
             gpio.setup_interrupt(dio2_config).await?;
         }
 
@@ -540,7 +544,7 @@ pub mod helpers {
         // DIO1 for primary interrupts (high priority)
         let dio1_config = GpioConfig::new(dio1_pin, EdgeType::Rising, GpioEventType::HighPriority)
             .with_debounce(20); // 20µs debounce
-        
+
         gpio.setup_interrupt(dio1_config).await?;
 
         // DIO2 for RF switch control (normal priority)
@@ -565,7 +569,7 @@ pub mod helpers {
         timeout_ms: u64,
     ) -> Result<(), EnhancedGpioError> {
         let event = gpio.wait_for_pin_event(dio_pin, timeout_ms).await?;
-        
+
         if event.level {
             log::debug!("Packet reception complete on GPIO {}", dio_pin);
             Ok(())
@@ -586,7 +590,7 @@ mod tests {
         let config = GpioConfig::new(24, EdgeType::Rising, GpioEventType::HighPriority)
             .with_debounce(100)
             .with_rate_limit(1000);
-        
+
         assert_eq!(config.pin, 24);
         assert_eq!(config.edge, EdgeType::Rising);
         assert_eq!(config.priority, GpioEventType::HighPriority);
@@ -615,7 +619,7 @@ mod tests {
     fn test_enhanced_gpio_creation() {
         let gpio = EnhancedGpio::new();
         assert!(gpio.is_ok());
-        
+
         let gpio = gpio.unwrap();
         assert_eq!(gpio.configured_pins().len(), 0);
         assert!(!gpio.is_pin_configured(24));

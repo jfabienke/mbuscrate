@@ -44,15 +44,27 @@
 //!    ```bash
 //!    sudo ./target/release/raspberry_pi_wmbus
 //!    ```
+//!
+//! 4. Run with: `cargo run --example raspberry_pi_wmbus --features raspberry-pi`
 
+#[cfg(not(feature = "raspberry-pi"))]
+fn main() {
+    eprintln!("This example requires the 'raspberry-pi' feature.");
+    eprintln!("Run with: cargo run --example raspberry_pi_wmbus --features raspberry-pi");
+}
+
+#[cfg(feature = "raspberry-pi")]
 use mbus_rs::wmbus::radio::{
     driver::Sx126xDriver,
     hal::{RaspberryPiHal, GpioPins},
 };
+#[cfg(feature = "raspberry-pi")]
 use std::time::Duration;
+#[cfg(feature = "raspberry-pi")]
 use log::{info, warn, error};
 
 /// Default GPIO pin configuration for SX126x on Raspberry Pi
+#[cfg(feature = "raspberry-pi")]
 const DEFAULT_GPIO_PINS: GpioPins = GpioPins {
     busy: 25,      // Pin 22
     dio1: 24,      // Pin 18
@@ -61,14 +73,18 @@ const DEFAULT_GPIO_PINS: GpioPins = GpioPins {
 };
 
 /// EU wM-Bus S-mode frequency (868.95 MHz)
+#[cfg(feature = "raspberry-pi")]
 const WMBUS_EU_FREQ: u32 = 868_950_000;
 
 /// wM-Bus data rate (100 kbps)
+#[cfg(feature = "raspberry-pi")]
 const WMBUS_BITRATE: u32 = 100_000;
 
 /// Crystal frequency for SX126x (32 MHz typical)
+#[cfg(feature = "raspberry-pi")]
 const CRYSTAL_FREQ: u32 = 32_000_000;
 
+#[cfg(feature = "raspberry-pi")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
@@ -98,6 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Run as wM-Bus receiver
+#[cfg(feature = "raspberry-pi")]
 async fn run_receiver() -> Result<(), Box<dyn std::error::Error>> {
     info!("Initializing wM-Bus receiver");
 
@@ -155,6 +172,7 @@ async fn run_receiver() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Run as wM-Bus transmitter
+#[cfg(feature = "raspberry-pi")]
 async fn run_transmitter() -> Result<(), Box<dyn std::error::Error>> {
     info!("Initializing wM-Bus transmitter");
 
@@ -229,6 +247,7 @@ async fn run_transmitter() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Test hardware connectivity
+#[cfg(feature = "raspberry-pi")]
 async fn run_hardware_test() -> Result<(), Box<dyn std::error::Error>> {
     info!("Running hardware connectivity test");
 
@@ -317,6 +336,7 @@ async fn run_hardware_test() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Print received frame data in hex format
+#[cfg(feature = "raspberry-pi")]
 fn print_frame_data(data: &[u8]) {
     const BYTES_PER_LINE: usize = 16;
     
@@ -353,6 +373,7 @@ fn print_frame_data(data: &[u8]) {
 }
 
 /// Parse wM-Bus frame (basic parsing example)
+#[cfg(feature = "raspberry-pi")]
 fn parse_wmbus_frame(data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     if data.len() < 10 {
         return Err("Frame too short for wM-Bus".into());
@@ -387,6 +408,7 @@ fn parse_wmbus_frame(data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Decode 2-byte manufacturer ID to 3-letter string
+#[cfg(feature = "raspberry-pi")]
 fn decode_manufacturer_id(m_field: u16) -> String {
     if m_field == 0 {
         return "Unknown".to_string();
@@ -410,6 +432,7 @@ fn decode_manufacturer_id(m_field: u16) -> String {
 }
 
 /// Generate a test wM-Bus frame
+#[cfg(feature = "raspberry-pi")]
 fn generate_test_frame(sequence: u16) -> Vec<u8> {
     let mut frame = Vec::new();
     
@@ -447,6 +470,7 @@ fn generate_test_frame(sequence: u16) -> Vec<u8> {
 }
 
 /// Encode 3-letter manufacturer ID to 2-byte M-Field
+#[cfg(feature = "raspberry-pi")]
 fn encode_manufacturer_id(id: &str) -> u16 {
     if id.len() != 3 {
         return 0;
@@ -454,8 +478,9 @@ fn encode_manufacturer_id(id: &str) -> u16 {
     
     let mut result = 0u16;
     for (i, ch) in id.chars().take(3).enumerate() {
-        if let Some(value) = ch.to_ascii_uppercase().checked_sub('A') {
-            let char_value = (value as u16) + 1; // A=1, B=2, ..., Z=26
+        let upper = ch.to_ascii_uppercase();
+        if upper >= 'A' && upper <= 'Z' {
+            let char_value = ((upper as u16) - ('A' as u16) + 1); // A=1, B=2, ..., Z=26
             result |= char_value << (10 - i * 5);
         }
     }

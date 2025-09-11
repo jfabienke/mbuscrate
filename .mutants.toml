@@ -1,0 +1,70 @@
+# Mutation testing configuration for cargo-mutants
+
+# Timeout for each mutation test (seconds)
+timeout = 30
+
+# Number of parallel jobs
+jobs = 4
+
+# Minimum test suite run time to consider mutation caught
+minimum_test_timeout = 1.0
+
+# Files to prioritize for mutation testing
+[[profiles.default.files]]
+path = "src/mbus/frame.rs"
+priority = 1
+
+[[profiles.default.files]]
+path = "src/payload/vif.rs"
+priority = 1
+
+[[profiles.default.files]]
+path = "src/payload/data_encoding.rs"
+priority = 1
+
+[[profiles.default.files]]
+path = "src/mbus/mbus_protocol.rs"
+priority = 2
+
+[[profiles.default.files]]
+path = "src/payload/record.rs"
+priority = 2
+
+# Exclude certain patterns from mutation
+[profiles.default.exclude]
+# Don't mutate error messages
+regex = ["Error.*", ".*Error", "panic!.*", "unreachable!.*"]
+
+# Don't mutate logging statements
+functions = ["log", "debug", "info", "warn", "error", "trace"]
+
+# Skip mutating test code
+paths = ["tests/", "benches/", "examples/"]
+
+# Mutation operators to use
+[profiles.default.mutators]
+# Arithmetic operators
+arithmetic = true
+
+# Logical operators
+logical = true
+
+# Comparison operators
+comparison = true
+
+# Assignment operators
+assignment = true
+
+# Unary operators
+unary = true
+
+# Success criteria
+[profiles.default.goals]
+# Target mutation score (percentage of mutants killed)
+minimum_score = 95
+
+# Maximum number of timeout mutants allowed
+max_timeouts = 5
+
+# Maximum number of unviable mutants
+max_unviable = 10

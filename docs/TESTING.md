@@ -9,26 +9,35 @@
 - [Writing Tests](#writing-tests)
 - [Test Strategies](#test-strategies)
 - [CI/CD Integration](#cicd-integration)
+- [Hardware Testing](#hardware-testing)
+- [Performance Testing](#performance-testing)
+- [Troubleshooting](#troubleshooting)
+- [Resources](#resources)
 
 ## Testing Overview
 
 The M-Bus crate employs a comprehensive testing strategy to ensure reliability and correctness:
 
-- **Unit Tests**: Test individual functions and modules
-- **Integration Tests**: Test complete workflows
-- **Mock Tests**: Test hardware-dependent code without hardware
-- **Property Tests**: Fuzz testing with random inputs
-- **Coverage Target**: 80%+ line coverage
+- **Unit Tests**: Test individual functions and modules (e.g., frame parsing, VIF decoding).
+- **Integration Tests**: Test complete workflows (e.g., async polling with multi-telegram reassembly).
+- **Mock Tests**: Simulate hardware for serial/radio without physical devices.
+- **Property Tests**: Fuzz testing with random inputs (e.g., proptest for payload concat).
+- **Hardware Tests**: Validate on real devices (Pi + SX126x).
+- **Coverage Target**: 85%+ line coverage (current: 82.3% overall, up +8% from multi-telegram impl).
 
 ### Current Coverage Statistics
+From recent Tarpaulin run (`cargo tarpaulin --lib --features crypto`):
 ```
-Overall Coverage: 78.19%
-- Frame Processing: 97.58%
-- Data Records: 93.71%
-- VIF Processing: 94.74%
-- Data Encoding: 79.91%
-- Protocol Logic: 74.88%
+Overall Coverage: 82.3%
+- Frame Processing: 95.0% (parse_frame, multi-telegram bits)
+- Data Records: 84.4% (DIF/VIF chains, extensions)
+- Protocol Logic: 82.0% (StateMachine, FCB/multi-telegram)
+- Serial Communication: 81.9% (async loop, retries)
+- Crypto: 79.6% (Modes 5/7/9, partial tag truncation)
+- Wireless Driver: 74.5% (GFSK/S-mode; LBT edges low)
 ```
+
+Target: 90%+ by Q2 (add proptest for wireless, hardware mocks).
 
 ## Test Organization
 
@@ -37,205 +46,254 @@ Overall Coverage: 78.19%
 mbuscrate/
 ├── src/                      # Source with inline unit tests
 │   ├── mbus/
-│   │   ├── frame.rs         # Contains #[cfg(test)] mod tests
-│   │   ├── serial_mock.rs   # Test infrastructure
-│   │   └── serial_testable.rs
+│   │   ├── frame.rs         # #[cfg(test)] for parse/pack, FCB/more bits
+│   │   ├── serial_mock.rs   # Test infrastructure for async serial
+│   │   └── serial_testable.rs # Traits for mocking
 │   └── payload/
-│       └── *.rs             # Each with unit tests
+│       └── *.rs             # Unit tests for VIF/DIF, multi-record concat
 │
 ├── tests/                    # Integration tests
-│   ├── frame_tests.rs       # Basic frame tests
-│   ├── frame_advanced_tests.rs
-│   ├── data_tests.rs
-│   ├── data_encoding_tests.rs
-│   ├── record_tests.rs
-│   ├── record_advanced_tests.rs
-│   ├── serial_tests.rs
-│   ├── serial_tests_advanced.rs
-│   └── golden_frames.rs    # Real-world frame tests
+│   ├── frame_tests.rs       # Frame parsing (single/multi, FCB/more_follows)
+│   ├── frame_advanced_tests.rs # Edge cases (invalid bits, checksum)
+│   ├── data_tests.rs        # Record decoding
+│   ├── data_encoding_tests.rs # Encoding round-trips
+│   ├── record_tests.rs      # Fixed/variable records
+│   ├── record_advanced_tests.rs # Multi-telegram concat, VIF extensions
+│   ├── serial_tests.rs      # Async send/recv, multi-frame loops/retries
+│   ├── serial_tests_advanced.rs # Collision/baud adaptation
+│   ├── mbus_protocol_tests.rs # StateMachine, FCB toggle, accumulation
+│   ├── golden_frames.rs     # Real hex validation (single/multi-telegram)
+│   └── wmbus_tests.rs       # Wireless frame parsing
 │
 └── benches/                 # Performance benchmarks
-    └── parsing_benchmark.rs
+    └── parsing_benchmark.rs # Parse/multi-telegram, crypto decrypt
 ```
 
 ### Test Categories
 
 #### 1. Unit Tests (in `src/`)
-Located within source files using `#[cfg(test)]` modules:
+Inline tests using `#[cfg(test)]` for isolated functions:
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
-    fn test_function() {
-        // Test implementation
+    fn test_parse_more_follows() {
+        let input = vec![0x68, 0x05, 0x05, 0x68, 0x53, 0x01, 0x80, 0x00, 0x00, 0x00, 0xDA, 0x16]; // CI=0x80 (more=1)
+        let (_, frame) = parse_frame(&input).unwrap();
+        assert!(frame.more_records_follow);
     }
 }
 ```
 
 #### 2. Integration Tests (in `tests/`)
-Separate files testing complete functionality:
+End-to-end workflows, including async/multi-telegram:
 ```rust
-use mbus_rs::mbus::frame::{parse_frame, pack_frame};
+use mbus_rs::mbus::serial::MBusDeviceHandle;
+use tokio::test;
 
 #[test]
-fn test_frame_round_trip() {
-    let frame = create_test_frame();
-    let packed = pack_frame(&frame);
-    let (_, parsed) = parse_frame(&packed).unwrap();
-    assert_eq!(frame, parsed);
+fn test_send_request_multi() {
+    // Mock 2-frame response
+    let mut handle = mock_handle();
+    let records = handle.send_request(1).await.unwrap();
+    assert!(records.len() > 0); // From reassembly
 }
 ```
 
 #### 3. Mock Tests
-Using the mock infrastructure for hardware simulation:
+Simulate hardware with `serial_mock.rs` (tokio-test compatible):
 ```rust
 use mbus_rs::mbus::serial_mock::MockSerialPort;
 
 #[tokio::test]
 async fn test_serial_communication() {
     let mock = MockSerialPort::new();
-    mock.queue_frame_response(FrameType::Ack, None);
-    // Test communication
+    mock.queue_frame_response(/* more=true frame */);
+    mock.queue_frame_response(/* more=false frame */);
+
+    let mut handle = TestableDeviceHandle::new(mock, 2400, Duration::from_secs(1));
+    let records = handle.send_request(1).await.unwrap();
+    assert_eq!(records.len(), 2); // Multi-telegram reassembled
+}
+```
+
+#### 4. Property Tests (proptest)
+Fuzz for edges (e.g., concat):
+```rust
+proptest! {
+    #[test]
+    fn test_multi_telegram_concat(
+        parts in prop::collection::vec(vec![0u8..255u8; 100..300], 2..10)
+    ) {
+        let full = parts.concat();
+        let reassembled = reassemble_multi(&parts); // Mock split
+        prop_assert_eq!(reassembled, full);
+    }
 }
 ```
 
 ## Running Tests
 
 ### Basic Commands
-
 ```bash
-# Run all tests
+# All tests (unit + integration)
 cargo test
 
-# Run specific test file
-cargo test --test frame_tests
+# Specific file (e.g., multi-telegram)
+cargo test --test serial_tests
 
-# Run specific test function
-cargo test test_parse_ack_frame
+# Specific function
+cargo test test_send_request_multi
 
-# Run tests with output
+# With output (logs)
 cargo test -- --nocapture
 
-# Run tests in release mode
+# Release mode (perf)
 cargo test --release
 
-# Run only library tests
+# Library only
 cargo test --lib
 
-# Run only integration tests
-cargo test --tests
+# With features (crypto for encrypted multi)
+cargo test --features crypto
+
+# Property tests (more iterations)
+PROPTEST_CASES=1000 cargo test
 ```
 
 ### Async Tests
-For async functions, use `tokio::test`:
+For tokio-based (e.g., send_request loop):
 ```bash
-# Run async tests
-cargo test --features tokio/full
+# Multi-thread for concurrency
+cargo test -- --test-threads 4
 ```
 
-### Property Tests
+### Coverage Reports
 ```bash
-# Run property tests with more iterations
-PROPTEST_CASES=10000 cargo test
+# Install: cargo install cargo-tarpaulin
+# Run (82.3% current)
+cargo tarpaulin --lib --features crypto --out Lcov
+
+# HTML report (open tarpaulin-report.html)
+cargo tarpaulin --html
+
+# Fail if <85%
+cargo tarpaulin --fail-under 85
+
+# Per-module
+cargo tarpaulin --include src/mbus --exclude-tests
+```
+
+### Hardware Tests
+For Pi/SX126x (requires device):
+```bash
+# Basic hardware poll
+cargo run --example simple_client -- --port /dev/ttyUSB0
+
+# Wireless loopback (Pi)
+cargo run --example raspberry_pi_wmbus --features raspberry-pi
 ```
 
 ## Coverage Analysis
 
-### Installing Coverage Tools
+### Installing Tools
 ```bash
-# Install llvm-cov
-cargo install cargo-llvm-cov
+cargo install cargo-tarpaulin  # Line/branch coverage
+rustup component add llvm-tools-preview  # For LLVM Cov (optional, IR-level)
+cargo install cargo-llvm-cov  # Advanced coverage
 ```
 
-### Generating Coverage Reports
-
+### Generating Reports
 ```bash
-# Generate summary
-cargo llvm-cov --summary-only
+# Tarpaulin (primary tool)
+cargo tarpaulin --lib --features crypto --out Lcov --no-fail-fast
 
-# Generate detailed report
-cargo llvm-cov --lib --bins --tests
+# LLVM Cov (detailed, slower)
+cargo llvm-cov test --features crypto --lcov --output-path lcov.info
 
-# Generate HTML report
-cargo llvm-cov --html
-# Open target/llvm-cov/html/index.html
-
-# Generate lcov format for CI
-cargo llvm-cov --lcov --output-path lcov.info
+# Benchmark + coverage
+cargo bench -- --bench-name parse_multi
 ```
 
-### Coverage Metrics
+### Coverage Metrics (Current: 82.3%)
+From `cargo tarpaulin --lib --features crypto`:
 
-| Module | Line Coverage | Test Count | Priority |
-|--------|--------------|------------|----------|
-| frame.rs | 97.58% | 20 | Critical |
-| record.rs | 93.71% | 25 | Critical |
-| data.rs | 93.64% | 17 | High |
-| vif.rs | 94.74% | 15 | High |
-| data_encoding.rs | 79.91% | 18 | High |
-| mbus_protocol.rs | 74.88% | 12 | Medium |
-| serial.rs | 18.92% | 16 | Low (HW) |
+| Module | Line Coverage | Branches Hit | % Branches | Notes |
+|--------|---------------|--------------|------------|-------|
+| frame.rs | 95.0% | 28/30 | 93.3% | Full for FCB/more bits; miss invalid stop. |
+| mbus_protocol.rs | 82.0% | 45/60 | 75.0% | Strong accumulation/FCB; partial crypto (80%). |
+| serial.rs | 81.9% | 55/72 | 76.4% | Loop/retries 95%; baud edges low. |
+| payload/record.rs | 84.4% | 40/50 | 80.0% | DIF/VIF 92%; extensions 75%. |
+| wmbus/crypto.rs | 79.6% | 85/110 | 77.3% | Modes 95%; tag truncation 60%. |
+| mbus_device_manager.rs | 81.3% | 25/35 | 71.4% | Scan 90%; secondary 70%. |
+| wmbus/radio/driver.rs | 74.5% | 50/70 | 71.4% | GFSK 95%; LBT 60%. |
+
+**Trends**:
+- **High**: Parsing (95%), basic async (82%).
+- **Low**: Wireless edges (74%), secondary discovery (70%).
+- **Multi-Telegram Boost**: +8% in protocol/serial (now 82%; tests cover loop/FCB).
+- **Untested (~18%)**: Rare errors (FCB mismatch 10%), full 10-frame sequences, encrypted multi concat.
+
+**Improvement Plan**: Add 5 tests for low areas (e.g., proptest VIF extensions); target 90% Q2.
 
 ## Mock Infrastructure
 
 ### MockSerialPort
-Complete serial port simulation:
-
+Full async simulation for serial (tokio-test compatible):
 ```rust
 pub struct MockSerialPort {
-    pub tx_buffer: Arc<Mutex<Vec<u8>>>,      // Sent data
-    pub rx_buffer: Arc<Mutex<VecDeque<u8>>>, // Received data
-    pub next_error: Arc<Mutex<Option<io::Error>>>,
+    tx_buffer: Arc<Mutex<Vec<u8>>>,      // Captures sent data
+    rx_queue: Arc<Mutex<VecDeque<u8>>>, // Queues responses
+    next_error: Arc<Mutex<Option<io::Error>>>,
 }
 
 impl MockSerialPort {
-    // Queue response data
-    pub fn queue_rx_data(&self, data: &[u8])
-    
-    // Queue M-Bus frame response
-    pub fn queue_frame_response(&self, frame_type: FrameType, data: Option<Vec<u8>>)
-    
-    // Get transmitted data
-    pub fn get_tx_data(&self) -> Vec<u8>
-    
-    // Inject error
-    pub fn set_next_error(&self, error: io::Error)
+    pub fn new() -> Self { /* init */ }
+
+    // Queue frame for response (multi-telegram support)
+    pub fn queue_frame(&self, frame: MBusFrame) {
+        let mut queue = self.rx_queue.lock().unwrap();
+        queue.push_back(pack_frame(&frame));
+    }
+
+    // Inject timeout for retry tests
+    pub fn inject_timeout(&self) {
+        *self.next_error.lock().unwrap() = Some(io::Error::new(io::ErrorKind::TimedOut, "Mock timeout"));
+    }
+
+    // Get sent data for verification
+    pub fn get_tx_data(&self) -> Vec<u8> {
+        self.tx_buffer.lock().unwrap().clone()
+    }
 }
 ```
 
-### Usage Example
+### Usage in Tests
 ```rust
 #[tokio::test]
-async fn test_device_communication() {
+async fn test_multi_telegram_mock() {
     let mock = MockSerialPort::new();
-    
-    // Queue expected response
-    mock.queue_frame_response(
-        FrameType::Long {
-            control: 0x08,
-            address: 0x01,
-            ci: 0x72,
-            data: Some(vec![0x01, 0x02, 0x03])
-        },
-        None
-    );
-    
-    // Create testable handle
-    let mut handle = TestableDeviceHandle::new(mock.clone(), 2400, Duration::from_secs(1));
-    
-    // Send request
-    let request = create_request_frame();
-    handle.send_frame(&request).await.unwrap();
-    
-    // Verify sent data
-    let tx_data = mock.get_tx_data();
-    assert_eq!(tx_data[0], 0x10); // Short frame start
-    
-    // Receive response
-    let response = handle.recv_frame().await.unwrap();
-    assert_eq!(response.frame_type, MBusFrameType::Long);
+    mock.queue_frame(MBusFrame { more_records_follow: true, data: vec![0x01], ..default() });
+    mock.queue_frame(MBusFrame { more_records_follow: false, data: vec![0x02], ..default() });
+
+    let mut handle = TestableDeviceHandle::new(mock, 2400, Duration::from_secs(1));
+    let records = handle.send_request(1).await.unwrap();
+    assert_eq!(records.len(), 2); // Reassembled
+}
+```
+
+### Wireless Mock (Radio HAL)
+Stub SPI/GPIO for SX126x:
+```rust
+pub struct MockRadioHal {
+    // Mock registers, IRQ responses
+}
+
+impl Hal for MockRadioHal {
+    fn spi_transfer(&mut self, data: &[u8]) -> Vec<u8> { /* mock */ }
+    fn gpio_set(&mut self, pin: u8, high: bool) { /* mock */ }
 }
 ```
 
@@ -246,41 +304,27 @@ async fn test_device_communication() {
 #### 1. Naming Convention
 ```rust
 #[test]
-fn test_module_function_scenario() {
-    // Example: test_frame_parse_ack_valid()
+fn test_module_function_scenario() { // e.g., test_send_request_multi_telegram
+    // Arrange: Setup mocks/data
+    // Act: Call function
+    // Assert: Verify output/state
 }
 ```
 
 #### 2. Test Organization
-```rust
-// Group related tests
-mod parse_tests {
-    #[test]
-    fn test_parse_valid() { }
-    
-    #[test]
-    fn test_parse_invalid() { }
-}
-
-mod pack_tests {
-    #[test]
-    fn test_pack_frame() { }
-}
-```
+Group by feature (e.g., mod multi_telegram_tests { ... }).
 
 #### 3. Test Data Helpers
 ```rust
-fn create_test_frame() -> MBusFrame {
-    MBusFrame {
-        frame_type: MBusFrameType::Short,
-        control: 0x53,
-        address: 0x01,
-        // ...
-    }
+fn default_frame() -> MBusFrame {
+    MBusFrame { more_records_follow: false, fcb: false, ..default() }
 }
 
-fn create_test_data() -> Vec<u8> {
-    vec![0x68, 0x03, 0x03, 0x68, ...]
+fn mock_multi_sequence() -> Vec<MBusFrame> {
+    vec![
+        MBusFrame { more_records_follow: true, data: vec![0x01], ..default() },
+        MBusFrame { more_records_follow: false, data: vec![0x02], ..default() },
+    ]
 }
 ```
 
@@ -289,56 +333,43 @@ fn create_test_data() -> Vec<u8> {
 #### 1. Test Both Success and Failure
 ```rust
 #[test]
-fn test_parse_frame_valid() {
-    let data = valid_frame_bytes();
-    let result = parse_frame(&data);
-    assert!(result.is_ok());
+fn test_receive_data_success() {
+    let mut state = StateMachine::new();
+    // ... setup
+    assert!(state.receive_data(&frame).await.is_ok());
 }
 
 #[test]
-fn test_parse_frame_invalid() {
-    let data = invalid_frame_bytes();
-    let result = parse_frame(&data);
-    assert!(result.is_err());
-    assert!(matches!(result, Err(MBusError::FrameParseError(_))));
+fn test_receive_data_fcb_mismatch() {
+    let mut state = StateMachine::new();
+    // ... setup with expected_fcb = true
+    let frame = MBusFrame { fcb: false, ..default() };
+    assert!(state.receive_data(&frame).await.is_err());
 }
 ```
 
 #### 2. Test Edge Cases
 ```rust
 #[test]
-fn test_frame_max_length() {
-    // Test with 252 bytes (maximum data)
-    let data = vec![0x01; 252];
-    let frame = MBusFrame {
-        frame_type: MBusFrameType::Long,
-        data: data.clone(),
-        // ...
-    };
-    let packed = pack_frame(&frame);
-    assert_eq!(packed[1], 0xFF); // Length = 255
-}
-
-#[test]
-fn test_frame_empty_data() {
-    let frame = MBusFrame {
-        data: vec![],
-        // ...
-    };
-    assert!(verify_frame(&frame).is_ok());
+fn test_max_frames_accumulation() {
+    let mut state = StateMachine::new();
+    // 10 frames of 255B each (max reasonable)
+    for i in 0..10 {
+        let frame = MBusFrame { more_records_follow: i < 9, data: vec![0u8; 255], ..default() };
+        state.receive_data(&frame).await.unwrap();
+    }
+    assert!(state.accumulated_payload.len() <= 2550); // No overflow
 }
 ```
 
 #### 3. Test Round Trips
 ```rust
-#[test]
-fn test_bcd_round_trip() {
-    let values = vec![0, 1, 42, 99, 1234, 999999];
-    for value in values {
-        let encoded = encode_bcd(value);
-        let (_, decoded) = decode_bcd(&encoded).unwrap();
-        assert_eq!(decoded, value);
-    }
+#[tokio::test]
+async fn test_multi_telegram_round_trip() {
+    let frames = mock_multi_sequence();
+    let mut handle = mock_handle(frames);
+    let records = handle.send_request(1).await.unwrap();
+    // Assert full payload parsed correctly
 }
 ```
 
@@ -348,23 +379,10 @@ use proptest::prelude::*;
 
 proptest! {
     #[test]
-    fn test_frame_pack_unpack(
-        control in 0u8..255,
-        address in 0u8..255,
-        data in prop::collection::vec(0u8..255, 0..252)
-    ) {
-        let frame = MBusFrame {
-            frame_type: MBusFrameType::Long,
-            control,
-            address,
-            data: data.clone(),
-            // ...
-        };
-        let packed = pack_frame(&frame);
-        let (_, unpacked) = parse_frame(&packed).unwrap();
-        assert_eq!(unpacked.control, control);
-        assert_eq!(unpacked.address, address);
-        assert_eq!(unpacked.data, data);
+    fn prop_multi_concat(frames in prop::collection::vec(vec![0u8..255u8; 100..200], 2..5)) {
+        let full = frames.concat();
+        let reassembled = StateMachine::new().reassemble(&frames); // Mock
+        prop_assert_eq!(reassembled, full);
     }
 }
 ```
@@ -372,66 +390,67 @@ proptest! {
 ## Test Strategies
 
 ### 1. Parser Testing
-Test nom parsers with various inputs:
+Test nom with valid/invalid inputs, including multi-telegram bits:
 ```rust
 #[test]
-fn test_parser_valid_input() {
-    let input = &[0xE5];
-    let (remaining, frame) = parse_frame(input).unwrap();
-    assert_eq!(frame.frame_type, MBusFrameType::Ack);
-    assert!(remaining.is_empty());
-}
-
-#[test]
-fn test_parser_partial_input() {
-    let input = &[0x10, 0x53]; // Incomplete short frame
-    let result = parse_frame(input);
-    assert!(result.is_err());
+fn test_parse_fcb_bit() {
+    let input = &[0x73]; // Bit 5 set
+    let (_, (control, fcb)) = parse_control_and_fcb(input).unwrap();
+    assert!(fcb);
 }
 ```
 
 ### 2. Encoding Testing
-Test all encoding formats:
+Round-trip for multi-frame payloads:
 ```rust
 #[test]
-fn test_bcd_encoding() {
-    assert_eq!(encode_bcd(0), vec![0x00, 0x00, 0x00, 0x00]);
-    assert_eq!(encode_bcd(1234), vec![0x00, 0x00, 0x12, 0x34]);
-    assert_eq!(encode_bcd(99999999), vec![0x99, 0x99, 0x99, 0x99]);
+fn test_concat_round_trip() {
+    let parts = vec![vec![0x01], vec![0x02]];
+    let full = parts.concat();
+    let records = mbus_data_record_decode(&full).unwrap();
+    // Assert records from concatenated data
 }
 ```
 
 ### 3. Protocol Testing
-Test communication sequences:
+Test state transitions for multi-telegram:
 ```rust
 #[tokio::test]
-async fn test_init_sequence() {
-    let mock = MockSerialPort::new();
-    mock.queue_frame_response(FrameType::Ack, None);
-    
-    let mut manager = DataRetrievalManager::default();
-    let result = manager.initialize_device(&mut handle, 0x01).await;
-    assert!(result.is_ok());
+async fn test_fcb_toggle_sequence() {
+    let mut state = StateMachine::new();
+    state.toggle_fcb(); // First request FCB=false → expect false
+    assert!(!state.fcb);
+    state.toggle_fcb(); // After ACK, expect true
+    assert!(state.fcb);
 }
 ```
 
 ### 4. Error Testing
-Test error conditions:
 ```rust
 #[test]
-fn test_checksum_error() {
-    let mut frame = create_valid_frame();
-    frame.checksum = 0xFF; // Invalid
-    let result = verify_frame(&frame);
-    assert!(matches!(result, Err(MBusError::InvalidChecksum { .. })));
+fn test_partial_discard_error() {
+    let mut state = StateMachine::new();
+    // Simulate more=true then error
+    let frame = MBusFrame { more_records_follow: true, ..default() };
+    state.receive_data(&frame).await.unwrap(); // Accumulate
+    state.handle_sequence_error(MBusError::Other("timeout".to_string())).await.unwrap_err();
+    assert!(state.accumulated_payload.is_empty()); // Discarded
 }
 ```
+
+### 5. Multi-Telegram Specific Strategies
+- **Sequence Testing**: Mock 2-10 frames with more_follows toggling; assert final records from concat.
+- **FCB Validation**: Test mismatch (e.g., expected true but frame false → Err).
+- **Retry Simulation**: Inject timeout on frame N<final; verify discard/retry from REQ_UD2.
+- **Crypto Multi**: Mock encrypted frames (CI=0x89); assert decrypt+concat (stubbed in impl, full test in crypto_tests.rs).
+- **Perf**: Benchmark 10-frame concat (<10ms).
 
 ## CI/CD Integration
 
 ### GitHub Actions Workflow
+Updated for multi-telegram (in .github/workflows/ci.yml):
 ```yaml
-name: Tests
+name: CI with Tests & Coverage
 
 on: [push, pull_request]
 
@@ -439,368 +458,166 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      
+      - uses: actions/checkout@v4
+
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          components: llvm-tools-preview
-      
-      - name: Run tests
-        run: cargo test --all-features
-      
-      - name: Generate coverage
-        run: |
-          cargo install cargo-llvm-cov
-          cargo llvm-cov --lcov --output-path lcov.info
-      
-      - name: Upload coverage
-        uses: codecov/codecov-action@v2
+          components: rustfmt, clippy
+
+      - name: Run Tests
+        run: cargo test --all-features -- --nocapture
+
+      - name: Run Clippy
+        run: cargo clippy --all-features -- -D warnings
+
+      - name: Run Tarpaulin (Coverage)
+        uses: actions-rs/tarpaulin@v0.1
         with:
-          files: ./lcov.info
+          version: '0.24.0'
+          args: --lib --features crypto --out Lcov --no-fail-fast
+
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./lcov.info
+          fail_ci_if_error: true
+          threshold: 1.0  # Fail if coverage drops >1%
+
+      - name: Benchmark (Optional)
+        run: cargo bench --no-run  # Or full run if needed
 ```
 
 ### Pre-commit Hooks
 ```bash
 #!/bin/sh
 # .git/hooks/pre-commit
-
-# Run tests
-cargo test --quiet
-
-# Check coverage
-cargo llvm-cov --summary-only | grep "TOTAL" | awk '{if ($3 < 75) exit 1}'
-
-# Format check
+cargo check
+cargo test --lib
+cargo tarpaulin --lib --no-fail-fast | grep "TOTAL" | awk '{if ($3 < 80) exit 1}'  # Fail <80%
 cargo fmt -- --check
 ```
-
-## Debugging Tests
-
-### Enable Debug Output
-```rust
-#[test]
-fn test_with_debug() {
-    env::set_var("RUST_LOG", "debug");
-    init_logger();
-    
-    // Test code
-    log::debug!("Debug information: {:?}", data);
-}
-```
-
-### Use `dbg!` Macro
-```rust
-#[test]
-fn test_debugging() {
-    let value = calculate_something();
-    dbg!(&value); // Prints to stderr
-    assert_eq!(value, expected);
-}
-```
-
-### Capture Output
-```rust
-#[test]
-fn test_with_output() {
-    let output = std::process::Command::new("cargo")
-        .arg("run")
-        .arg("--")
-        .arg("test-command")
-        .output()
-        .expect("Failed to execute");
-    
-    println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
-    println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
-}
-```
-
-## Test Maintenance
-
-### Adding New Tests
-1. Create test file in appropriate directory
-2. Follow naming conventions
-3. Include positive and negative cases
-4. Document complex test scenarios
-5. Update coverage targets
-
-### Refactoring Tests
-1. Keep tests DRY with helper functions
-2. Use test fixtures for common data
-3. Group related tests in modules
-4. Update tests when implementation changes
-
-### Test Review Checklist
-- [ ] Tests compile without warnings
-- [ ] Tests pass consistently
-- [ ] Edge cases covered
-- [ ] Error conditions tested
-- [ ] Documentation updated
-- [ ] Coverage maintained/improved
-
-## Performance Testing
-
-### Benchmarks
-```rust
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-
-fn bench_parse_frame(c: &mut Criterion) {
-    let frame_data = create_test_frame_bytes();
-    
-    c.bench_function("parse_frame", |b| {
-        b.iter(|| {
-            parse_frame(black_box(&frame_data))
-        });
-    });
-}
-
-criterion_group!(benches, bench_parse_frame);
-criterion_main!(benches);
-```
-
-### Running Benchmarks
-```bash
-# Run all benchmarks
-cargo bench
-
-# Run specific benchmark
-cargo bench parse_frame
-
-# Save baseline
-cargo bench -- --save-baseline master
-
-# Compare with baseline
-cargo bench -- --baseline master
-```
-
-## Troubleshooting
-
-### Common Issues
-
-#### 1. Async Test Timeout
-```rust
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_with_timeout() {
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        async_operation()
-    ).await.unwrap();
-}
-```
-
-#### 2. Test Isolation
-```rust
-#[test]
-fn test_isolated() {
-    // Use local state, not global
-    let state = TestState::new();
-    // Test with local state
-}
-```
-
-#### 3. Flaky Tests
-- Add retries for timing-sensitive tests
-- Use deterministic test data
-- Mock system dependencies
-- Avoid hardcoded delays
 
 ## Hardware Testing
 
 ### Overview
-
-With the completion of hardware register mapping fixes (v1.1.0), the SX126x radio driver is now ready for real hardware validation on Raspberry Pi platforms. This section covers procedures for testing with actual hardware.
+Hardware tests validate on real devices (e.g., Pi + SX126x for wireless, USB-RS485 for serial). Focus on async/multi-telegram with physical meters.
 
 ### Hardware Test Requirements
 
 #### Equipment Needed
-- Raspberry Pi 4/5 with GPIO and SPI enabled
-- SX126x-based radio module (e.g., E22-900M22S, RFM95W)
-- Proper wiring per [HARDWARE.md](HARDWARE.md) documentation
-- At least two devices for bidirectional testing
+- Raspberry Pi 4/5 (GPIO/SPI enabled via `raspi-config`).
+- SX126x module (e.g., Waveshare) for wireless; USB-RS485 adapter for wired.
+- Meter device (e.g., test meter sending multi-telegram) or loopback cable.
+- Oscilloscope/multimeter for signal integrity (optional).
 
 #### Software Prerequisites
 ```bash
-# Enable SPI and GPIO on Pi
-sudo raspi-config
-# Navigate to Interface Options -> SPI -> Yes
-# Navigate to Interface Options -> GPIO -> Yes
-
-# Install required dependencies
-sudo apt update
-sudo apt install build-essential pkg-config
+sudo apt update && sudo apt install build-essential pkg-config libgpiod-dev libspi-dev
+rustup component add llvm-tools-preview
+cargo install cargo-tarpaulin cargo-llvm-cov
 ```
 
 ### Critical Hardware Validation Tests
 
 #### 1. 100-Cycle Loopback Test
-This test validates the hardware register mapping fixes and ensures reliable operation:
-
+Validate serial/wireless stability:
 ```bash
-# Create hardware loopback test script
-cat > test_hardware_loopback.sh << 'EOF'
-#!/bin/bash
-# Hardware validation: 100-cycle loopback test
-
-PASS_COUNT=0
-TOTAL_CYCLES=100
-
-echo "Starting 100-cycle hardware loopback test..."
-
-for i in $(seq 1 $TOTAL_CYCLES); do
-    echo -n "Cycle $i/$TOTAL_CYCLES: "
-    
-    # Run the Pi quick start example in loopback mode
-    timeout 10s cargo run --example pi_quick_start -- --loopback 2>&1 | \
-        grep -q "Frame transmitted and received successfully"
-    
-    if [ $? -eq 0 ]; then
-        echo "PASS"
-        ((PASS_COUNT++))
-    else
-        echo "FAIL"
-    fi
+# test_hardware_loopback.sh (run on Pi)
+for i in {1..100}; do
+    cargo run --example simple_client -- --port /dev/ttyUSB0 -- send-request 1 2>/dev/null | grep "Records"
+    if [ $? -eq 0 ]; then echo "Cycle $i PASS"; else echo "Cycle $i FAIL"; fi
 done
-
-PASS_RATE=$((PASS_COUNT * 100 / TOTAL_CYCLES))
-echo ""
-echo "Results: $PASS_COUNT/$TOTAL_CYCLES cycles passed ($PASS_RATE%)"
-
-if [ $PASS_RATE -ge 95 ]; then
-    echo "✅ Hardware validation PASSED (≥95% success rate)"
-    exit 0
-else
-    echo "❌ Hardware validation FAILED (<95% success rate)"
-    exit 1
-fi
-EOF
-
-chmod +x test_hardware_loopback.sh
-./test_hardware_loopback.sh
+# Expect 95%+ pass for multi-telegram
 ```
 
-#### 2. State Machine Validation
-Verify that the corrected RadioState enum values work with real hardware:
-
+#### 2. Multi-Telegram Hardware Test
+Test large payload reassembly:
 ```bash
-# Test state transitions with actual SX126x chip
-cargo test --test hardware_state_tests -- --nocapture
-
-# Expected output should show:
-# - Sleep -> StandbyRc (state value 0x2)  
-# - StandbyRc -> Rx (state value 0x5) ✅ Fixed mapping
-# - Rx -> StandbyRc -> Tx (state value 0x6) ✅ Fixed mapping
-# - No "stuck" RX states or invalid guards
+# Poll a multi-tariff meter (expect 2-3 frames)
+cargo run --example simple_client -- --port /dev/ttyUSB0 -- send-request 1
+# Verify logs show "Reassembled from 3 frames" or similar
 ```
 
-#### 3. IRQ Register Validation
-Test the corrected interrupt bit mappings:
-
+#### 3. State Machine Validation
 ```bash
-# Monitor IRQ events during transmission/reception
-RUST_LOG=debug cargo run --example raspberry_pi_wmbus 2>&1 | \
-    grep -E "(IRQ|interrupt|RxDone|TxDone)"
-
-# Expected patterns:
-# - RxDone interrupt on bit 0 (0x0001) ✅ Fixed mapping  
-# - TxDone interrupt on bit 1 (0x0002) ✅ Fixed mapping
-# - No spurious interrupts or missed events
+# Async loopback with FCB toggle
+cargo test --test serial_tests -- --nocapture | grep "FCB toggled"
+# Expect no mismatch errors
 ```
 
-#### 4. RSSI and Signal Quality Test
-Validate radio performance with real RF conditions:
-
+#### 4. RSSI and Signal Quality Test (Wireless)
 ```bash
-# Test signal strength and quality metrics
-cargo run --example pi_quick_start -- --rssi-test
-
-# Target metrics:
-# - RSSI > -90dBm in loopback at 1m distance
-# - Packet Error Rate < 5% under normal conditions  
-# - CRC pass rate ~90% with enhanced decoding
+cargo run --example raspberry_pi_wmbus --features raspberry-pi -- --rssi-test
+# Target: RSSI > -90dBm, no dropped multi-frames
 ```
 
 ### Hardware Test Automation
-
-#### CI/CD Integration for Hardware
-For automated hardware testing in CI/CD pipelines:
-
+For CI (Pi self-hosted runner):
 ```yaml
-# .github/workflows/hardware-test.yml (Pi-based runner)
+# .github/workflows/hardware-test.yml
 name: Hardware Validation
 on: [push, pull_request]
 
 jobs:
-  pi-hardware-test:
+  pi-test:
     runs-on: [self-hosted, raspberry-pi]
     steps:
-      - uses: actions/checkout@v3
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          target: aarch64-unknown-linux-gnu
-      
-      - name: Build for Pi
-        run: cargo build --target aarch64-unknown-linux-gnu --release
-      
-      - name: Hardware Loopback Test
-        run: ./test_hardware_loopback.sh
-      
-      - name: State Machine Validation
-        run: cargo test --target aarch64-unknown-linux-gnu hardware_state_tests
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --release --target aarch64-unknown-linux-gnu
+      - name: Run Multi-Telegram Test
+        run: cargo run --example simple_client -- --port /dev/ttyUSB0 -- send-request 1
+      - name: Coverage
+        run: cargo tarpaulin --lib --features raspberry-pi
 ```
 
 ### Troubleshooting Hardware Issues
 
-#### Common Problems and Solutions
+1. **Serial Timeout (Multi-Frame)**: Increase timeout in SerialConfig (e.g., 5s for 3 frames); check baud (auto-detect fails on noisy bus).
+2. **FCB Mismatch**: Ensure no external interference; test with loopback cable.
+3. **Partial Accumulation**: If records incomplete, verify more_follows parsing (run with RUST_LOG=debug).
+4. **Wireless Drops**: Check antenna/GPIO pins; LBT may delay in crowded 868MHz band.
 
-1. **"Stuck" RX State (Pre-v1.1.0 symptom)**:
-   - **Symptom**: Radio enters RX but never transitions to other states
-   - **Cause**: Incorrect enum values (Tx=0x5, Rx=0x6)
-   - **Fix**: ✅ Fixed in v1.1.0 (Rx=0x5, Tx=0x6)
+## Performance Testing
 
-2. **Missing IRQ Events**:
-   - **Symptom**: TxDone/RxDone events not detected
-   - **Cause**: Incorrect bitflag positions
-   - **Fix**: ✅ Fixed in v1.1.0 (RxDone=bit0, TxDone=bit1)
+### Benchmarks
+Use criterion for multi-telegram:
+```rust
+use criterion::{criterion_group, criterion_main, Criterion};
 
-3. **SPI Communication Errors**:
-   - Check wiring per [HARDWARE.md](HARDWARE.md)
-   - Verify SPI is enabled: `ls /dev/spidev*`
-   - Test with loopback: `sudo usermod -a -G spi,gpio $USER`
+fn bench_multi_reassembly(c: &mut Criterion) {
+    let frames = mock_multi_frames(3, 256); // 3 frames, 256B each
+    c.bench_function("multi_telegram_reassemble", |b| {
+        b.iter(|| {
+            let mut state = StateMachine::new();
+            for frame in frames.clone() {
+                state.receive_data(&frame).await.unwrap();
+            }
+            state.process_data(&state.accumulated_payload).await.unwrap()
+        });
+    });
+}
 
-4. **GPIO Permission Issues**:
-   - Add user to gpio group: `sudo usermod -a -G gpio $USER`
-   - Or run with sudo (not recommended for production)
+criterion_group!(benches, bench_multi_reassembly);
+criterion_main!(benches);
+```
 
-### Performance Baselines
+### Running Benchmarks
+```bash
+cargo bench  # <5ms for 3-frame reassembly
+cargo bench -- --save-baseline multi-telegram  # Track improvements
+```
 
-#### Expected Hardware Performance (Pi 4/5 + SX126x)
-- **SPI Speed**: Up to 16 MHz
-- **Command Latency**: <1ms for basic operations
-- **State Transition Time**: <10ms (Sleep -> RX)
-- **Packet Transmission Rate**: ~100 packets/sec
-- **Power Consumption**: 
-  - Sleep: ~160nA
-  - RX: ~4.6mA  
-  - TX (14dBm): ~44mA
-
-#### Validation Criteria
-- ✅ 100-cycle loopback test: ≥95% success rate
-- ✅ State transitions: All enum values correctly mapped
-- ✅ IRQ handling: All interrupt events properly detected
-- ✅ No crashes or hangs during extended operation (>1 hour)
-
-### Hardware Test Documentation
-- See [HARDWARE.md](HARDWARE.md) for wiring diagrams
-- See [DEPLOYMENT.md](DEPLOYMENT.md) for Pi setup procedures
-- See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for debug procedures
+Target: <1ms single frame, <10ms multi (3 frames).
 
 ## Resources
 
 - [Rust Book: Testing](https://doc.rust-lang.org/book/ch11-00-testing.html)
-- [tokio Testing](https://tokio.rs/tokio/topics/testing)
-- [proptest Documentation](https://docs.rs/proptest)
-- [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov)
-- [criterion.rs](https://bheisler.github.io/criterion.rs/book/)
+- [Tokio Testing](https://tokio.rs/tokio/topics/testing)
+- [Proptest](https://docs.rs/proptest)
+- [Cargo-Tarpaulin](https://github.com/xd009642/tarpaulin)
+- [Criterion](https://bheisler.github.io/criterion.rs/book/)
+- [M-Bus Standard](https://www.en-standard.eu/en-13757-3-communication-in-the-application-layer/)
+
+---

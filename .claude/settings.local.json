@@ -44,7 +44,14 @@
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(awk:*)",
-      "Bash(xargs:*)"
+      "Bash(xargs:*)",
+      "Bash(for:*)",
+      "Bash(do)",
+      "Bash(if [ -f \"$file\" ])",
+      "Bash(then)",
+      "Bash(fi)",
+      "Bash(done)",
+      "Bash(cargo clippy:*)"
     ],
     "deny": [],
     "ask": []

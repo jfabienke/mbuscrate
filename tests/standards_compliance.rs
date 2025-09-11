@@ -3,7 +3,7 @@
 /// All frames have been verified against official documentation
 
 use mbus_rs::mbus::frame::{parse_frame, MBusFrame, MBusFrameType};
-use mbus_rs::wmbus::frame::{WMBusFrame, ParseError};
+// use mbus_rs::wmbus::frame::{WMBusFrame, ParseError};
 use nom::IResult;
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
@@ -54,25 +54,25 @@ const WMBUS_TYPE_A_MULTIBLOCK: &str =
      10 01 23 45 67 89 AB CD EF 12 34 56 78 9A BC DE F0 12 34 
      05 AB CD EF 01 23 CD EF";
 
-/// Type B Single-Block Frame
-/// Source: prEN 13757-4 Annex D
-const WMBUS_TYPE_B_SINGLE: &str = 
-    "8D 0F 44 93 15 78 56 34 12 01 07 12 34 56 78 9A BC DE F0 AB CD";
+// /// Type B Single-Block Frame
+// /// Source: prEN 13757-4 Annex D
+// const WMBUS_TYPE_B_SINGLE: &str = 
+//     "8D 0F 44 93 15 78 56 34 12 01 07 12 34 56 78 9A BC DE F0 AB CD";
 
 /// Compact Frame Mode (CI=0x79)
 /// Source: OMS v4.0.4 Section 7.2
 const WMBUS_COMPACT_FRAME: &str = 
     "CD 08 79 AB CD 12 34 56 78 EF 12";
 
-/// Encrypted Frame: Mode 5 CTR (CI=0x7A)
-/// Source: EN 13757-4 Section 5.8
-const WMBUS_ENCRYPTED_FRAME: &str = 
-    "CD 10 44 93 15 78 56 34 12 81 7A 78 56 34 12 AB CD EF 01 23 45 AB CD";
+// /// Encrypted Frame: Mode 5 CTR (CI=0x7A)
+// /// Source: EN 13757-4 Section 5.8
+// const WMBUS_ENCRYPTED_FRAME: &str = 
+//     "CD 10 44 93 15 78 56 34 12 81 7A 78 56 34 12 AB CD EF 01 23 45 AB CD";
 
-/// Mode Switch Frame: T1 with CW=0x0500
-/// Source: EN 13757-4 Table 4
-const WMBUS_MODE_SWITCH_T1: &str = 
-    "CD 0C 44 93 15 78 56 34 12 05 00 7A 01 23 45 67 AB CD";
+// /// Mode Switch Frame: T1 with CW=0x0500
+// /// Source: EN 13757-4 Table 4
+// const WMBUS_MODE_SWITCH_T1: &str = 
+//     "CD 0C 44 93 15 78 56 34 12 05 00 7A 01 23 45 67 AB CD";
 
 // ================================================================================
 // TEST IMPLEMENTATION
@@ -248,11 +248,11 @@ fn test_wmbus_compact_frame() {
 // COMPLIANCE VALIDATION HELPERS
 // ================================================================================
 
-/// Validates checksum calculation per EN 13757-2
-fn validate_checksum(data: &[u8], expected: u8) -> bool {
-    let calculated: u8 = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
-    calculated == expected
-}
+// /// Validates checksum calculation per EN 13757-2
+// fn validate_checksum(data: &[u8], expected: u8) -> bool {
+//     let calculated: u8 = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+//     calculated == expected
+// }
 
 /// Validates CRC-16 calculation per EN 13757-4 (CCITT polynomial)
 fn validate_crc16(data: &[u8], expected: u16, complement: bool) -> bool {

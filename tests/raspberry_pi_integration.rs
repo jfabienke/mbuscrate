@@ -9,11 +9,11 @@
 
 #[cfg(feature = "raspberry-pi")]
 mod raspberry_pi_tests {
-    use std::env;
     use mbus_rs::wmbus::radio::{
         driver::Sx126xDriver,
-        hal::{RaspberryPiHal, RaspberryPiHalBuilder, GpioPins},
+        hal::{GpioPins, RaspberryPiHal, RaspberryPiHalBuilder},
     };
+    use std::env;
 
     /// Check if hardware tests should be run
     fn should_run_hardware_tests() -> bool {
@@ -124,7 +124,10 @@ mod raspberry_pi_tests {
         // Test basic radio communication
         match driver.get_irq_status() {
             Ok(status) => {
-                println!("✅ Radio communication successful - IRQ status: 0x{:04X}", status.raw());
+                println!(
+                    "✅ Radio communication successful - IRQ status: 0x{:04X}",
+                    status.raw()
+                );
             }
             Err(e) => {
                 println!("❌ Radio communication failed: {}", e);
@@ -144,13 +147,14 @@ mod raspberry_pi_tests {
         }
 
         // Test receive mode activation
-        match driver.set_rx(1000) { // 1 second timeout
+        match driver.set_rx(1000) {
+            // 1 second timeout
             Ok(()) => {
                 println!("✅ Receive mode activation successful");
-                
+
                 // Wait a bit and check for any activity
                 std::thread::sleep(std::time::Duration::from_millis(1100));
-                
+
                 match driver.process_irqs() {
                     Ok(Some(data)) => {
                         println!("📡 Received {} bytes during test", data.len());
@@ -190,9 +194,13 @@ mod raspberry_pi_tests {
         let mut driver = Sx126xDriver::new(hal, 32_000_000);
 
         // Test GPIO read functionality
-        match driver.gpio_read(1) { // DIO1 pin
+        match driver.gpio_read(1) {
+            // DIO1 pin
             Ok(state) => {
-                println!("✅ DIO1 pin read successful: {}", if state { "HIGH" } else { "LOW" });
+                println!(
+                    "✅ DIO1 pin read successful: {}",
+                    if state { "HIGH" } else { "LOW" }
+                );
             }
             Err(e) => {
                 println!("❌ DIO1 pin read failed: {}", e);
@@ -200,9 +208,13 @@ mod raspberry_pi_tests {
         }
 
         // Test DIO2 if configured
-        match driver.gpio_read(2) { // DIO2 pin
+        match driver.gpio_read(2) {
+            // DIO2 pin
             Ok(state) => {
-                println!("✅ DIO2 pin read successful: {}", if state { "HIGH" } else { "LOW" });
+                println!(
+                    "✅ DIO2 pin read successful: {}",
+                    if state { "HIGH" } else { "LOW" }
+                );
             }
             Err(_) => {
                 println!("ℹ️ DIO2 pin not configured or read failed (expected if not wired)");
@@ -254,7 +266,7 @@ mod raspberry_pi_tests {
         let result = RaspberryPiHalBuilder::new()
             .spi_bus(99) // Invalid bus
             .build();
-        
+
         assert!(result.is_err());
         println!("✅ Invalid SPI bus correctly rejected");
 
@@ -262,7 +274,7 @@ mod raspberry_pi_tests {
         let result = RaspberryPiHalBuilder::new()
             .spi_speed(0) // Invalid speed
             .build();
-            
+
         assert!(result.is_err());
         println!("✅ Invalid SPI speed correctly rejected");
     }
@@ -276,7 +288,7 @@ mod raspberry_pi_tests {
     }
 
     #[cfg(target_arch = "arm")]
-    #[test] 
+    #[test]
     fn test_target_architecture_arm() {
         // Verify we're running on ARM architecture
         println!("✅ Running on ARM (32-bit Raspberry Pi)");
@@ -293,7 +305,7 @@ mod disabled_tests {
 }
 
 // Mock tests that can run without hardware
-#[cfg(test)]
+#[cfg(all(test, feature = "raspberry-pi"))]
 mod mock_tests {
     use mbus_rs::wmbus::radio::hal::{GpioPins, RaspberryPiHalBuilder};
 
@@ -316,12 +328,13 @@ mod mock_tests {
             .dio1_pin(24);
 
         // Just verify builder methods return Self for chaining
-        let builder2 = builder
-            .no_dio2()
-            .spi_speed(8_000_000);
+        let builder2 = builder.no_dio2().spi_speed(8_000_000);
 
         // We can't test build() without hardware, but we can test the pattern
-        assert_eq!(std::mem::size_of_val(&builder2), std::mem::size_of::<RaspberryPiHalBuilder>());
+        assert_eq!(
+            std::mem::size_of_val(&builder2),
+            std::mem::size_of::<RaspberryPiHalBuilder>()
+        );
     }
 
     #[test]

@@ -18,19 +18,18 @@
 //! ## Golden Frame Sources
 //!
 //! - **EDC**: Energy distribution company frames
-//! - **Engelmann (EFE)**: Water meter manufacturer frames  
+//! - **Engelmann (EFE)**: Water meter manufacturer frames
 //! - **Elster (ELS)**: Multi-utility meter frames
 //! - **Type A/B**: Both wM-Bus frame types
 //! - **Encrypted**: Mode 5/7 encrypted frames
 //! - **Error Cases**: Invalid frames for error handling validation
 
-use mbus_rs::wmbus::{
-    FrameDecoder, WMBusCrypto, AesKey, DeviceInfo, EncryptionMode,
-    calculate_wmbus_crc_enhanced
-};
 use mbus_rs::mbus::frame::{parse_frame, verify_frame};
-use mbus_rs::{MBusFrame, MBusFrameType};
 use mbus_rs::util::{hex_to_bytes, rev8, IoBuffer};
+use mbus_rs::wmbus::{
+    calculate_wmbus_crc_enhanced, AesKey, DeviceInfo, EncryptionMode, FrameDecoder, WMBusCrypto,
+};
+use mbus_rs::{MBusFrame, MBusFrameType};
 use std::time::Instant;
 
 // =============================================================================
@@ -65,13 +64,13 @@ fn detect_frame_type(data: &[u8]) -> FrameType {
     if data.is_empty() {
         return FrameType::MBusShort; // Default
     }
-    
+
     match data[0] {
         0x68 => FrameType::MBusLong,   // M-Bus long frame
         0x10 => FrameType::MBusShort,  // M-Bus short frame
         0xCD => FrameType::WMBusTypeA, // wM-Bus Type A
         0x3D => FrameType::WMBusTypeB, // wM-Bus Type B
-        _ => FrameType::MBusLong, // Default to M-Bus long
+        _ => FrameType::MBusLong,      // Default to M-Bus long
     }
 }
 
@@ -89,9 +88,9 @@ const GOLDEN_FRAMES: &[GoldenFrame] = &[
         expected_crc: Some(0x162F),
         description: "EDC water meter with comprehensive data records",
     },
-    
+
     GoldenFrame {
-        name: "ENGELMANN_HEAT_METER", 
+        name: "ENGELMANN_HEAT_METER",
         hex_data: "68A1A16808007245330824C5140004662700000478917B6F01046D172ECC13041500000000441500000000840115000000000406000000004406000000008401060000000084100600000000C410060000000084110600000000426CBF1C026CDF1C8420060000000084300600000000043B00000000143B19000000042B00000000142B0B000000025B1600025F150004610900000002230C0201FD17000490280B000000EB16",
         manufacturer: 0x4572, // Engelmann
         device_id: 0x24083345,
@@ -102,11 +101,11 @@ const GOLDEN_FRAMES: &[GoldenFrame] = &[
         expected_crc: Some(0x16EB),
         description: "Engelmann heat meter with extended data records",
     },
-    
+
     GoldenFrame {
         name: "ELSTER_GAS_METER",
         hex_data: "686868680800725139494493152F04A17000000C06000000008C1006000000008C2013000000000C13000000003C2BBDEBDDDD3B3BBDEBDD0A5A27020A5E26020A6201000A273007046D090DCD134C06000000004C1300000000CC100600000000CC201300000000426CBF154016",
-        manufacturer: 0x2751, // Elster  
+        manufacturer: 0x2751, // Elster
         device_id: 0x44943951,
         version: 0x15,
         device_type: 0x2F,
@@ -115,7 +114,7 @@ const GOLDEN_FRAMES: &[GoldenFrame] = &[
         expected_crc: Some(0x1640),
         description: "Elster gas meter with consumption data",
     },
-    
+
     GoldenFrame {
         name: "SHORT_ACK_FRAME",
         hex_data: "68040468080170088116",
@@ -128,7 +127,7 @@ const GOLDEN_FRAMES: &[GoldenFrame] = &[
         expected_crc: Some(0x1681),
         description: "Short acknowledgment frame",
     },
-    
+
     GoldenFrame {
         name: "WMBUS_TYPE_A_SYNC",
         hex_data: "CD1044931568610528743701234567890123456789ABCDEF1234",
@@ -141,9 +140,9 @@ const GOLDEN_FRAMES: &[GoldenFrame] = &[
         expected_crc: None, // CRC calculated during test
         description: "wM-Bus Type A frame with sync pattern",
     },
-    
+
     GoldenFrame {
-        name: "WMBUS_TYPE_B_SYNC", 
+        name: "WMBUS_TYPE_B_SYNC",
         hex_data: "3D1544931568610528743701234567890123456789ABCDEF",
         manufacturer: 0x6815,
         device_id: 0x28056861,
@@ -157,7 +156,8 @@ const GOLDEN_FRAMES: &[GoldenFrame] = &[
 ];
 
 /// Encrypted frame test data (simulated)
-const ENCRYPTED_FRAME_HEX: &str = "CD207A931568610528743701AABBCCDDEEFF00112233445566778899AABBCCDDEEFF0011";
+const ENCRYPTED_FRAME_HEX: &str =
+    "CD207A931568610528743701AABBCCDDEEFF00112233445566778899AABBCCDDEEFF0011";
 
 /// Known good AES key for testing
 const TEST_AES_KEY: &str = "0102030405060708090A0B0C0D0E0F10";
@@ -175,10 +175,10 @@ fn test_enhanced_frame_decoder_with_golden_frames() {
     for golden_frame in GOLDEN_FRAMES {
         total_frames += 1;
         println!("Testing frame: {}", golden_frame.name);
-        
+
         let frame_data = hex_to_bytes(golden_frame.hex_data);
         let detected_frame_type = detect_frame_type(&frame_data);
-        
+
         // Use appropriate parser based on frame type
         match detected_frame_type {
             FrameType::MBusLong | FrameType::MBusShort => {
@@ -188,7 +188,7 @@ fn test_enhanced_frame_decoder_with_golden_frames() {
                 match result {
                     Ok((_remaining, mbus_frame)) => {
                         successful_decodes += 1;
-                        
+
                         // Validate M-Bus frame structure
                         match mbus_frame.frame_type {
                             MBusFrameType::Long => {
@@ -201,9 +201,12 @@ fn test_enhanced_frame_decoder_with_golden_frames() {
                                 // Control and ACK frames are also valid
                             }
                         }
-                        
-                        println!("✓ Successfully decoded M-Bus {}: {} bytes", 
-                                golden_frame.name, frame_data.len());
+
+                        println!(
+                            "✓ Successfully decoded M-Bus {}: {} bytes",
+                            golden_frame.name,
+                            frame_data.len()
+                        );
                     }
                     Err(e) => {
                         println!("✗ Failed to decode M-Bus {}: {:?}", golden_frame.name, e);
@@ -213,18 +216,23 @@ fn test_enhanced_frame_decoder_with_golden_frames() {
             }
             FrameType::WMBusTypeA | FrameType::WMBusTypeB => {
                 // Use wM-Bus decoder for wM-Bus frames
-                decoder.add_bytes(&frame_data).expect("Failed to add bytes to decoder");
-                
+                decoder
+                    .add_bytes(&frame_data)
+                    .expect("Failed to add bytes to decoder");
+
                 match decoder.try_decode_frame() {
                     Ok(Some(frame)) => {
                         successful_decodes += 1;
-                        
+
                         // Validate wM-Bus frame structure
                         assert!(frame.length > 0, "Frame length should be greater than 0");
                         assert_ne!(frame.manufacturer_id, 0, "Manufacturer ID should not be 0");
-                        
-                        println!("✓ Successfully decoded wM-Bus {}: {} bytes", 
-                                golden_frame.name, frame_data.len());
+
+                        println!(
+                            "✓ Successfully decoded wM-Bus {}: {} bytes",
+                            golden_frame.name,
+                            frame_data.len()
+                        );
                     }
                     Ok(None) => {
                         println!("⚠ Incomplete wM-Bus frame data for {}", golden_frame.name);
@@ -237,14 +245,19 @@ fn test_enhanced_frame_decoder_with_golden_frames() {
             }
         }
     }
-    
+
     let success_rate = (successful_decodes as f64 / total_frames as f64) * 100.0;
-    println!("Enhanced decoder success rate: {:.1}% ({}/{})", 
-             success_rate, successful_decodes, total_frames);
-    
+    println!(
+        "Enhanced decoder success rate: {:.1}% ({}/{})",
+        success_rate, successful_decodes, total_frames
+    );
+
     // We should achieve at least 70% success rate with golden frames
-    assert!(success_rate >= 50.0, 
-           "Enhanced decoder success rate too low: {:.1}%", success_rate);
+    assert!(
+        success_rate >= 50.0,
+        "Enhanced decoder success rate too low: {:.1}%",
+        success_rate
+    );
 }
 
 // =============================================================================
@@ -254,17 +267,17 @@ fn test_enhanced_frame_decoder_with_golden_frames() {
 #[test]
 fn test_enhanced_crc_calculation() {
     println!("Testing enhanced CRC calculation against golden frames...");
-    
+
     let mut crc_matches = 0;
     let mut total_tests = 0;
-    
+
     for golden_frame in GOLDEN_FRAMES {
         if let Some(expected_crc) = golden_frame.expected_crc {
             total_tests += 1;
-            
+
             let frame_data = hex_to_bytes(golden_frame.hex_data);
             let detected_frame_type = detect_frame_type(&frame_data);
-            
+
             // Use appropriate CRC calculation based on frame type
             match detected_frame_type {
                 FrameType::MBusLong | FrameType::MBusShort => {
@@ -278,8 +291,11 @@ fn test_enhanced_crc_calculation() {
                             println!("✓ M-Bus checksum valid for {}", golden_frame.name);
                         } else {
                             println!("✗ M-Bus checksum invalid for {}", golden_frame.name);
-                            println!("  Expected: {:02X}, Frame checksum: {:02X}", 
-                                    expected_crc & 0xFF, mbus_frame.checksum);
+                            println!(
+                                "  Expected: {:02X}, Frame checksum: {:02X}",
+                                expected_crc & 0xFF,
+                                mbus_frame.checksum
+                            );
                         }
                     } else {
                         println!("✗ Failed to parse M-Bus frame {}", golden_frame.name);
@@ -292,18 +308,20 @@ fn test_enhanced_crc_calculation() {
                     } else {
                         &frame_data
                     };
-                    
+
                     let calculated_crc = calculate_wmbus_crc_enhanced(data_for_crc);
-                    
-                    println!("Frame {}: expected={:04X}, calculated={:04X}", 
-                            golden_frame.name, expected_crc, calculated_crc);
-                    
+
+                    println!(
+                        "Frame {}: expected={:04X}, calculated={:04X}",
+                        golden_frame.name, expected_crc, calculated_crc
+                    );
+
                     if calculated_crc == expected_crc {
                         crc_matches += 1;
                         println!("✓ wM-Bus CRC match for {}", golden_frame.name);
                     } else {
                         println!("✗ wM-Bus CRC mismatch for {}", golden_frame.name);
-                        
+
                         // Try alternative CRC calculation for debugging
                         let alt_crc = calculate_wmbus_crc_enhanced(&frame_data);
                         println!("  Alternative (full frame): {:04X}", alt_crc);
@@ -312,54 +330,65 @@ fn test_enhanced_crc_calculation() {
             }
         }
     }
-    
+
     if total_tests > 0 {
         let crc_success_rate = (crc_matches as f64 / total_tests as f64) * 100.0;
-        println!("CRC validation success rate: {:.1}% ({}/{})", 
-                 crc_success_rate, crc_matches, total_tests);
-        
+        println!(
+            "CRC validation success rate: {:.1}% ({}/{})",
+            crc_success_rate, crc_matches, total_tests
+        );
+
         // We expect some CRC mismatches due to different implementations
         // But should achieve reasonable success rate
-        assert!(crc_success_rate >= 50.0, 
-               "CRC success rate too low: {:.1}%", crc_success_rate);
+        assert!(
+            crc_success_rate >= 50.0,
+            "CRC success rate too low: {:.1}%",
+            crc_success_rate
+        );
     } else {
         println!("No frames with expected CRC values found");
     }
 }
 
 // =============================================================================
-// Bit Reversal Integration Tests  
+// Bit Reversal Integration Tests
 // =============================================================================
 
 #[test]
 fn test_bit_reversal_with_wmbus_sync() {
     println!("Testing bit reversal with wM-Bus sync patterns...");
-    
+
     // Test sync byte normalization
     let raw_sync_a = 0xB3;
     let raw_sync_b = 0xBC;
-    
+
     let norm_sync_a = rev8(raw_sync_a);
     let norm_sync_b = rev8(raw_sync_b);
-    
+
     assert_eq!(norm_sync_a, 0xCD, "Type A sync normalization failed");
     assert_eq!(norm_sync_b, 0x3D, "Type B sync normalization failed");
-    
-    println!("✓ Sync byte normalization: 0x{:02X}→0x{:02X}, 0x{:02X}→0x{:02X}", 
-             raw_sync_a, norm_sync_a, raw_sync_b, norm_sync_b);
-    
+
+    println!(
+        "✓ Sync byte normalization: 0x{:02X}→0x{:02X}, 0x{:02X}→0x{:02X}",
+        raw_sync_a, norm_sync_a, raw_sync_b, norm_sync_b
+    );
+
     // Test with golden frame data
     for golden_frame in GOLDEN_FRAMES {
-        if golden_frame.frame_type == FrameType::WMBusTypeA || golden_frame.frame_type == FrameType::WMBusTypeB {
+        if golden_frame.frame_type == FrameType::WMBusTypeA
+            || golden_frame.frame_type == FrameType::WMBusTypeB
+        {
             let frame_data = hex_to_bytes(golden_frame.hex_data);
-            
+
             if !frame_data.is_empty() {
                 let first_byte = frame_data[0];
                 let reversed = rev8(first_byte);
-                
-                println!("Frame {}: first_byte=0x{:02X}, reversed=0x{:02X}", 
-                        golden_frame.name, first_byte, reversed);
-                
+
+                println!(
+                    "Frame {}: first_byte=0x{:02X}, reversed=0x{:02X}",
+                    golden_frame.name, first_byte, reversed
+                );
+
                 // Check if this matches expected sync patterns
                 if first_byte == 0xCD || first_byte == 0x3D {
                     println!("  Already normalized sync pattern detected");
@@ -378,36 +407,38 @@ fn test_bit_reversal_with_wmbus_sync() {
 #[test]
 fn test_crypto_with_simulated_encrypted_frame() {
     println!("Testing crypto module with simulated encrypted frame...");
-    
-    let master_key = AesKey::from_hex(TEST_AES_KEY)
-        .expect("Failed to create AES key");
-    
+
+    let master_key = AesKey::from_hex(TEST_AES_KEY).expect("Failed to create AES key");
+
     let mut crypto = WMBusCrypto::new(master_key.clone());
-    
+
     let device_info = DeviceInfo {
         device_id: 0x28056861,
         manufacturer: 0x6815,
         version: 0x37,
         device_type: 0x01,
+        access_number: None,
     };
-    
+
     // Test encryption mode detection
     let _encrypted_frame = hex_to_bytes(ENCRYPTED_FRAME_HEX);
-    
+
     // Create a test plaintext frame
-    let plaintext = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-                        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10];
-    
+    let plaintext = vec![
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10,
+    ];
+
     // Test CTR mode encryption/decryption
     match crypto.encrypt_frame(&plaintext, &device_info, EncryptionMode::Mode5Ctr) {
         Ok(encrypted) => {
             println!("✓ CTR encryption successful: {} bytes", encrypted.len());
-            
+
             // Test decryption
             match crypto.decrypt_frame(&encrypted, &device_info) {
                 Ok(decrypted) => {
                     println!("✓ CTR decryption successful: {} bytes", decrypted.len());
-                    
+
                     // Verify round-trip (note: placeholder AES means XOR, so it should match)
                     // In production with real AES, this would be a proper round-trip test
                 }
@@ -420,12 +451,15 @@ fn test_crypto_with_simulated_encrypted_frame() {
             println!("⚠ CTR encryption failed: {:?}", e);
         }
     }
-    
+
     // Test key derivation
     let device_key = master_key.derive_device_key(device_info.device_id, device_info.manufacturer);
-    assert_ne!(device_key.as_bytes(), master_key.as_bytes(), 
-              "Device key should differ from master key");
-    
+    assert_ne!(
+        device_key.as_bytes(),
+        master_key.as_bytes(),
+        "Device key should differ from master key"
+    );
+
     println!("✓ Key derivation successful");
 }
 
@@ -436,18 +470,18 @@ fn test_crypto_with_simulated_encrypted_frame() {
 #[test]
 fn test_end_to_end_pipeline() {
     println!("Testing end-to-end processing pipeline...");
-    
+
     let mut decoder = FrameDecoder::new();
     let mut io_buffer = IoBuffer::new();
-    
+
     // Process multiple golden frames through the complete pipeline
     let mut pipeline_successes = 0;
-    
+
     for golden_frame in GOLDEN_FRAMES {
         println!("Processing {} through pipeline...", golden_frame.name);
-        
+
         let frame_data = hex_to_bytes(golden_frame.hex_data);
-        
+
         // Step 1: Add to IoBuffer (simulating radio reception)
         match io_buffer.write(&frame_data) {
             Ok(bytes_written) => {
@@ -459,7 +493,7 @@ fn test_end_to_end_pipeline() {
                 continue;
             }
         }
-        
+
         // Step 2: Extract data and add to frame decoder
         let buffered_data = io_buffer.consume(frame_data.len());
         match decoder.add_bytes(&buffered_data) {
@@ -471,7 +505,7 @@ fn test_end_to_end_pipeline() {
                 continue;
             }
         }
-        
+
         // Step 3: Decode frame using appropriate parser
         let detected_frame_type = detect_frame_type(&buffered_data);
         match detected_frame_type {
@@ -493,10 +527,12 @@ fn test_end_to_end_pipeline() {
                 // Use wM-Bus decoder
                 match decoder.try_decode_frame() {
                     Ok(Some(frame)) => {
-                        println!("  ✓ wM-Bus frame decoded: mfg={:04X}, device={:08X}", 
-                                frame.manufacturer_id, frame.device_address);
+                        println!(
+                            "  ✓ wM-Bus frame decoded: mfg={:04X}, device={:08X}",
+                            frame.manufacturer_id, frame.device_address
+                        );
                         pipeline_successes += 1;
-                        
+
                         // Step 4: Check for encryption (if applicable)
                         if golden_frame.is_encrypted {
                             println!("  ⚠ Frame marked as encrypted (not testing decryption)");
@@ -512,13 +548,20 @@ fn test_end_to_end_pipeline() {
             }
         }
     }
-    
+
     let pipeline_success_rate = (pipeline_successes as f64 / GOLDEN_FRAMES.len() as f64) * 100.0;
-    println!("End-to-end pipeline success rate: {:.1}% ({}/{})", 
-             pipeline_success_rate, pipeline_successes, GOLDEN_FRAMES.len());
-    
-    assert!(pipeline_success_rate >= 60.0, 
-           "Pipeline success rate too low: {:.1}%", pipeline_success_rate);
+    println!(
+        "End-to-end pipeline success rate: {:.1}% ({}/{})",
+        pipeline_success_rate,
+        pipeline_successes,
+        GOLDEN_FRAMES.len()
+    );
+
+    assert!(
+        pipeline_success_rate >= 60.0,
+        "Pipeline success rate too low: {:.1}%",
+        pipeline_success_rate
+    );
 }
 
 // =============================================================================
@@ -528,20 +571,21 @@ fn test_end_to_end_pipeline() {
 #[test]
 fn test_frame_processing_performance() {
     println!("Testing frame processing performance...");
-    
+
     let mut decoder = FrameDecoder::new();
     let test_iterations = 100;
-    
+
     // Use the largest golden frame for performance testing
-    let largest_frame = GOLDEN_FRAMES.iter()
+    let largest_frame = GOLDEN_FRAMES
+        .iter()
         .max_by_key(|f| f.hex_data.len())
         .expect("No golden frames available");
-    
+
     let frame_data = hex_to_bytes(largest_frame.hex_data);
-    
+
     let start_time = Instant::now();
     let mut successful_decodes = 0;
-    
+
     let detected_frame_type = detect_frame_type(&frame_data);
     for i in 0..test_iterations {
         match detected_frame_type {
@@ -556,7 +600,7 @@ fn test_frame_processing_performance() {
             FrameType::WMBusTypeA | FrameType::WMBusTypeB => {
                 // Use wM-Bus decoder for performance test
                 decoder.add_bytes(&frame_data).expect("Failed to add bytes");
-                
+
                 match decoder.try_decode_frame() {
                     Ok(Some(_)) => {
                         successful_decodes += 1;
@@ -564,30 +608,37 @@ fn test_frame_processing_performance() {
                     Ok(None) => {}
                     Err(_) => {}
                 }
-                
+
                 // Reset decoder for next iteration
                 decoder.reset();
             }
         }
-        
+
         if i % 10 == 0 {
             print!(".");
         }
     }
-    
+
     let elapsed = start_time.elapsed();
     let frames_per_second = (successful_decodes as f64) / elapsed.as_secs_f64();
-    let bytes_per_second = (successful_decodes as f64 * frame_data.len() as f64) / elapsed.as_secs_f64();
-    
+    let bytes_per_second =
+        (successful_decodes as f64 * frame_data.len() as f64) / elapsed.as_secs_f64();
+
     println!("\nPerformance results:");
-    println!("  Frames processed: {}/{}", successful_decodes, test_iterations);
+    println!(
+        "  Frames processed: {}/{}",
+        successful_decodes, test_iterations
+    );
     println!("  Time elapsed: {:?}", elapsed);
     println!("  Frames/second: {:.1}", frames_per_second);
     println!("  Bytes/second: {:.0}", bytes_per_second);
-    
+
     // Ensure reasonable performance (at least 1000 frames/second)
-    assert!(frames_per_second >= 1000.0, 
-           "Frame processing too slow: {:.1} frames/second", frames_per_second);
+    assert!(
+        frames_per_second >= 1000.0,
+        "Frame processing too slow: {:.1} frames/second",
+        frames_per_second
+    );
 }
 
 // =============================================================================
@@ -597,9 +648,9 @@ fn test_frame_processing_performance() {
 #[test]
 fn test_error_handling_with_malformed_frames() {
     println!("Testing error handling with malformed frames...");
-    
+
     let mut decoder = FrameDecoder::new();
-    
+
     let malformed_frames = vec![
         ("EMPTY_FRAME", ""),
         ("TOO_SHORT", "68"),
@@ -607,14 +658,14 @@ fn test_error_handling_with_malformed_frames() {
         ("WRONG_LENGTH", "CD05123456"),
         ("TRUNCATED_FRAME", "CD20123456789012345678"),
     ];
-    
+
     for (name, hex_data) in malformed_frames {
         println!("Testing malformed frame: {}", name);
-        
+
         if !hex_data.is_empty() {
             let frame_data = hex_to_bytes(hex_data);
             decoder.add_bytes(&frame_data).expect("Failed to add bytes");
-            
+
             match decoder.try_decode_frame() {
                 Ok(Some(_)) => {
                     println!("  ⚠ Unexpected successful decode for {}", name);
@@ -627,7 +678,7 @@ fn test_error_handling_with_malformed_frames() {
                 }
             }
         }
-        
+
         decoder.reset();
     }
 }
@@ -639,17 +690,17 @@ fn test_error_handling_with_malformed_frames() {
 #[test]
 fn test_decoder_statistics() {
     println!("Testing decoder statistics collection...");
-    
+
     let mut decoder = FrameDecoder::new();
     let mut processed_frames = 0;
     let mut mbus_frames = 0;
     let mut wmbus_frames = 0;
-    
+
     // Process several golden frames and collect statistics
     for golden_frame in GOLDEN_FRAMES.iter().take(3) {
         let frame_data = hex_to_bytes(golden_frame.hex_data);
         let detected_frame_type = detect_frame_type(&frame_data);
-        
+
         match detected_frame_type {
             FrameType::MBusLong | FrameType::MBusShort => {
                 // Use M-Bus parser - count manually
@@ -670,7 +721,7 @@ fn test_decoder_statistics() {
             }
         }
     }
-    
+
     let stats = decoder.stats();
     println!("Processing statistics:");
     println!("  Total frames processed: {}", processed_frames);
@@ -683,7 +734,7 @@ fn test_decoder_statistics() {
     println!("    Header errors: {}", stats.header_errors);
     println!("    Type A frames: {}", stats.type_a_frames);
     println!("    Type B frames: {}", stats.type_b_frames);
-    
+
     // Verify statistics are being collected
     assert!(processed_frames > 0, "No frames processed in statistics");
 }
@@ -691,13 +742,13 @@ fn test_decoder_statistics() {
 #[test]
 fn test_integration_test_completeness() {
     println!("Verifying integration test completeness...");
-    
+
     // Ensure we have good coverage of different frame types
     let mut type_a_count = 0;
     let mut type_b_count = 0;
     let mut long_frame_count = 0;
     let mut short_frame_count = 0;
-    
+
     for frame in GOLDEN_FRAMES {
         match frame.frame_type {
             FrameType::WMBusTypeA => type_a_count += 1,
@@ -706,16 +757,19 @@ fn test_integration_test_completeness() {
             FrameType::MBusShort => short_frame_count += 1,
         }
     }
-    
+
     println!("Frame type coverage:");
     println!("  Type A: {}", type_a_count);
     println!("  Type B: {}", type_b_count);
     println!("  Long: {}", long_frame_count);
     println!("  Short: {}", short_frame_count);
     println!("  Total: {}", GOLDEN_FRAMES.len());
-    
-    assert!(GOLDEN_FRAMES.len() >= 5, "Need at least 5 golden frames for comprehensive testing");
+
+    assert!(
+        GOLDEN_FRAMES.len() >= 5,
+        "Need at least 5 golden frames for comprehensive testing"
+    );
     assert!(long_frame_count >= 3, "Need at least 3 long frames");
-    
+
     println!("✓ Integration test coverage is adequate");
 }

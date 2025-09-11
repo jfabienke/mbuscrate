@@ -59,8 +59,8 @@ use crate::wmbus::radio::modulation::{
     CrcType, GfskModParams, HeaderType, ModulationParams, PacketParams, PacketType,
 };
 use log;
-use thiserror::Error;
 use std::time::{Duration, Instant};
+use thiserror::Error;
 
 /// Radio operating states based on SX126x chip modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,8 +100,8 @@ pub struct SleepConfig {
 impl Default for SleepConfig {
     fn default() -> Self {
         Self {
-            warm_start: true,  // Default to warm start for faster wake-up
-            rtc_wake: false,   // RTC wake-up disabled by default
+            warm_start: true, // Default to warm start for faster wake-up
+            rtc_wake: false,  // RTC wake-up disabled by default
         }
     }
 }
@@ -146,9 +146,9 @@ pub struct LbtConfig {
 impl Default for LbtConfig {
     fn default() -> Self {
         Self {
-            rssi_threshold_dbm: -85,  // EU regulatory compliant threshold
-            listen_duration_ms: 5,    // 5ms listen time
-            max_retries: 3,           // Up to 3 retry attempts
+            rssi_threshold_dbm: -85, // EU regulatory compliant threshold
+            listen_duration_ms: 5,   // 5ms listen time
+            max_retries: 3,          // Up to 3 retry attempts
         }
     }
 }
@@ -158,7 +158,7 @@ impl Default for LbtConfig {
 pub struct DeviceErrors {
     /// RC64k calibration failed
     pub rc64k_calib_error: bool,
-    /// RC13M calibration failed  
+    /// RC13M calibration failed
     pub rc13m_calib_error: bool,
     /// PLL calibration failed
     pub pll_calib_error: bool,
@@ -188,12 +188,17 @@ impl DeviceErrors {
             pa_ramp_error: (raw & 0x0080) != 0,
         }
     }
-    
+
     /// Check if any errors are present
     pub fn has_errors(&self) -> bool {
-        self.rc64k_calib_error || self.rc13m_calib_error || self.pll_calib_error ||
-        self.adc_calib_error || self.img_calib_error || self.xosc_start_error ||
-        self.pll_lock_error || self.pa_ramp_error
+        self.rc64k_calib_error
+            || self.rc13m_calib_error
+            || self.pll_calib_error
+            || self.adc_calib_error
+            || self.img_calib_error
+            || self.xosc_start_error
+            || self.pll_lock_error
+            || self.pa_ramp_error
     }
 }
 
@@ -217,7 +222,10 @@ pub enum DriverError {
     InvalidStateTransition { from: RadioState, to: RadioState },
     /// Radio is in wrong state for requested operation
     #[error("Wrong state: expected {expected:?}, got {actual:?}")]
-    WrongState { expected: RadioState, actual: RadioState },
+    WrongState {
+        expected: RadioState,
+        actual: RadioState,
+    },
     /// Channel is busy (for LBT operations)
     #[error("Channel busy: RSSI {rssi_dbm} dBm above threshold {threshold_dbm} dBm")]
     ChannelBusy { rssi_dbm: i16, threshold_dbm: i16 },
@@ -290,7 +298,7 @@ impl<H: Hal> Sx126xDriver<H> {
             current_freq: None,
             tx_base_addr: 0,
             rx_base_addr: 0,
-            current_state: RadioState::Sleep,  // Start in sleep state
+            current_state: RadioState::Sleep, // Start in sleep state
             last_state_change: None,
         }
     }
@@ -320,13 +328,13 @@ impl<H: Hal> Sx126xDriver<H> {
         // Calculate frequency step based on crystal frequency
         // Frequency resolution = Xtal_freq / 2^25
         let rf_freq = (frequency_hz as u64 * (1u64 << 25) / self.xtal_freq as u64) as u32;
-        
+
         let mut buf = [0u8; 4];
         buf[0] = (rf_freq >> 24) as u8;
         buf[1] = (rf_freq >> 16) as u8;
         buf[2] = (rf_freq >> 8) as u8;
         buf[3] = rf_freq as u8;
-        
+
         self.hal.write_command(0x86, &buf)?; // SetRfFrequency command
         self.current_freq = Some(rf_freq);
         Ok(())
@@ -350,7 +358,7 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// ```rust,no_run
     /// use crate::wmbus::radio::modulation::*;
-    /// 
+    ///
     /// let mod_params = ModulationParams {
     ///     packet_type: PacketType::Gfsk,
     ///     params: GfskModParams {
@@ -375,20 +383,20 @@ impl<H: Hal> Sx126xDriver<H> {
                 buf[0] = (temp_val >> 16) as u8;
                 buf[1] = (temp_val >> 8) as u8;
                 buf[2] = temp_val as u8;
-                
+
                 // Modulation shaping (0=none, 1=Gaussian 0.3, 2=Gaussian 0.5, 3=Gaussian 1.0)
                 buf[3] = mod_params.params.modulation_shaping;
-                
+
                 // Receiver bandwidth
                 buf[4] = mod_params.params.bandwidth;
-                
+
                 // Calculate frequency deviation: Fdev = fdev * 2^25 / Xtal_freq
                 let fdev_step = self.xtal_freq / 32000000; // Simplified frequency step
                 let temp_fdev = (mod_params.params.fdev as u64 / fdev_step as u64) as u32;
                 buf[5] = (temp_fdev >> 16) as u8;
                 buf[6] = (temp_fdev >> 8) as u8;
                 buf[7] = temp_fdev as u8;
-                
+
                 self.hal.write_command(0x8F, &buf)?; // SetModulationParams command
             }
         }
@@ -414,7 +422,7 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// ```rust,no_run
     /// use crate::wmbus::radio::modulation::*;
-    /// 
+    ///
     /// let packet_params = PacketParams {
     ///     packet_type: PacketType::Gfsk,
     ///     preamble_len: 48,                    // 48-bit preamble
@@ -428,40 +436,40 @@ impl<H: Hal> Sx126xDriver<H> {
     /// ```
     pub fn set_packet_params(&mut self, packet_params: PacketParams) -> Result<(), DriverError> {
         let mut buf = [0u8; 9];
-        
+
         // Packet type (GFSK = 0x00)
         buf[0] = match packet_params.packet_type {
             PacketType::Gfsk => 0x00,
         };
-        
+
         // Preamble length in bits (16-bit value)
         buf[1] = (packet_params.preamble_len >> 8) as u8; // MSB
-        buf[2] = packet_params.preamble_len as u8;         // LSB
-        
+        buf[2] = packet_params.preamble_len as u8; // LSB
+
         // Header type (Variable=0x01, Fixed=0x00)
         buf[3] = match packet_params.header_type {
             HeaderType::Variable => 0x01,
             HeaderType::Fixed => 0x00,
         };
-        
+
         // Maximum payload length
         buf[4] = packet_params.payload_len;
-        
+
         // CRC enable/disable
         buf[5] = if packet_params.crc_on { 0x01 } else { 0x00 };
-        
+
         // CRC type (1-byte=0x01, 2-byte=0x00)
         buf[6] = match packet_params.crc_type {
             CrcType::Byte1 => 0x01,
             CrcType::Byte2 => 0x00,
         };
-        
+
         // Sync word length in bytes
         buf[7] = packet_params.sync_word_len;
-        
+
         // DC-free encoding (disabled for wM-Bus)
         buf[8] = 0x00;
-        
+
         self.hal.write_command(0x8C, &buf)?; // SetPacketParams command
         self.current_packet_params = Some(packet_params);
         Ok(())
@@ -634,18 +642,18 @@ impl<H: Hal> Sx126xDriver<H> {
     pub fn process_irqs(&mut self) -> Result<Option<Vec<u8>>, DriverError> {
         // Read current interrupt status
         let irq_status = self.get_irq_status()?;
-        
+
         // Clear all pending interrupts
         self.clear_irq_status(0xFFFF)?;
-        
+
         // Handle RX completion
         if irq_status.rx_done() {
             let mut status = [0u8; 3];
             self.get_rx_buffer_status(&mut status)?;
-            
+
             // Extract received packet length (status[0] contains length)
             let rx_len = status[0] as usize;
-            
+
             if rx_len > 0 {
                 // Read received payload from radio buffer
                 let mut payload = vec![0u8; rx_len];
@@ -654,22 +662,22 @@ impl<H: Hal> Sx126xDriver<H> {
                 return Ok(Some(payload));
             }
         }
-        
+
         // Handle TX completion
         if irq_status.tx_done() {
             log::info!("TX done - transmission completed successfully");
         }
-        
+
         // Handle CRC errors
         if irq_status.crc_err() {
             log::warn!("CRC error - received packet failed CRC validation");
         }
-        
+
         // Handle timeouts
         if irq_status.timeout() {
             log::warn!("Timeout - operation did not complete within expected time");
         }
-        
+
         Ok(None)
     }
 
@@ -707,7 +715,7 @@ impl<H: Hal> Sx126xDriver<H> {
     /// ```rust,no_run
     /// // Configure for EU wM-Bus S-mode
     /// driver.configure_for_wmbus(868_950_000, 100_000)?;
-    /// 
+    ///
     /// // Start receiving
     /// driver.set_rx_continuous()?;
     /// ```
@@ -718,7 +726,7 @@ impl<H: Hal> Sx126xDriver<H> {
     ) -> Result<(), DriverError> {
         // Set RF frequency
         self.set_rf_frequency(frequency_hz)?;
-        
+
         // Configure GFSK modulation parameters
         let mod_params = ModulationParams {
             packet_type: PacketType::Gfsk,
@@ -730,7 +738,7 @@ impl<H: Hal> Sx126xDriver<H> {
             },
         };
         self.set_modulation_params(mod_params)?;
-        
+
         // Configure packet parameters for wM-Bus
         let packet_params = PacketParams {
             packet_type: PacketType::Gfsk,
@@ -738,27 +746,27 @@ impl<H: Hal> Sx126xDriver<H> {
             header_type: HeaderType::Variable, // Variable length packets
             payload_len: 255,                  // Maximum payload size
             crc_on: true,                      // Enable CRC
-            crc_type: CrcType::Byte2,         // 2-byte CRC
-            sync_word_len: 4,                 // 4-byte sync word
+            crc_type: CrcType::Byte2,          // 2-byte CRC
+            sync_word_len: 4,                  // 4-byte sync word
         };
         self.set_packet_params(packet_params)?;
-        
+
         // Configure CRC with CCITT polynomial
         self.configure_crc(0x1021)?;
-        
+
         // Disable whitening (required for wM-Bus)
         self.disable_whitening()?;
-        
+
         // Set wM-Bus S-mode sync word pattern
         self.set_sync_word([0xB4, 0xB6, 0x5A, 0x5A, 0, 0, 0, 0])?;
-        
+
         // Configure power amplifier for +14 dBm output
         self.set_pa_config(0x04, 0x00, 0x00)?;
         self.set_tx_params(14, 0x07)?; // +14 dBm with ramp time
-        
+
         // Set buffer base addresses
         self.set_buffer_base_addresses(0, 0)?;
-        
+
         // Configure interrupt routing
         self.set_dio_irq_params(
             // IRQ mask: RX done, TX done, CRC error, timeout
@@ -766,11 +774,11 @@ impl<H: Hal> Sx126xDriver<H> {
                 | IrqMaskBit::TxDone as u16
                 | IrqMaskBit::CrcErr as u16
                 | IrqMaskBit::Timeout as u16,
-            IrqMaskBit::RxDone as u16,  // DIO1: RX done
-            IrqMaskBit::TxDone as u16,  // DIO2: TX done
-            0,                          // DIO3: unused
+            IrqMaskBit::RxDone as u16, // DIO1: RX done
+            IrqMaskBit::TxDone as u16, // DIO2: TX done
+            0,                         // DIO3: unused
         )?;
-        
+
         Ok(())
     }
 
@@ -829,7 +837,11 @@ impl<H: Hal> Sx126xDriver<H> {
     /// * `Ok(())` - Target state reached
     /// * `Err(DriverError::Timeout)` - Timeout occurred
     /// * `Err(DriverError::Hal)` - Communication error
-    pub fn wait_for_state(&mut self, target_state: RadioState, timeout_ms: u32) -> Result<(), DriverError> {
+    pub fn wait_for_state(
+        &mut self,
+        target_state: RadioState,
+        timeout_ms: u32,
+    ) -> Result<(), DriverError> {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms as u64);
 
@@ -956,7 +968,10 @@ impl<H: Hal> Sx126xDriver<H> {
     /// ```
     pub fn set_sleep(&mut self, config: SleepConfig) -> Result<(), DriverError> {
         // Validate transition - can only sleep from standby modes
-        if !matches!(self.current_state, RadioState::StandbyRc | RadioState::StandbyXosc) {
+        if !matches!(
+            self.current_state,
+            RadioState::StandbyRc | RadioState::StandbyXosc
+        ) {
             return Err(DriverError::InvalidStateTransition {
                 from: self.current_state,
                 to: RadioState::Sleep,
@@ -980,8 +995,11 @@ impl<H: Hal> Sx126xDriver<H> {
         self.current_state = RadioState::Sleep;
         self.last_state_change = Some(Instant::now());
 
-        log::info!("Radio entered sleep mode: warm_start={}, rtc_wake={}", 
-                  config.warm_start, config.rtc_wake);
+        log::info!(
+            "Radio entered sleep mode: warm_start={}, rtc_wake={}",
+            config.warm_start,
+            config.rtc_wake
+        );
         Ok(())
     }
 
@@ -1026,7 +1044,7 @@ impl<H: Hal> Sx126xDriver<H> {
 
         // For GFSK packets:
         // status[0] = RssiAvg (average RSSI during packet)
-        // status[1] = RssiSync (RSSI at sync detection)  
+        // status[1] = RssiSync (RSSI at sync detection)
         // status[2] = FreqError (AFC frequency error)
         let rssi_avg = -(status[0] as i16) / 2;
         let rssi_sync = -(status[1] as i16) / 2;
@@ -1102,7 +1120,10 @@ impl<H: Hal> Sx126xDriver<H> {
 
         // Ensure we're in a valid state for transmission (standby mode)
         let current_state = self.get_state()?;
-        if !matches!(current_state, RadioState::StandbyRc | RadioState::StandbyXosc) {
+        if !matches!(
+            current_state,
+            RadioState::StandbyRc | RadioState::StandbyXosc
+        ) {
             return Err(DriverError::WrongState {
                 expected: RadioState::StandbyRc,
                 actual: current_state,
@@ -1112,21 +1133,24 @@ impl<H: Hal> Sx126xDriver<H> {
         // Perform Listen Before Talk (LBT) check for ETSI compliance
         // Default threshold is -85 dBm per ETSI EN 300 220-1
         let lbt_config = LbtConfig::default(); // Uses -85 dBm, 5ms listen, 3 retries
-        
+
         // Switch to RX mode briefly to measure RSSI
         self.set_rx(0)?;
         std::thread::sleep(Duration::from_millis(1)); // Allow RX to stabilize
-        
+
         if !self.check_channel_clear(&lbt_config)? {
             let rssi = self.get_rssi_instant()?;
-            log::warn!("Channel busy: RSSI {} dBm exceeds threshold {} dBm", 
-                      rssi, lbt_config.rssi_threshold_dbm);
+            log::warn!(
+                "Channel busy: RSSI {} dBm exceeds threshold {} dBm",
+                rssi,
+                lbt_config.rssi_threshold_dbm
+            );
             return Err(DriverError::ChannelBusy {
                 rssi_dbm: rssi,
                 threshold_dbm: lbt_config.rssi_threshold_dbm,
             });
         }
-        
+
         // Return to standby mode after LBT check
         self.set_standby(StandbyMode::RC)?;
 
@@ -1138,26 +1162,26 @@ impl<H: Hal> Sx126xDriver<H> {
 
         // Wait for transmission to complete
         log::info!("Transmitting {} bytes", data.len());
-        
+
         // Poll for TX completion
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(2) {
             let irq_status = self.get_irq_status()?;
-            
+
             if irq_status.tx_done() {
                 // Clear TX done interrupt
                 self.clear_irq_status(IrqMaskBit::TxDone as u16)?;
                 log::info!("Transmission completed successfully");
                 return Ok(());
             }
-            
+
             if irq_status.timeout() {
                 // Clear timeout interrupt
                 self.clear_irq_status(IrqMaskBit::Timeout as u16)?;
                 log::error!("Transmission timeout");
                 return Err(DriverError::Timeout);
             }
-            
+
             std::thread::sleep(Duration::from_millis(1));
         }
 
@@ -1183,24 +1207,30 @@ impl<H: Hal> Sx126xDriver<H> {
     pub fn check_channel_clear(&mut self, config: &LbtConfig) -> Result<bool, DriverError> {
         // Enter RX mode for RSSI measurement
         self.set_rx_continuous()?;
-        
+
         // Wait for RSSI to settle (typical settling time is a few hundred microseconds)
         std::thread::sleep(Duration::from_millis(config.listen_duration_ms as u64));
-        
+
         // Measure instantaneous RSSI
         let rssi_dbm = self.get_rssi_instant()?;
-        
-        log::debug!("LBT check: RSSI = {} dBm, threshold = {} dBm", 
-                   rssi_dbm, config.rssi_threshold_dbm);
-        
+
+        log::debug!(
+            "LBT check: RSSI = {} dBm, threshold = {} dBm",
+            rssi_dbm,
+            config.rssi_threshold_dbm
+        );
+
         // Channel is clear if RSSI is below threshold
         let channel_clear = rssi_dbm < config.rssi_threshold_dbm;
-        
+
         if !channel_clear {
-            log::debug!("Channel busy: RSSI {} dBm above threshold {} dBm", 
-                       rssi_dbm, config.rssi_threshold_dbm);
+            log::debug!(
+                "Channel busy: RSSI {} dBm above threshold {} dBm",
+                rssi_dbm,
+                config.rssi_threshold_dbm
+            );
         }
-        
+
         Ok(channel_clear)
     }
 
@@ -1230,7 +1260,7 @@ impl<H: Hal> Sx126xDriver<H> {
         for attempt in 0..=lbt_config.max_retries {
             // Check if channel is clear
             let channel_clear = self.check_channel_clear(&lbt_config)?;
-            
+
             if channel_clear {
                 // Channel is clear, proceed with transmission
                 log::debug!("LBT: Channel clear, transmitting (attempt {})", attempt + 1);
@@ -1252,7 +1282,7 @@ impl<H: Hal> Sx126xDriver<H> {
                 }
             }
         }
-        
+
         unreachable!("Should have returned from loop")
     }
 
@@ -1273,7 +1303,7 @@ impl<H: Hal> Sx126xDriver<H> {
 
         let radio_stats = RadioStats {
             packets_received: ((stats[0] as u16) << 8) | (stats[1] as u16),
-            packets_crc_error: ((stats[2] as u16) << 8) | (stats[3] as u16), 
+            packets_crc_error: ((stats[2] as u16) << 8) | (stats[3] as u16),
             packets_length_error: ((stats[4] as u16) << 8) | (stats[5] as u16),
         };
 
@@ -1302,7 +1332,7 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - Statistics reset successfully  
+    /// * `Ok(())` - Statistics reset successfully
     /// * `Err(DriverError)` - Reset operation failed
     pub fn reset_stats(&mut self) -> Result<(), DriverError> {
         self.clear_stats()
@@ -1334,39 +1364,76 @@ impl<H: Hal> Sx126xDriver<H> {
 // Implementation of the RadioDriver trait for SX126x
 #[async_trait::async_trait]
 impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx126xDriver<H> {
-    async fn initialize(&mut self, config: crate::wmbus::radio::radio_driver::WMBusConfig) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
+    async fn initialize(
+        &mut self,
+        config: crate::wmbus::radio::radio_driver::WMBusConfig,
+    ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
         // Configure for wM-Bus using the existing method
         self.configure_for_wmbus(config.frequency_hz, config.bitrate)
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("SX126x init failed: {}", e)))
+            .map_err(|e| {
+                crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                    "SX126x init failed: {}",
+                    e
+                ))
+            })
     }
 
-    async fn start_receive(&mut self) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
-        self.set_rx_continuous()
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("Failed to start RX: {}", e)))
+    async fn start_receive(
+        &mut self,
+    ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
+        self.set_rx_continuous().map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "Failed to start RX: {}",
+                e
+            ))
+        })
     }
 
-    async fn stop_receive(&mut self) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
-        self.set_standby(StandbyMode::RC)
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("Failed to stop RX: {}", e)))
+    async fn stop_receive(
+        &mut self,
+    ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
+        self.set_standby(StandbyMode::RC).map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "Failed to stop RX: {}",
+                e
+            ))
+        })
     }
 
-    async fn transmit(&mut self, data: &[u8]) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
-        self.transmit(data)
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("Transmission failed: {}", e)))
+    async fn transmit(
+        &mut self,
+        data: &[u8],
+    ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
+        self.transmit(data).map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "Transmission failed: {}",
+                e
+            ))
+        })
     }
 
-    async fn get_received_packet(&mut self) -> Result<Option<crate::wmbus::radio::radio_driver::ReceivedPacket>, crate::wmbus::radio::radio_driver::RadioDriverError> {
-        match self.process_irqs().map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("IRQ processing failed: {}", e)))? {
+    async fn get_received_packet(
+        &mut self,
+    ) -> Result<
+        Option<crate::wmbus::radio::radio_driver::ReceivedPacket>,
+        crate::wmbus::radio::radio_driver::RadioDriverError,
+    > {
+        match self.process_irqs().map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "IRQ processing failed: {}",
+                e
+            ))
+        })? {
             Some(data) => {
                 // Get packet status for RSSI info
-                let (rssi_avg, _rssi_sync, freq_error) = self.get_packet_status()
-                    .unwrap_or((-80, -80, 0)); // Default values if read fails
+                let (rssi_avg, _rssi_sync, freq_error) =
+                    self.get_packet_status().unwrap_or((-80, -80, 0)); // Default values if read fails
 
                 let packet = crate::wmbus::radio::radio_driver::ReceivedPacket {
                     data,
                     rssi_dbm: rssi_avg,
                     freq_error_hz: Some(freq_error),
-                    lqi: None, // SX126x doesn't provide LQI
+                    lqi: None,       // SX126x doesn't provide LQI
                     crc_valid: true, // process_irqs only returns packets with valid CRC
                 };
                 Ok(Some(packet))
@@ -1375,10 +1442,19 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
         }
     }
 
-    async fn get_stats(&mut self) -> Result<crate::wmbus::radio::radio_driver::RadioStats, crate::wmbus::radio::radio_driver::RadioDriverError> {
-        let stats = self.get_stats()
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("Failed to get stats: {}", e)))?;
-        
+    async fn get_stats(
+        &mut self,
+    ) -> Result<
+        crate::wmbus::radio::radio_driver::RadioStats,
+        crate::wmbus::radio::radio_driver::RadioDriverError,
+    > {
+        let stats = self.get_stats().map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "Failed to get stats: {}",
+                e
+            ))
+        })?;
+
         let rssi = self.get_rssi_instant().unwrap_or(-80);
 
         Ok(crate::wmbus::radio::radio_driver::RadioStats {
@@ -1390,18 +1466,35 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
         })
     }
 
-    async fn reset_stats(&mut self) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
-        self.reset_stats()
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("Failed to reset stats: {}", e)))
+    async fn reset_stats(
+        &mut self,
+    ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
+        self.reset_stats().map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "Failed to reset stats: {}",
+                e
+            ))
+        })
     }
 
-    async fn get_mode(&mut self) -> Result<crate::wmbus::radio::radio_driver::RadioMode, crate::wmbus::radio::radio_driver::RadioDriverError> {
-        let state = self.get_state()
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("Failed to get state: {}", e)))?;
-        
+    async fn get_mode(
+        &mut self,
+    ) -> Result<
+        crate::wmbus::radio::radio_driver::RadioMode,
+        crate::wmbus::radio::radio_driver::RadioDriverError,
+    > {
+        let state = self.get_state().map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "Failed to get state: {}",
+                e
+            ))
+        })?;
+
         let mode = match state {
             RadioState::Sleep => crate::wmbus::radio::radio_driver::RadioMode::Sleep,
-            RadioState::StandbyRc | RadioState::StandbyXosc | RadioState::FreqSynth => crate::wmbus::radio::radio_driver::RadioMode::Standby,
+            RadioState::StandbyRc | RadioState::StandbyXosc | RadioState::FreqSynth => {
+                crate::wmbus::radio::radio_driver::RadioMode::Standby
+            }
             RadioState::Tx => crate::wmbus::radio::radio_driver::RadioMode::Transmit,
             RadioState::Rx => crate::wmbus::radio::radio_driver::RadioMode::Receive,
         };
@@ -1409,18 +1502,32 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
     }
 
     async fn sleep(&mut self) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
-        self.set_sleep(SleepConfig::default())
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("Failed to sleep: {}", e)))
+        self.set_sleep(SleepConfig::default()).map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "Failed to sleep: {}",
+                e
+            ))
+        })
     }
 
     async fn wake_up(&mut self) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
-        self.set_standby(StandbyMode::RC)
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("Failed to wake up: {}", e)))
+        self.set_standby(StandbyMode::RC).map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "Failed to wake up: {}",
+                e
+            ))
+        })
     }
 
-    async fn get_rssi(&mut self) -> Result<i16, crate::wmbus::radio::radio_driver::RadioDriverError> {
-        self.get_rssi_instant()
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("Failed to get RSSI: {}", e)))
+    async fn get_rssi(
+        &mut self,
+    ) -> Result<i16, crate::wmbus::radio::radio_driver::RadioDriverError> {
+        self.get_rssi_instant().map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "Failed to get RSSI: {}",
+                e
+            ))
+        })
     }
 
     async fn is_channel_clear(
@@ -1434,8 +1541,12 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
             max_retries: 0, // Just check once
         };
 
-        self.check_channel_clear(&lbt_config)
-            .map_err(|e| crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!("LBT check failed: {}", e)))
+        self.check_channel_clear(&lbt_config).map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "LBT check failed: {}",
+                e
+            ))
+        })
     }
 
     fn get_driver_info(&self) -> crate::wmbus::radio::radio_driver::DriverInfo {
@@ -1462,12 +1573,11 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    
+
     // TODO: Implement mock HAL for comprehensive testing
     // The LBT functionality is integrated in the transmit() function
     // and will be tested during hardware integration tests
-    
+
     #[test]
     #[ignore] // Requires mock HAL implementation
     fn test_transmit_lbt_channel_busy() {
@@ -1475,7 +1585,7 @@ mod tests {
         /*
         // Create a mock HAL that reports high RSSI (channel busy)
         let mut mock_hal = MockHal::new();
-        
+
         // Set up mock to return high RSSI when read_command is called with 0x15 (GetRssiInst)
         mock_hal.expect_read_command()
             .withf(|cmd, _| *cmd == 0x15)
@@ -1483,12 +1593,12 @@ mod tests {
                 buf[0] = 120; // High RSSI: -(120/2) = -60 dBm (above -85 dBm threshold)
                 Ok(())
             });
-        
+
         // Expect set_rx to be called for RSSI measurement
         mock_hal.expect_write_command()
             .withf(|cmd, _| *cmd == 0x82) // SetRx command
             .returning(|_, _| Ok(()));
-        
+
         // Expect get_state to return standby
         mock_hal.expect_read_command()
             .withf(|cmd, _| *cmd == 0xC0) // GetStatus command
@@ -1496,14 +1606,14 @@ mod tests {
                 buf[0] = 0x20; // StandbyRc state
                 Ok(())
             });
-        
+
         let mut driver = Sx126xDriver::new(mock_hal);
         driver.tx_base_addr = 0;
-        
+
         // Attempt to transmit should fail due to channel busy
         let test_data = vec![0x01, 0x02, 0x03];
         let result = driver.transmit(&test_data);
-        
+
         // Verify that transmission was aborted due to channel busy
         assert!(result.is_err());
         if let Err(DriverError::ChannelBusy { rssi_dbm, threshold_dbm }) = result {
@@ -1514,7 +1624,7 @@ mod tests {
         }
         */
     }
-    
+
     #[test]
     #[ignore] // Requires mock HAL implementation
     fn test_transmit_lbt_channel_clear() {
@@ -1522,7 +1632,7 @@ mod tests {
         /*
         // Create a mock HAL that reports low RSSI (channel clear)
         let mut mock_hal = MockHal::new();
-        
+
         // Set up mock to return low RSSI
         mock_hal.expect_read_command()
             .withf(|cmd, _| *cmd == 0x15)
@@ -1530,7 +1640,7 @@ mod tests {
                 buf[0] = 180; // Low RSSI: -(180/2) = -90 dBm (below -85 dBm threshold)
                 Ok(())
             });
-        
+
         // Expect various commands for successful transmission
         mock_hal.expect_write_command().returning(|_, _| Ok(()));
         mock_hal.expect_read_command().returning(|cmd, buf| {
@@ -1544,14 +1654,14 @@ mod tests {
             }
             Ok(())
         });
-        
+
         let mut driver = Sx126xDriver::new(mock_hal);
         driver.tx_base_addr = 0;
-        
+
         // Transmission should proceed since channel is clear
         let test_data = vec![0x01, 0x02, 0x03];
         let result = driver.transmit(&test_data);
-        
+
         // For this test, we expect it to proceed past LBT check
         // (though it may fail later due to mock limitations)
         match result {

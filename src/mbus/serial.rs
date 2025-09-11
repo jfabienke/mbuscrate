@@ -214,7 +214,7 @@ impl MBusDeviceHandle {
             }
         }
         Err(MBusError::SerialPortError(
-            "Auto baud detection failed - no working baud rate found".to_string()
+            "Auto baud detection failed - no working baud rate found".to_string(),
         ))
     }
 
@@ -332,18 +332,21 @@ impl MBusDeviceHandle {
         }
 
         // Find next best baud rate (try lower rates for better reliability)
-        let current_index = MBusBaudRate::ALL_RATES.iter()
+        let current_index = MBusBaudRate::ALL_RATES
+            .iter()
             .position(|&rate| rate == self.current_baud_rate)
             .unwrap_or(0);
 
         // Try the next rate in the list
         if current_index + 1 < MBusBaudRate::ALL_RATES.len() {
             let new_rate = MBusBaudRate::ALL_RATES[current_index + 1];
-            println!("High collision rate detected ({}%), switching from {} to {} baud", 
-                     self.collision_stats.collision_rate, 
-                     self.current_baud_rate.as_u32(), 
-                     new_rate.as_u32());
-            
+            println!(
+                "High collision rate detected ({}%), switching from {} to {} baud",
+                self.collision_stats.collision_rate,
+                self.current_baud_rate.as_u32(),
+                new_rate.as_u32()
+            );
+
             match self.switch_baud_rate(new_rate).await {
                 Ok(_) => {
                     self.reset_collision_statistics();
@@ -358,9 +361,12 @@ impl MBusDeviceHandle {
     }
 
     /// Enhanced send request with automatic baud rate adaptation
-    pub async fn send_request_with_adaptation(&mut self, address: u8) -> Result<Vec<MBusRecord>, MBusError> {
+    pub async fn send_request_with_adaptation(
+        &mut self,
+        address: u8,
+    ) -> Result<Vec<MBusRecord>, MBusError> {
         let initial_attempts = 2;
-        
+
         // First try at current baud rate
         for _ in 0..initial_attempts {
             match self.send_request(address).await {
@@ -410,7 +416,8 @@ impl MBusDeviceHandle {
     async fn recv_frame_with_collision_handling(&mut self) -> Result<MBusFrame, MBusError> {
         let to = self.current_baud_rate.timeout();
         let max_retries = self.config.collision_config.max_collision_retries;
-        let mut backoff_delay = Duration::from_millis(self.config.collision_config.initial_backoff_ms);
+        let mut backoff_delay =
+            Duration::from_millis(self.config.collision_config.initial_backoff_ms);
 
         for attempt in 0..max_retries {
             match self.recv_frame_single_attempt(to).await {
@@ -421,17 +428,19 @@ impl MBusDeviceHandle {
                 }
                 Err(MBusError::NomError(ref msg)) if msg.contains("timeout") => {
                     self.collision_stats.timeout_errors += 1;
-                    
+
                     if attempt < max_retries - 1 {
                         // Apply exponential backoff for potential collision resolution
                         sleep(backoff_delay).await;
                         backoff_delay = std::cmp::min(
                             backoff_delay * 2,
-                            Duration::from_millis(self.config.collision_config.max_backoff_ms)
+                            Duration::from_millis(self.config.collision_config.max_backoff_ms),
                         );
                         continue;
                     } else {
-                        return Err(MBusError::NomError("Timeout after collision handling retries".to_string()));
+                        return Err(MBusError::NomError(
+                            "Timeout after collision handling retries".to_string(),
+                        ));
                     }
                 }
                 Err(e) => {
@@ -443,12 +452,13 @@ impl MBusDeviceHandle {
 
         self.collision_stats.total_collisions += 1;
         self.collision_stats.update_collision_rate();
-        Err(MBusError::NomError("Max collision retries exceeded".to_string()))
+        Err(MBusError::NomError(
+            "Max collision retries exceeded".to_string(),
+        ))
     }
 
     /// Single attempt to receive a frame without collision handling
     async fn recv_frame_single_attempt(&mut self, to: Duration) -> Result<MBusFrame, MBusError> {
-
         // Read first byte (start)
         let mut start = [0u8; 1];
         let n = timeout(to, self.port.read(&mut start))
@@ -509,25 +519,32 @@ impl MBusDeviceHandle {
 impl MBusDeviceHandle {
     /// Sends a complete M-Bus data request to a device and returns parsed records.
     /// Implements the full M-Bus communication sequence with proper error handling and retries.
-    /// 
+    ///
     /// # Arguments
     /// * `address` - Primary address of the target device (1-250)
-    /// 
+    ///
     /// # Returns
     /// * `Ok(Vec<MBusRecord>)` - Successfully parsed data records from the device
     /// * `Err(MBusError)` - Communication failed after all retries
     pub async fn send_request(&mut self, address: u8) -> Result<Vec<MBusRecord>, MBusError> {
-        
         let mut state_machine = StateMachine::new();
         let max_retries = 3; // M-Bus spec: maximum 3 attempts
         let mut all_records = Vec::new();
-        
+
         // Calculate timeout based on current baud rate
         let communication_timeout = self.current_baud_rate.timeout();
         let inter_frame_delay = self.current_baud_rate.inter_frame_delay();
-        
+
         for attempt in 0..max_retries {
-            match self.attempt_communication(&mut state_machine, address, communication_timeout, inter_frame_delay).await {
+            match self
+                .attempt_communication(
+                    &mut state_machine,
+                    address,
+                    communication_timeout,
+                    inter_frame_delay,
+                )
+                .await
+            {
                 Ok(mut records) => {
                     all_records.append(&mut records);
                     return Ok(all_records);
@@ -548,101 +565,106 @@ impl MBusDeviceHandle {
                         }
                     } else {
                         // All retries exhausted
-                        return Err(MBusError::Other(format!("Communication failed after {} attempts", max_retries)));
+                        return Err(MBusError::Other(format!(
+                            "Communication failed after {} attempts",
+                            max_retries
+                        )));
                     }
                 }
             }
         }
-        
+
         // This should never be reached due to the loop logic above
         Err(MBusError::Other("Unexpected end of retry loop".to_string()))
     }
-    
+
     /// Performs a single communication attempt with a device.
     /// Handles the complete sequence including multi-frame responses.
-    /// 
+    ///
     /// # Arguments
     /// * `state_machine` - M-Bus protocol state machine
     /// * `address` - Target device address
     /// * `communication_timeout` - Timeout for each frame exchange
     /// * `inter_frame_delay` - Minimum delay between frames
-    /// 
+    ///
     /// # Returns
     /// * `Ok(Vec<MBusRecord>)` - Successfully parsed records
     /// * `Err(MBusError)` - Communication attempt failed
     async fn attempt_communication(
-        &mut self, 
-        state_machine: &mut StateMachine, 
-        address: u8, 
+        &mut self,
+        state_machine: &mut StateMachine,
+        address: u8,
         communication_timeout: std::time::Duration,
-        inter_frame_delay: std::time::Duration
+        inter_frame_delay: std::time::Duration,
     ) -> Result<Vec<MBusRecord>, MBusError> {
-        
         // Step 1: Select device (validate address)
         state_machine.select_device(address).await?;
-        
+
         let mut all_payload_data = Vec::new();
-        let mut more_frames_expected = false;
-        
+
         // Step 2: Request data (potentially multiple frames)
         loop {
             // Construct request frame
             let request_frame = state_machine.request_data().await?;
-            
+
             // Send request frame with inter-frame delay
             sleep(inter_frame_delay).await;
             self.send_frame(&request_frame).await?;
-            
+
             // Wait for and receive response frame
-            let response_frame = timeout(communication_timeout, self.recv_frame()).await
+            let response_frame = timeout(communication_timeout, self.recv_frame())
+                .await
                 .map_err(|_| MBusError::Other("Response timeout".to_string()))?
-                .map_err(|e| MBusError::FrameParseError(format!("Failed to receive frame: {}", e)))?;
-            
+                .map_err(|e| {
+                    MBusError::FrameParseError(format!("Failed to receive frame: {}", e))
+                })?;
+
             // Step 3: Validate and process received frame
             let (payload_data, more_frames) = state_machine.receive_data(&response_frame).await?;
-            
+
             // Accumulate payload data
             all_payload_data.extend(payload_data);
-            more_frames_expected = more_frames;
-            
+
             // If no more frames expected, break out of loop
-            if !more_frames_expected {
+            if !more_frames {
                 break;
             }
-            
+
             // For multi-frame communication, toggle FCB for next request
             state_machine.toggle_fcb();
         }
-        
+
         // Step 4: Process all accumulated data
         let records = state_machine.process_data(&all_payload_data).await?;
-        
+
         Ok(records)
     }
 
     /// Scans for M-Bus devices on the bus by sequentially polling all valid primary addresses.
     /// Uses REQ_UD2 requests to detect responding devices.
-    /// 
+    ///
     /// # Returns
     /// * `Ok(Vec<String>)` - List of discovered device addresses as strings
     /// * `Err(MBusError)` - Scanning operation failed
     pub async fn scan_devices(&mut self) -> Result<Vec<String>, MBusError> {
-        
         let mut discovered_devices = Vec::new();
         let mut state_machine = StateMachine::new();
-        
+
         // Calculate timeouts - use shorter timeout for scanning to speed up process
         let scan_timeout = self.current_baud_rate.timeout() / 2; // Half normal timeout
         let inter_frame_delay = self.current_baud_rate.inter_frame_delay();
-        
+
         println!("Starting M-Bus device scan (addresses 1-250)...");
-        
+
         // Scan all valid primary addresses (1 to 250)
         for address in 1u8..=250u8 {
             // Reset state machine for each device
             state_machine.reset();
-            
-            match self.scan_single_device(&mut state_machine, address, scan_timeout, inter_frame_delay).await {
+
+            match self
+                .scan_single_device(&mut state_machine, address, scan_timeout, inter_frame_delay)
+                .await
+            {
                 Ok(device_info) => {
                     discovered_devices.push(device_info);
                     println!("Found device at address {}", address);
@@ -652,30 +674,36 @@ impl MBusDeviceHandle {
                     // Don't print errors during scanning to avoid spam
                 }
             }
-            
+
             // Small delay between device polls to avoid overwhelming the bus
             sleep(inter_frame_delay).await;
-            
+
             // Progress indication every 50 addresses
             if address % 50 == 0 {
-                println!("Scanned up to address {}, found {} devices so far", 
-                    address, discovered_devices.len());
+                println!(
+                    "Scanned up to address {}, found {} devices so far",
+                    address,
+                    discovered_devices.len()
+                );
             }
         }
-        
-        println!("Device scan complete. Found {} devices total", discovered_devices.len());
+
+        println!(
+            "Device scan complete. Found {} devices total",
+            discovered_devices.len()
+        );
         Ok(discovered_devices)
     }
-    
+
     /// Attempts to communicate with a single device during scanning.
     /// Uses a single REQ_UD2 request with shorter timeout.
-    /// 
+    ///
     /// # Arguments
     /// * `state_machine` - M-Bus protocol state machine
     /// * `address` - Device address to test
     /// * `scan_timeout` - Shorter timeout for scanning
     /// * `inter_frame_delay` - Delay between frames
-    /// 
+    ///
     /// # Returns
     /// * `Ok(String)` - Device information string (address and basic info)
     /// * `Err(MBusError)` - Device not responding or communication failed
@@ -684,27 +712,27 @@ impl MBusDeviceHandle {
         state_machine: &mut StateMachine,
         address: u8,
         scan_timeout: std::time::Duration,
-        inter_frame_delay: std::time::Duration
+        inter_frame_delay: std::time::Duration,
     ) -> Result<String, MBusError> {
-        
         // Select device (validate address)
         state_machine.select_device(address).await?;
-        
+
         // Send single request frame
         let request_frame = state_machine.request_data().await?;
-        
+
         // Add inter-frame delay before transmission
         sleep(inter_frame_delay).await;
         self.send_frame(&request_frame).await?;
-        
+
         // Wait for response with shorter timeout
-        let response_frame = timeout(scan_timeout, self.recv_frame()).await
+        let response_frame = timeout(scan_timeout, self.recv_frame())
+            .await
             .map_err(|_| MBusError::Other("Scan timeout".to_string()))?
             .map_err(|e| MBusError::FrameParseError(format!("Scan receive error: {}", e)))?;
-        
+
         // Basic validation - just check if we got a reasonable response
         let (payload_data, _) = state_machine.receive_data(&response_frame).await?;
-        
+
         // Try to extract basic device information
         let device_info = if payload_data.is_empty() {
             format!("0x{:02X} (no data)", address)
@@ -720,7 +748,7 @@ impl MBusDeviceHandle {
                 }
             }
         };
-        
+
         Ok(device_info)
     }
 }
