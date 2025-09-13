@@ -30,7 +30,7 @@
 //! }
 //! ```
 
-use crate::wmbus::handle::{WMBusHandle, WMBusConfig, DeviceInfo, WMBusError};
+use crate::wmbus::handle::{DeviceInfo, WMBusConfig, WMBusError, WMBusHandle};
 use crate::wmbus::radio::hal::Hal;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -56,13 +56,13 @@ impl Default for NetworkConfig {
             // Common European wM-Bus frequencies
             frequencies: vec![
                 868_300_000, // C-mode: 868.3 MHz
-                868_950_000, // S-mode: 868.95 MHz  
+                868_950_000, // S-mode: 868.95 MHz
                 869_525_000, // T-mode: 869.525 MHz
             ],
             scan_duration_per_freq: 30, // 30 seconds per frequency
-            rssi_threshold: -90,         // -90 dBm minimum signal
-            max_devices: 1000,           // Limit to 1000 devices
-            clustering_distance: 100.0,  // 100 meter clusters
+            rssi_threshold: -90,        // -90 dBm minimum signal
+            max_devices: 1000,          // Limit to 1000 devices
+            clustering_distance: 100.0, // 100 meter clusters
         }
     }
 }
@@ -183,7 +183,7 @@ impl<H: Hal + Send + 'static> WMBusNetwork<H> {
             discovery_timeout_ms: self.config.scan_duration_per_freq * 1000,
             ..WMBusConfig::default()
         };
-        
+
         self.handle = Some(WMBusHandle::new(hal, Some(wmbus_config)).await?);
         Ok(())
     }
@@ -200,55 +200,62 @@ impl<H: Hal + Send + 'static> WMBusNetwork<H> {
     pub async fn discover_topology(&mut self) -> Result<NetworkTopology, WMBusError> {
         let start_time = Instant::now();
         let mut frequencies_scanned = Vec::new();
-        
+
         // Clear previous discoveries for fresh scan
         self.discovered_devices.clear();
-        
-        let handle = self.handle.as_mut()
+
+        let handle = self
+            .handle
+            .as_mut()
             .ok_or_else(|| WMBusError::InvalidConfig("Network not initialized".to_string()))?;
-        
+
         // Scan each configured frequency
         for &frequency in &self.config.frequencies {
-            log::info!("Scanning frequency {} MHz for {} seconds", 
-                      frequency / 1_000_000, self.config.scan_duration_per_freq);
-            
+            log::info!(
+                "Scanning frequency {} MHz for {} seconds",
+                frequency / 1_000_000,
+                self.config.scan_duration_per_freq
+            );
+
             // Reconfigure for this frequency
             let _new_config = WMBusConfig {
                 frequency_hz: frequency,
                 discovery_timeout_ms: self.config.scan_duration_per_freq * 1000,
                 ..WMBusConfig::default()
             };
-            
+
             // Update the handle configuration (simplified - in reality we'd need to recreate)
             // For now, we'll continue with the existing handle
-            
+
             // Scan for devices on this frequency
             let devices = handle.scan_devices().await?;
-            
+
             // Filter devices by RSSI threshold and add to discovered set
             for device in devices {
                 if device.rssi_dbm >= self.config.rssi_threshold {
                     self.discovered_devices.insert(device.address, device);
-                    
+
                     // Stop if we've reached max devices limit
-                    if self.config.max_devices > 0 && 
-                       self.discovered_devices.len() >= self.config.max_devices {
+                    if self.config.max_devices > 0
+                        && self.discovered_devices.len() >= self.config.max_devices
+                    {
                         break;
                     }
                 }
             }
-            
+
             frequencies_scanned.push(frequency);
-            
+
             // Break if max devices reached
-            if self.config.max_devices > 0 && 
-               self.discovered_devices.len() >= self.config.max_devices {
+            if self.config.max_devices > 0
+                && self.discovered_devices.len() >= self.config.max_devices
+            {
                 break;
             }
         }
-        
+
         let end_time = Instant::now();
-        
+
         // Build topology from discovered devices
         self.build_topology(frequencies_scanned, start_time, end_time)
     }
@@ -294,14 +301,14 @@ impl<H: Hal + Send + 'static> WMBusNetwork<H> {
     /// * Current network statistics
     pub fn get_statistics(&self) -> NetworkStatistics {
         let devices: Vec<_> = self.discovered_devices.values().collect();
-        
+
         // Calculate average RSSI
         let average_rssi = if devices.is_empty() {
             0.0
         } else {
             devices.iter().map(|d| d.rssi_dbm as f64).sum::<f64>() / devices.len() as f64
         };
-        
+
         // Build RSSI distribution
         let mut rssi_distribution = HashMap::new();
         for device in &devices {
@@ -313,20 +320,22 @@ impl<H: Hal + Send + 'static> WMBusNetwork<H> {
             };
             *rssi_distribution.entry(range.to_string()).or_insert(0) += 1;
         }
-        
+
         // Build device type distribution
         let mut device_type_distribution = HashMap::new();
         for device in &devices {
             let category = DeviceCategory::from(device.device_type);
             *device_type_distribution.entry(category).or_insert(0) += 1;
         }
-        
+
         // Build manufacturer distribution
         let mut manufacturer_distribution = HashMap::new();
         for device in &devices {
-            *manufacturer_distribution.entry(device.manufacturer_id).or_insert(0) += 1;
+            *manufacturer_distribution
+                .entry(device.manufacturer_id)
+                .or_insert(0) += 1;
         }
-        
+
         NetworkStatistics {
             total_devices: devices.len(),
             average_rssi,
@@ -344,29 +353,35 @@ impl<H: Hal + Send + 'static> WMBusNetwork<H> {
         end_time: Instant,
     ) -> Result<NetworkTopology, WMBusError> {
         let devices: Vec<DeviceInfo> = self.discovered_devices.values().cloned().collect();
-        
+
         // Group devices by category
         let mut devices_by_category = HashMap::new();
         for device in &devices {
             let category = DeviceCategory::from(device.device_type);
-            devices_by_category.entry(category).or_insert_with(Vec::new).push(device.clone());
+            devices_by_category
+                .entry(category)
+                .or_insert_with(Vec::new)
+                .push(device.clone());
         }
-        
+
         // Group devices by manufacturer
         let mut devices_by_manufacturer = HashMap::new();
         for device in &devices {
-            devices_by_manufacturer.entry(device.manufacturer_id).or_insert_with(Vec::new).push(device.clone());
+            devices_by_manufacturer
+                .entry(device.manufacturer_id)
+                .or_insert_with(Vec::new)
+                .push(device.clone());
         }
-        
+
         let statistics = self.get_statistics();
-        
+
         let scan_info = ScanInfo {
             frequencies_scanned,
             total_duration: end_time.duration_since(start_time),
             start_time,
             end_time,
         };
-        
+
         Ok(NetworkTopology {
             devices,
             devices_by_category,

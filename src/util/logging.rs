@@ -186,7 +186,7 @@ pub fn log_frame_hex(prefix: &str, data: &[u8]) {
         String::new()
     };
 
-    log::debug!("{}: {}{}", prefix, hex_str, suffix);
+    log::debug!("{prefix}: {hex_str}{suffix}");
 }
 
 /// Log frame data with structured information
@@ -295,12 +295,10 @@ pub mod debug {
     /// Log CRC validation results
     pub fn log_crc_result(expected: u16, calculated: u16, valid: bool) {
         if valid {
-            log::debug!("CRC valid: {:04X}", expected);
+            log::debug!("CRC valid: {expected:04X}");
         } else {
             log::warn!(
-                "CRC mismatch: expected {:04X}, calculated {:04X}",
-                expected,
-                calculated
+                "CRC mismatch: expected {expected:04X}, calculated {calculated:04X}"
             );
         }
     }
@@ -308,19 +306,14 @@ pub mod debug {
     /// Log frame type detection
     pub fn log_frame_type_detection(sync_byte: u8, frame_type: &str) {
         log::debug!(
-            "Frame type detected: sync={:02X} -> {}",
-            sync_byte,
-            frame_type
+            "Frame type detected: sync={sync_byte:02X} -> {frame_type}"
         );
     }
 
     /// Log encryption detection
     pub fn log_encryption_detection(ci: u8, acc: u8, encrypted: bool) {
         log::debug!(
-            "Encryption check: CI={:02X}, ACC={:02X} -> encrypted={}",
-            ci,
-            acc,
-            encrypted
+            "Encryption check: CI={ci:02X}, ACC={acc:02X} -> encrypted={encrypted}"
         );
     }
 }
@@ -367,10 +360,7 @@ pub mod perf {
         };
 
         log::debug!(
-            "Frame processing: {} bytes in {:?} ({:.1} bytes/sec)",
-            frame_len,
-            duration,
-            throughput
+            "Frame processing: {frame_len} bytes in {duration:?} ({throughput:.1} bytes/sec)"
         );
     }
 }

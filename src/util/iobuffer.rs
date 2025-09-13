@@ -19,7 +19,7 @@
 //!
 //! let mut buffer = IoBuffer::new();
 //! buffer.write(&[0x01, 0x02, 0x03]).unwrap();
-//! 
+//!
 //! let data = buffer.consume(2);
 //! assert_eq!(data, vec![0x01, 0x02]);
 //! ```
@@ -32,13 +32,13 @@ use thiserror::Error;
 pub enum IoBufferError {
     #[error("Insufficient capacity: requested {requested}, available {available}")]
     InsufficientCapacity { requested: usize, available: usize },
-    
+
     #[error("Buffer empty: no data available")]
     BufferEmpty,
-    
+
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
-    
+
     #[error("Capacity limit exceeded: {limit}")]
     CapacityExceeded { limit: usize },
 }
@@ -132,7 +132,7 @@ impl IoBuffer {
     /// but checks if the allocation would be possible.
     pub fn try_reserve(&self, additional: usize) -> Result<(), IoBufferError> {
         let total_needed = self.len() + additional;
-        
+
         if let Some(limit) = self.capacity_limit {
             if total_needed > limit {
                 return Err(IoBufferError::CapacityExceeded { limit });
@@ -149,11 +149,11 @@ impl IoBuffer {
     pub fn write(&mut self, data: &[u8]) -> Result<usize, IoBufferError> {
         // Check capacity constraints
         self.try_reserve(data.len())?;
-        
+
         // Append data
         self.data.extend(data);
         self.bytes_written += data.len() as u64;
-        
+
         Ok(data.len())
     }
 
@@ -172,14 +172,14 @@ impl IoBuffer {
     pub fn consume(&mut self, count: usize) -> Vec<u8> {
         let available = self.len();
         let to_consume = count.min(available);
-        
+
         let mut result = Vec::with_capacity(to_consume);
         for _ in 0..to_consume {
             if let Some(byte) = self.data.pop_front() {
                 result.push(byte);
             }
         }
-        
+
         self.bytes_consumed += result.len() as u64;
         result
     }
@@ -283,14 +283,16 @@ impl IoBuffer {
 
         // Get all data first
         let all_data: Vec<u8> = self.data.iter().copied().collect();
-        
+
         // Clear current buffer and put first part back
         self.data.clear();
         self.data.extend(&all_data[..pos]);
-        
+
         // Create new buffer with tail part
         let mut tail_buffer = IoBuffer::with_capacity(all_data.len() - pos);
-        tail_buffer.write(&all_data[pos..]).expect("Write to new buffer should not fail");
+        tail_buffer
+            .write(&all_data[pos..])
+            .expect("Write to new buffer should not fail");
         tail_buffer
     }
 
@@ -352,16 +354,16 @@ mod tests {
     #[test]
     fn test_basic_operations() {
         let mut buffer = IoBuffer::new();
-        
+
         // Test write and read
         assert_eq!(buffer.write(&[1, 2, 3]).unwrap(), 3);
         assert_eq!(buffer.len(), 3);
         assert!(!buffer.is_empty());
-        
+
         let data = buffer.consume(2);
         assert_eq!(data, vec![1, 2]);
         assert_eq!(buffer.len(), 1);
-        
+
         let remaining = buffer.consume(10); // More than available
         assert_eq!(remaining, vec![3]);
         assert!(buffer.is_empty());
@@ -371,15 +373,15 @@ mod tests {
     fn test_peek_operations() {
         let mut buffer = IoBuffer::new();
         buffer.write(&[1, 2, 3, 4, 5]).unwrap();
-        
+
         // Peek doesn't consume data
         assert_eq!(buffer.peek(3), vec![1, 2, 3]);
         assert_eq!(buffer.len(), 5);
-        
+
         // Peek range
         assert_eq!(buffer.peek_range(1, 3), vec![2, 3, 4]);
         assert_eq!(buffer.len(), 5);
-        
+
         // Out of bounds peek
         assert_eq!(buffer.peek_range(10, 5), Vec::<u8>::new());
     }
@@ -388,10 +390,10 @@ mod tests {
     fn test_capacity_management() {
         let mut buffer = IoBuffer::with_capacity(10);
         buffer.set_capacity_limit(Some(5));
-        
+
         // Should succeed
         assert!(buffer.write(&[1, 2, 3]).is_ok());
-        
+
         // Should fail due to capacity limit
         assert!(buffer.write(&[4, 5, 6]).is_err());
     }
@@ -400,12 +402,12 @@ mod tests {
     fn test_pattern_finding() {
         let mut buffer = IoBuffer::new();
         buffer.write(&[1, 2, 3, 4, 2, 3, 5]).unwrap();
-        
+
         // Find pattern
         assert_eq!(buffer.find_pattern(&[2, 3]), Some(1));
         assert_eq!(buffer.find_pattern(&[2, 3, 4]), Some(1));
         assert_eq!(buffer.find_pattern(&[9, 8]), None);
-        
+
         // Test starts_with
         assert!(buffer.starts_with(&[1, 2]));
         assert!(!buffer.starts_with(&[2, 3]));
@@ -416,7 +418,7 @@ mod tests {
         let mut buffer = IoBuffer::new();
         buffer.write(&[1, 2, 3, 4, 5]).unwrap();
         buffer.consume(2);
-        
+
         let stats = buffer.stats();
         assert_eq!(stats.current_len, 3);
         assert_eq!(stats.bytes_written, 5);
@@ -427,7 +429,7 @@ mod tests {
     fn test_buffer_splitting() {
         let mut buffer = IoBuffer::new();
         buffer.write(&[1, 2, 3, 4, 5, 6]).unwrap();
-        
+
         let tail = buffer.split_at(3);
         assert_eq!(buffer.consume(10), vec![1, 2, 3]);
         assert_eq!(tail.peek(10), vec![4, 5, 6]);

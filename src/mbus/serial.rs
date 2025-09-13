@@ -566,8 +566,7 @@ impl MBusDeviceHandle {
                     } else {
                         // All retries exhausted
                         return Err(MBusError::Other(format!(
-                            "Communication failed after {} attempts",
-                            max_retries
+                            "Communication failed after {max_retries} attempts"
                         )));
                     }
                 }
@@ -616,7 +615,7 @@ impl MBusDeviceHandle {
                 .await
                 .map_err(|_| MBusError::Other("Response timeout".to_string()))?
                 .map_err(|e| {
-                    MBusError::FrameParseError(format!("Failed to receive frame: {}", e))
+                    MBusError::FrameParseError(format!("Failed to receive frame: {e}"))
                 })?;
 
             // Step 3: Validate and process received frame
@@ -667,7 +666,7 @@ impl MBusDeviceHandle {
             {
                 Ok(device_info) => {
                     discovered_devices.push(device_info);
-                    println!("Found device at address {}", address);
+                    println!("Found device at address {address}");
                 }
                 Err(_) => {
                     // Device not responding or error - continue scanning
@@ -728,20 +727,20 @@ impl MBusDeviceHandle {
         let response_frame = timeout(scan_timeout, self.recv_frame())
             .await
             .map_err(|_| MBusError::Other("Scan timeout".to_string()))?
-            .map_err(|e| MBusError::FrameParseError(format!("Scan receive error: {}", e)))?;
+            .map_err(|e| MBusError::FrameParseError(format!("Scan receive error: {e}")))?;
 
         // Basic validation - just check if we got a reasonable response
         let (payload_data, _) = state_machine.receive_data(&response_frame).await?;
 
         // Try to extract basic device information
         let device_info = if payload_data.is_empty() {
-            format!("0x{:02X} (no data)", address)
+            format!("0x{address:02X} (no data)")
         } else {
             // Try to parse records to get more information
             match state_machine.process_data(&payload_data).await {
                 Ok(records) if !records.is_empty() => {
                     let record_count = records.len();
-                    format!("0x{:02X} ({} records)", address, record_count)
+                    format!("0x{address:02X} ({record_count} records)")
                 }
                 _ => {
                     format!("0x{:02X} ({} bytes)", address, payload_data.len())

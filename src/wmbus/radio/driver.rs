@@ -56,7 +56,8 @@
 use crate::wmbus::radio::hal::{Hal, HalError};
 use crate::wmbus::radio::irq::{IrqMaskBit, IrqStatus};
 use crate::wmbus::radio::modulation::{
-    CrcType, GfskModParams, HeaderType, ModulationParams, PacketParams, PacketType,
+    CrcType, GfskModParams, HeaderType, LoRaBandwidth, LoRaModParams, LoRaPacketParams,
+    ModulationParams, PacketParams, PacketType, SpreadingFactor, CodingRate,
 };
 use log;
 use std::time::{Duration, Instant};
@@ -107,7 +108,7 @@ impl Default for SleepConfig {
 }
 
 /// Radio packet statistics returned by GetStats command
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RadioStats {
     /// Number of packets successfully received
     pub packets_received: u16,
@@ -154,7 +155,7 @@ impl Default for LbtConfig {
 }
 
 /// Device error flags returned by GetDeviceErrors command
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct DeviceErrors {
     /// RC64k calibration failed
     pub rc64k_calib_error: bool,
@@ -271,6 +272,9 @@ pub struct Sx126xDriver<H: Hal> {
     rx_base_addr: u8,
     /// Current radio state (tracked for validation and power management)
     current_state: RadioState,
+    /// Current packet type (GFSK or LoRa)
+    #[allow(dead_code)]
+    current_packet_type: Option<PacketType>,
     /// Last time state was updated (for timeout detection)
     last_state_change: Option<Instant>,
 }
@@ -299,6 +303,7 @@ impl<H: Hal> Sx126xDriver<H> {
             tx_base_addr: 0,
             rx_base_addr: 0,
             current_state: RadioState::Sleep, // Start in sleep state
+            current_packet_type: None,
             last_state_change: None,
         }
     }
@@ -340,74 +345,31 @@ impl<H: Hal> Sx126xDriver<H> {
         Ok(())
     }
 
-    /// Configure modulation parameters
+    /// Set packet type (GFSK or LoRa)
     ///
-    /// Sets up the radio's modulation scheme, bitrate, bandwidth, and frequency deviation.
-    /// Currently supports GFSK (Gaussian Frequency Shift Keying) modulation.
+    /// Switches the radio modem type. Must be called before setting modulation or packet params.
     ///
     /// # Arguments
     ///
-    /// * `mod_params` - Modulation parameters including bitrate, shaping, bandwidth, and fdev
+    /// * `packet_type` - The packet type to configure
     ///
     /// # Returns
     ///
-    /// * `Ok(())` on success
-    /// * `Err(DriverError::Hal)` if SPI communication fails
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use crate::wmbus::radio::modulation::*;
-    ///
-    /// let mod_params = ModulationParams {
-    ///     packet_type: PacketType::Gfsk,
-    ///     params: GfskModParams {
-    ///         bitrate: 100_000,        // 100 kbps
-    ///         modulation_shaping: 1,   // Gaussian 0.5
-    ///         bandwidth: 156,          // 156 kHz
-    ///         fdev: 50_000,           // 50 kHz frequency deviation
-    ///     },
-    /// };
-    /// driver.set_modulation_params(mod_params)?;
-    /// ```
-    pub fn set_modulation_params(
-        &mut self,
-        mod_params: ModulationParams,
-    ) -> Result<(), DriverError> {
-        let mut buf = [0u8; 8];
-        match mod_params.packet_type {
-            PacketType::Gfsk => {
-                // Calculate bitrate parameter: BR = 32 * Xtal_freq / bitrate
-                let temp_val =
-                    (32 * self.xtal_freq as u64 / mod_params.params.bitrate as u64) as u32;
-                buf[0] = (temp_val >> 16) as u8;
-                buf[1] = (temp_val >> 8) as u8;
-                buf[2] = temp_val as u8;
-
-                // Modulation shaping (0=none, 1=Gaussian 0.3, 2=Gaussian 0.5, 3=Gaussian 1.0)
-                buf[3] = mod_params.params.modulation_shaping;
-
-                // Receiver bandwidth
-                buf[4] = mod_params.params.bandwidth;
-
-                // Calculate frequency deviation: Fdev = fdev * 2^25 / Xtal_freq
-                let fdev_step = self.xtal_freq / 32000000; // Simplified frequency step
-                let temp_fdev = (mod_params.params.fdev as u64 / fdev_step as u64) as u32;
-                buf[5] = (temp_fdev >> 16) as u8;
-                buf[6] = (temp_fdev >> 8) as u8;
-                buf[7] = temp_fdev as u8;
-
-                self.hal.write_command(0x8F, &buf)?; // SetModulationParams command
-            }
-        }
-        self.current_mod_params = Some(mod_params);
+    /// * `Ok(())` - Packet type set successfully
+    /// * `Err(DriverError)` - Command failed
+    pub fn set_packet_type(&mut self, packet_type: PacketType) -> Result<(), DriverError> {
+        let param = match packet_type {
+            PacketType::Gfsk => 0x00,
+            PacketType::LoRa => 0x01,
+        };
+        self.hal.write_command(0x8A, &[param])?;
         Ok(())
     }
 
     /// Configure packet parameters
     ///
     /// Sets up packet structure including preamble length, header type, payload size,
-    /// CRC configuration, and sync word settings.
+    /// CRC configuration, and sync word settings. Supports both GFSK and LoRa.
     ///
     /// # Arguments
     ///
@@ -423,55 +385,156 @@ impl<H: Hal> Sx126xDriver<H> {
     /// ```rust,no_run
     /// use crate::wmbus::radio::modulation::*;
     ///
-    /// let packet_params = PacketParams {
-    ///     packet_type: PacketType::Gfsk,
+    /// // GFSK for wM-Bus
+    /// let gfsk_packet = PacketParams::Gfsk {
     ///     preamble_len: 48,                    // 48-bit preamble
     ///     header_type: HeaderType::Variable,   // Variable length packets
-    ///     payload_len: 255,                    // Maximum payload size
+    ///     payload_len: 255,                    // Max payload size
     ///     crc_on: true,                        // Enable CRC
     ///     crc_type: CrcType::Byte2,           // 2-byte CRC
     ///     sync_word_len: 4,                    // 4-byte sync word
     /// };
-    /// driver.set_packet_params(packet_params)?;
+    /// driver.set_packet_params(gfsk_packet)?;
+    ///
+    /// // LoRa example (explicit header, CRC on)
+    /// let lora_packet = PacketParams::LoRa {
+    ///     params: LoRaPacketParams {
+    ///         preamble_len: 8,                 // 8 symbols preamble
+    ///         implicit_header: false,          // Explicit header
+    ///         payload_len: 255,                // Max payload size
+    ///         crc_on: true,                    // Enable CRC
+    ///         iq_inverted: false,
+    ///     }
+    /// };
+    /// driver.set_packet_params(lora_packet)?;
     /// ```
     pub fn set_packet_params(&mut self, packet_params: PacketParams) -> Result<(), DriverError> {
-        let mut buf = [0u8; 9];
+        match packet_params {
+            PacketParams::Gfsk {
+                preamble_len,
+                header_type,
+                payload_len,
+                crc_on,
+                crc_type,
+                sync_word_len,
+            } => {
+                let mut buf = [0u8; 9];
 
-        // Packet type (GFSK = 0x00)
-        buf[0] = match packet_params.packet_type {
-            PacketType::Gfsk => 0x00,
-        };
+                // Packet type (GFSK = 0x00)
+                buf[0] = 0x00;
 
-        // Preamble length in bits (16-bit value)
-        buf[1] = (packet_params.preamble_len >> 8) as u8; // MSB
-        buf[2] = packet_params.preamble_len as u8; // LSB
+                // Preamble length in bits (16-bit value)
+                buf[1] = (preamble_len >> 8) as u8; // MSB
+                buf[2] = preamble_len as u8; // LSB
 
-        // Header type (Variable=0x01, Fixed=0x00)
-        buf[3] = match packet_params.header_type {
-            HeaderType::Variable => 0x01,
-            HeaderType::Fixed => 0x00,
-        };
+                // Header type (Variable=0x01, Fixed=0x00)
+                buf[3] = match header_type {
+                    HeaderType::Variable => 0x01,
+                    HeaderType::Fixed => 0x00,
+                };
 
-        // Maximum payload length
-        buf[4] = packet_params.payload_len;
+                // Maximum payload length
+                buf[4] = payload_len;
 
-        // CRC enable/disable
-        buf[5] = if packet_params.crc_on { 0x01 } else { 0x00 };
+                // CRC enable/disable
+                buf[5] = if crc_on { 0x01 } else { 0x00 };
 
-        // CRC type (1-byte=0x01, 2-byte=0x00)
-        buf[6] = match packet_params.crc_type {
-            CrcType::Byte1 => 0x01,
-            CrcType::Byte2 => 0x00,
-        };
+                // CRC type (1-byte=0x01, 2-byte=0x00)
+                buf[6] = match crc_type {
+                    CrcType::Byte1 => 0x01,
+                    CrcType::Byte2 => 0x00,
+                };
 
-        // Sync word length in bytes
-        buf[7] = packet_params.sync_word_len;
+                // Sync word length in bytes
+                buf[7] = sync_word_len;
 
-        // DC-free encoding (disabled for wM-Bus)
-        buf[8] = 0x00;
+                // DC-free encoding (disabled for wM-Bus)
+                buf[8] = 0x00;
 
-        self.hal.write_command(0x8C, &buf)?; // SetPacketParams command
+                self.hal.write_command(0x8C, &buf)?; // SetPacketParams command
+            }
+            PacketParams::LoRa { params } => {
+                let mut buf = [0u8; 6];
+
+                // Preamble length in symbols (16-bit value)
+                buf[0] = (params.preamble_len >> 8) as u8; // MSB
+                buf[1] = params.preamble_len as u8; // LSB
+
+                // Header type (Implicit=0x01, Explicit=0x00)
+                buf[2] = if params.implicit_header { 0x01 } else { 0x00 };
+
+                // Maximum payload length
+                buf[3] = params.payload_len;
+
+                // CRC enable/disable
+                buf[4] = if params.crc_on { 0x01 } else { 0x00 };
+
+                // IQ inverted
+                buf[5] = if params.iq_inverted { 0x01 } else { 0x00 };
+
+                self.hal.write_command(0x8C, &buf)?; // SetPacketParams command for LoRa
+            }
+        }
         self.current_packet_params = Some(packet_params);
+        Ok(())
+    }
+
+    /// Set modulation parameters for the radio
+    ///
+    /// Configures the modulation scheme (GFSK or LoRa) with specific parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `mod_params` - Modulation configuration parameters
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` on success
+    /// * `Err(DriverError::Hal)` if SPI communication fails
+    pub fn set_modulation_params(&mut self, mod_params: ModulationParams) -> Result<(), DriverError> {
+        match mod_params {
+            ModulationParams::Gfsk { params } => {
+                let mut buf = [0u8; 8];
+
+                // Calculate bitrate register value
+                let bitrate_reg = (32_000_000u32 * 32) / params.bitrate;
+                buf[0] = ((bitrate_reg >> 16) & 0xFF) as u8;
+                buf[1] = ((bitrate_reg >> 8) & 0xFF) as u8;
+                buf[2] = (bitrate_reg & 0xFF) as u8;
+
+                // Modulation shaping
+                buf[3] = params.modulation_shaping;
+
+                // RX bandwidth
+                buf[4] = params.bandwidth;
+
+                // Frequency deviation
+                let fdev_reg = (params.fdev as u64 * (1 << 25)) / self.xtal_freq as u64;
+                buf[5] = ((fdev_reg >> 16) & 0xFF) as u8;
+                buf[6] = ((fdev_reg >> 8) & 0xFF) as u8;
+                buf[7] = (fdev_reg & 0xFF) as u8;
+
+                self.hal.write_command(0x8B, &buf)?; // SetModulationParams command
+            }
+            ModulationParams::LoRa { params } => {
+                let mut buf = [0u8; 4];
+
+                // Spreading Factor
+                buf[0] = params.sf as u8;
+
+                // Bandwidth
+                buf[1] = params.bw as u8;
+
+                // Coding Rate
+                buf[2] = params.cr as u8;
+
+                // Low Data Rate Optimize
+                buf[3] = if params.low_data_rate_optimize { 0x01 } else { 0x00 };
+
+                self.hal.write_command(0x8B, &buf)?; // SetModulationParams command for LoRa
+            }
+        }
+        self.current_mod_params = Some(mod_params);
         Ok(())
     }
 
@@ -611,7 +674,7 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// This method should be called regularly (typically in a polling loop or from an
     /// interrupt handler) to process radio events. It checks the interrupt status,
-    /// handles received data, and logs relevant events.
+    /// handles received data, and logs relevant events. Supports both GFSK and LoRa.
     ///
     /// # Returns
     ///
@@ -626,15 +689,16 @@ impl<H: Hal> Sx126xDriver<H> {
     /// - **TX Done**: Logs transmission completion
     /// - **CRC Error**: Logs CRC validation failure
     /// - **Timeout**: Logs operation timeout
+    /// - **Header Valid**: For LoRa, confirms valid header before RxDone
     ///
     /// # Examples
     ///
     /// ```rust,no_run
-    /// // Polling loop for received data
+    /// // Polling loop for received data (GFSK or LoRa)
     /// loop {
     ///     if let Some(payload) = driver.process_irqs()? {
     ///         println!("Received {} bytes: {:?}", payload.len(), payload);
-    ///         // Process the received wM-Bus frame
+    ///         // Process the received wM-Bus or LoRa frame
     ///     }
     ///     std::thread::sleep(std::time::Duration::from_millis(10));
     /// }
@@ -658,7 +722,7 @@ impl<H: Hal> Sx126xDriver<H> {
                 // Read received payload from radio buffer
                 let mut payload = vec![0u8; rx_len];
                 self.read_buffer(self.rx_base_addr, rx_len as u8, &mut payload)?;
-                log::info!("RX done, received {} bytes", rx_len);
+                log::info!("RX done, received {rx_len} bytes");
                 return Ok(Some(payload));
             }
         }
@@ -676,6 +740,11 @@ impl<H: Hal> Sx126xDriver<H> {
         // Handle timeouts
         if irq_status.timeout() {
             log::warn!("Timeout - operation did not complete within expected time");
+        }
+
+        // Handle LoRa-specific: Header Valid (for variable-length LoRa packets)
+        if irq_status.header_valid() {
+            log::debug!("LoRa header valid - packet reception started");
         }
 
         Ok(None)
@@ -728,8 +797,7 @@ impl<H: Hal> Sx126xDriver<H> {
         self.set_rf_frequency(frequency_hz)?;
 
         // Configure GFSK modulation parameters
-        let mod_params = ModulationParams {
-            packet_type: PacketType::Gfsk,
+        let mod_params = ModulationParams::Gfsk {
             params: GfskModParams {
                 bitrate,
                 modulation_shaping: 1, // Gaussian 0.5 (typical for wM-Bus)
@@ -740,8 +808,7 @@ impl<H: Hal> Sx126xDriver<H> {
         self.set_modulation_params(mod_params)?;
 
         // Configure packet parameters for wM-Bus
-        let packet_params = PacketParams {
-            packet_type: PacketType::Gfsk,
+        let packet_params = PacketParams::Gfsk {
             preamble_len: 48,                  // 48-bit preamble (wM-Bus standard)
             header_type: HeaderType::Variable, // Variable length packets
             payload_len: 255,                  // Maximum payload size
@@ -807,7 +874,7 @@ impl<H: Hal> Sx126xDriver<H> {
             0x5 => RadioState::Rx,
             0x6 => RadioState::Tx,
             _ => {
-                log::warn!("Unknown chip mode: 0x{:02X}", chip_mode);
+                log::warn!("Unknown chip mode: 0x{chip_mode:02X}");
                 self.current_state // Return last known state
             }
         };
@@ -939,7 +1006,7 @@ impl<H: Hal> Sx126xDriver<H> {
         // Wait for transition to complete
         self.wait_for_state(target_state, 500)?; // 500ms timeout
 
-        log::info!("Radio entered standby mode: {:?}", mode);
+        log::info!("Radio entered standby mode: {mode:?}");
         Ok(())
     }
 
@@ -1070,7 +1137,7 @@ impl<H: Hal> Sx126xDriver<H> {
         let device_errors = DeviceErrors::from_raw(error_word);
 
         if device_errors.has_errors() {
-            log::warn!("Device errors detected: {:?}", device_errors);
+            log::warn!("Device errors detected: {device_errors:?}");
         }
 
         Ok(device_errors)
@@ -1096,24 +1163,26 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// Loads the provided data into the radio buffer and initiates transmission.
     /// This is a complete transmission operation that handles buffer loading,
-    /// mode switching, and completion detection.
+    /// mode switching, and completion detection. Performs a single LBT check before TX.
     ///
     /// # Arguments
     ///
     /// * `data` - Data to transmit (up to 255 bytes)
+    /// * `lbt_config` - LBT configuration for channel check (threshold, duration)
     ///
     /// # Returns
     ///
     /// * `Ok(())` - Transmission completed successfully
-    /// * `Err(DriverError)` - Transmission failed
+    /// * `Err(DriverError)` - Transmission failed (e.g., channel busy, timeout)
     ///
     /// # Examples
     ///
     /// ```rust,no_run
+    /// let lbt_config = LbtConfig::default(); // EU compliant settings
     /// let wmbus_frame = [0x44, 0x12, 0x34, 0x56, 0x78]; // Example frame
-    /// driver.transmit(&wmbus_frame)?;
+    /// driver.transmit(&wmbus_frame, &lbt_config)?;
     /// ```
-    pub fn transmit(&mut self, data: &[u8]) -> Result<(), DriverError> {
+    pub fn transmit(&mut self, data: &[u8], lbt_config: &LbtConfig) -> Result<(), DriverError> {
         if data.len() > 255 {
             return Err(DriverError::InvalidParams);
         }
@@ -1132,13 +1201,12 @@ impl<H: Hal> Sx126xDriver<H> {
 
         // Perform Listen Before Talk (LBT) check for ETSI compliance
         // Default threshold is -85 dBm per ETSI EN 300 220-1
-        let lbt_config = LbtConfig::default(); // Uses -85 dBm, 5ms listen, 3 retries
 
         // Switch to RX mode briefly to measure RSSI
         self.set_rx(0)?;
         std::thread::sleep(Duration::from_millis(1)); // Allow RX to stabilize
 
-        if !self.check_channel_clear(&lbt_config)? {
+        if !self.check_channel_clear(lbt_config)? {
             let rssi = self.get_rssi_instant()?;
             log::warn!(
                 "Channel busy: RSSI {} dBm exceeds threshold {} dBm",
@@ -1264,13 +1332,13 @@ impl<H: Hal> Sx126xDriver<H> {
             if channel_clear {
                 // Channel is clear, proceed with transmission
                 log::debug!("LBT: Channel clear, transmitting (attempt {})", attempt + 1);
-                return self.transmit(data);
+                return self.transmit(data, &lbt_config);
             } else {
                 // Channel is busy
                 if attempt < lbt_config.max_retries {
                     // Exponential backoff before retry
                     let backoff_ms = 10 * (1 << attempt); // 10ms, 20ms, 40ms, etc.
-                    log::debug!("LBT: Channel busy, backing off for {}ms", backoff_ms);
+                    log::debug!("LBT: Channel busy, backing off for {backoff_ms}ms");
                     std::thread::sleep(Duration::from_millis(backoff_ms));
                 } else {
                     // All retries exhausted
@@ -1340,24 +1408,137 @@ impl<H: Hal> Sx126xDriver<H> {
 
     // ========================== UTILITY METHODS ==========================
 
-    /// Get comprehensive radio status for debugging
+    /// Configure radio for LoRa operation
     ///
-    /// Returns a detailed status report including current state, statistics,
-    /// error flags, and recent RSSI measurements. Useful for debugging
-    /// and system monitoring.
+    /// Sets up LoRa modulation and packet parameters for optimal LoRa reception/transmission.
+    /// Includes common defaults for non-LoRaWAN use (e.g., explicit header, CRC on).
+    ///
+    /// # Arguments
+    ///
+    /// * `frequency_hz` - Operating frequency in Hz (e.g., 868_100_000 for EU LoRa)
+    /// * `sf` - Spreading factor (SF7-SF12)
+    /// * `bw` - Bandwidth (e.g., BW125 for long range)
+    /// * `cr` - Coding rate (4/5 to 4/8)
+    /// * `power_dbm` - TX power in dBm (e.g., 14)
     ///
     /// # Returns
     ///
-    /// * `Ok(RadioStatusReport)` - Complete status information
-    /// * `Err(DriverError)` - Status read failed
-    pub fn get_status_report(&mut self) -> Result<RadioStatusReport, DriverError> {
-        Ok(RadioStatusReport {
-            state: self.get_state()?,
-            stats: self.get_stats()?,
-            device_errors: self.get_device_errors()?,
-            irq_status: self.get_irq_status()?,
-            last_state_change: self.last_state_change,
-        })
+    /// * `Ok(())` on successful configuration
+    /// * `Err(DriverError)` if configuration fails
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use crate::wmbus::radio::modulation::{SpreadingFactor, LoRaBandwidth, CodingRate};
+    ///
+    /// // Long range LoRa (SF12, 125kHz BW, 4/5 CR)
+    /// driver.configure_for_lora(
+    ///     868_100_000,   // EU 868.1 MHz
+    ///     SpreadingFactor::SF12,
+    ///     LoRaBandwidth::BW125,
+    ///     CodingRate::CR4_5,
+    ///     14,            // 14 dBm TX power
+    /// )?;
+    /// ```
+    pub fn configure_for_lora(
+        &mut self,
+        frequency_hz: u32,
+        sf: SpreadingFactor,
+        bw: LoRaBandwidth,
+        cr: CodingRate,
+        power_dbm: i8,
+    ) -> Result<(), DriverError> {
+        // Set RF frequency
+        self.set_rf_frequency(frequency_hz)?;
+
+        // Set packet type to LoRa
+        self.set_packet_type(PacketType::LoRa)?;
+
+        // Configure LoRa modulation parameters
+        let mod_params = ModulationParams::LoRa {
+            params: LoRaModParams {
+                sf,
+                bw,
+                cr,
+                low_data_rate_optimize: matches!(sf, SpreadingFactor::SF11 | SpreadingFactor::SF12),
+            }
+        };
+        self.set_modulation_params(mod_params)?;
+
+        // Configure LoRa packet parameters (explicit header, CRC on, standard preamble)
+        let packet_params = PacketParams::LoRa {
+            params: LoRaPacketParams {
+                preamble_len: 8,       // Standard 8-symbol preamble
+                implicit_header: false, // Explicit header for non-WAN
+                payload_len: 255,      // Max payload
+                crc_on: true,           // Enable CRC
+                iq_inverted: false,     // Standard IQ
+            }
+        };
+        self.set_packet_params(packet_params)?;
+
+        // Configure power amplifier
+        self.set_pa_config(0x04, 0x00, 0x00)?; // Standard PA config
+        self.set_tx_params(power_dbm, 0x07)?; // Power and ramp time
+
+        // Set buffer base addresses
+        self.set_buffer_base_addresses(0, 0)?;
+
+        // Configure interrupt routing for LoRa (RxDone, HeaderValid, CrcErr)
+        self.set_dio_irq_params(
+            // IRQ mask: RxDone, HeaderValid, CrcErr, Timeout
+            IrqMaskBit::RxDone as u16
+                | IrqMaskBit::HeaderValid as u16
+                | IrqMaskBit::CrcErr as u16
+                | IrqMaskBit::Timeout as u16,
+            IrqMaskBit::RxDone as u16 | IrqMaskBit::HeaderValid as u16, // DIO1: Rx events
+            0, // DIO2: unused for LoRa
+            0, // DIO3: unused
+        )?;
+
+        log::info!("LoRa configured: SF{sf:?}, BW{bw:?}, CR{cr:?}, Power {power_dbm} dBm");
+        Ok(())
+    }
+
+    /// Set LoRa sync word for network identification
+    ///
+    /// Configures the LoRa sync word (network ID) for filtering packets.
+    /// Use 0x34 for public LoRaWAN, custom values for private networks.
+    ///
+    /// # Arguments
+    ///
+    /// * `network_id` - 16-bit network ID (sync word)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Sync word set successfully
+    /// * `Err(DriverError)` - Register write failed
+    pub fn set_lora_sync_word(&mut self, network_id: u16) -> Result<(), DriverError> {
+        // Private LoRa sync word register (0x0741)
+        let buf = [network_id as u8, (network_id >> 8) as u8];
+        self.hal.write_register(0x0741, &buf)?;
+        log::info!("LoRa sync word set to 0x{network_id:04X}");
+        Ok(())
+    }
+
+    /// Switch radio to LoRa mode
+    ///
+    /// Convenience method to configure the radio for LoRa operation.
+    /// Sets packet type to LoRa and updates internal state.
+    pub fn switch_to_lora_mode(&mut self) -> Result<(), DriverError> {
+        self.set_packet_type(PacketType::LoRa)?;
+        log::debug!("Switched to LoRa mode");
+        Ok(())
+    }
+
+    /// Switch radio to GFSK mode
+    ///
+    /// Convenience method to configure the radio for GFSK operation (wM-Bus).
+    /// Sets packet type to GFSK and updates internal state.
+    pub fn switch_to_gfsk_mode(&mut self) -> Result<(), DriverError> {
+        self.set_packet_type(PacketType::Gfsk)?;
+        log::debug!("Switched to GFSK mode");
+        Ok(())
     }
 }
 
@@ -1372,8 +1553,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
         self.configure_for_wmbus(config.frequency_hz, config.bitrate)
             .map_err(|e| {
                 crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                    "SX126x init failed: {}",
-                    e
+                    "SX126x init failed: {e}"
                 ))
             })
     }
@@ -1383,8 +1563,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
     ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
         self.set_rx_continuous().map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "Failed to start RX: {}",
-                e
+                "Failed to start RX: {e}"
             ))
         })
     }
@@ -1394,8 +1573,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
     ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
         self.set_standby(StandbyMode::RC).map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "Failed to stop RX: {}",
-                e
+                "Failed to stop RX: {e}"
             ))
         })
     }
@@ -1404,10 +1582,10 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
         &mut self,
         data: &[u8],
     ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
-        self.transmit(data).map_err(|e| {
+        let lbt_config = LbtConfig::default();
+        self.transmit(data, &lbt_config).map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "Transmission failed: {}",
-                e
+                "Transmission failed: {e}"
             ))
         })
     }
@@ -1420,8 +1598,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
     > {
         match self.process_irqs().map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "IRQ processing failed: {}",
-                e
+                "IRQ processing failed: {e}"
             ))
         })? {
             Some(data) => {
@@ -1450,8 +1627,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
     > {
         let stats = self.get_stats().map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "Failed to get stats: {}",
-                e
+                "Failed to get stats: {e}"
             ))
         })?;
 
@@ -1471,8 +1647,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
     ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
         self.reset_stats().map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "Failed to reset stats: {}",
-                e
+                "Failed to reset stats: {e}"
             ))
         })
     }
@@ -1485,8 +1660,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
     > {
         let state = self.get_state().map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "Failed to get state: {}",
-                e
+                "Failed to get state: {e}"
             ))
         })?;
 
@@ -1504,8 +1678,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
     async fn sleep(&mut self) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
         self.set_sleep(SleepConfig::default()).map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "Failed to sleep: {}",
-                e
+                "Failed to sleep: {e}"
             ))
         })
     }
@@ -1513,8 +1686,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
     async fn wake_up(&mut self) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
         self.set_standby(StandbyMode::RC).map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "Failed to wake up: {}",
-                e
+                "Failed to wake up: {e}"
             ))
         })
     }
@@ -1524,8 +1696,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
     ) -> Result<i16, crate::wmbus::radio::radio_driver::RadioDriverError> {
         self.get_rssi_instant().map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "Failed to get RSSI: {}",
-                e
+                "Failed to get RSSI: {e}"
             ))
         })
     }
@@ -1543,8 +1714,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
 
         self.check_channel_clear(&lbt_config).map_err(|e| {
             crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "LBT check failed: {}",
-                e
+                "LBT check failed: {e}"
             ))
         })
     }

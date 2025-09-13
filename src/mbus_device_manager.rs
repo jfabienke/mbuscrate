@@ -60,7 +60,7 @@ impl MBusDeviceManager {
     pub async fn add_wmbus_handle_mock(&mut self, device_id: &str) -> Result<(), MBusError> {
         let handle = WMBusHandleFactory::create_mock()
             .await
-            .map_err(|e| MBusError::from(e))?;
+            .map_err(MBusError::from)?;
         self.wmbus_handles.insert(device_id.to_string(), handle);
         Ok(())
     }
@@ -132,7 +132,7 @@ impl MBusDeviceManager {
             let wmbus_devices = handle
                 .scan_devices()
                 .await
-                .map_err(|e| MBusError::from(e))?;
+                .map_err(MBusError::from)?;
             // Convert DeviceInfo to String addresses
             addresses.extend(
                 wmbus_devices
@@ -168,8 +168,7 @@ impl MBusDeviceManager {
         // Check if handle exists first
         if !self.mbus_handles.contains_key(port_name) {
             return Err(MBusError::DeviceDiscoveryError(format!(
-                "M-Bus handle not found for port: {}",
-                port_name
+                "M-Bus handle not found for port: {port_name}"
             )));
         }
 
@@ -294,7 +293,7 @@ impl MBusDeviceManager {
         pattern: &[u8; 8],
     ) -> Result<Option<SecondaryAddress>, MBusError> {
         // If pattern has wildcards, we can't get a specific address
-        if pattern.iter().any(|&b| b == 0xF) {
+        if pattern.contains(&0xF) {
             return Ok(None);
         }
 
@@ -349,8 +348,7 @@ impl MBusDeviceManager {
     ) -> Result<Vec<crate::payload::record::MBusRecord>, MBusError> {
         let _handle = self.mbus_handles.get_mut(port_name).ok_or_else(|| {
             MBusError::DeviceDiscoveryError(format!(
-                "M-Bus handle not found for port: {}",
-                port_name
+                "M-Bus handle not found for port: {port_name}"
             ))
         })?;
 

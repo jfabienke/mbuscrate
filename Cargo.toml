@@ -40,6 +40,15 @@ tracing = { version = "0.1", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# CBOR serialization for LoRa payloads
+ciborium = "0.2"
+
+# For per-device statistics
+lazy_static = "1.4"
+
+# For random channel selection in LoRa
+rand = "0.8"
+
 [dev-dependencies]
 criterion = "0.5"
 tokio-test = "0.4.4"
@@ -69,3 +78,4 @@ wmbus-crypto = ["crypto"]
 enhanced-gpio = ["raspberry-pi", "dep:tracing"]
 lorawan = []
 tracing = ["dep:tracing"]
+cbor = []

@@ -34,14 +34,14 @@ async fn test_state_machine_receive_data() {
     // Must select device first, then request data, then receive
     sm.select_device(1).await.unwrap();
     sm.request_data().await.unwrap();
-    
+
     let frame = MBusFrame {
         frame_type: MBusFrameType::Long,
         control: 0x08,
         address: 0x01,
-        control_information: 0x72, // RSP_UD 
+        control_information: 0x72,          // RSP_UD
         data: vec![0x01, 0x00, 0x00, 0x00], // Some test data
-        checksum: 0x7C, // 0x08 + 0x01 + 0x72 + 0x01 = 0x7C
+        checksum: 0x7C,                     // 0x08 + 0x01 + 0x72 + 0x01 = 0x7C
         more_records_follow: false,
     };
     let result = sm.receive_data(&frame).await;
@@ -80,7 +80,7 @@ async fn test_mbus_protocol_new() {
     assert!(!protocol.state_machine.state.eq(&MBusProtocolState::Error));
 }
 
-// Note: send_request, scan_devices, and disconnect_all methods are now implemented 
+// Note: send_request, scan_devices, and disconnect_all methods are now implemented
 // in MBusDeviceHandle in the serial module, not in MBusProtocol
 
 #[tokio::test]

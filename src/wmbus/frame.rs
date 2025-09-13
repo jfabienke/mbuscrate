@@ -23,6 +23,8 @@
 //! with initial value 0x3791. The calculation covers the entire frame from
 //! L-field to the end of data (excluding the CRC itself).
 
+use crate::vendors;
+use crate::instrumentation::stats::{update_device_error, update_device_success, ErrorType};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -36,6 +38,8 @@ pub struct WMBusFrame {
     pub control_info: u8,
     pub payload: Vec<u8>,
     pub crc: u16,
+    /// Indicates if frame is encrypted (detected from ACC field)
+    pub encrypted: bool,
 }
 
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -71,14 +75,14 @@ pub enum ParseError {
 /// let crc = calculate_wmbus_crc(&frame_data);
 /// ```
 pub fn calculate_wmbus_crc(data: &[u8]) -> u16 {
-    const POLYNOMIAL: u16 = 0x8408; // Reversed CCITT polynomial  
-    const INITIAL: u16 = 0x3791;    // wM-Bus specific initial value
-    
+    const POLYNOMIAL: u16 = 0x8408; // Reversed CCITT polynomial
+    const INITIAL: u16 = 0x3791; // wM-Bus specific initial value
+
     let mut crc = INITIAL;
-    
+
     for &byte in data {
         crc ^= byte as u16;
-        
+
         for _ in 0..8 {
             if crc & 1 != 0 {
                 crc = (crc >> 1) ^ POLYNOMIAL;
@@ -87,9 +91,33 @@ pub fn calculate_wmbus_crc(data: &[u8]) -> u16 {
             }
         }
     }
-    
+
     // Important: wM-Bus does NOT complement the final result
     crc
+}
+
+/// Check if frame is encrypted based on control field and CI
+///
+/// Encrypted frames are indicated by:
+/// - ACC bit (bit 7) set in control field, OR
+/// - CI field in range 0x7A-0x8B (encrypted short/long formats)
+///
+/// # Arguments
+///
+/// * `control_field` - Frame control field
+/// * `control_info` - Control information field (CI)
+///
+/// # Returns
+///
+/// * true if frame appears to be encrypted
+pub fn is_encrypted_frame(control_field: u8, control_info: u8) -> bool {
+    // Check ACC bit (bit 7) in control field
+    let acc_bit_set = (control_field & 0x80) != 0;
+
+    // Check for encrypted CI range (0x7A-0x8B covers various encrypted formats)
+    let encrypted_ci = matches!(control_info, 0x7A..=0x8B);
+
+    acc_bit_set || encrypted_ci
 }
 
 /// Verify CRC of a complete wM-Bus frame
@@ -109,17 +137,17 @@ pub fn verify_wmbus_crc(frame_data: &[u8]) -> bool {
     if frame_data.len() < 3 {
         return false; // Too short to contain CRC
     }
-    
+
     // Extract CRC from last 2 bytes (little-endian)
     let frame_crc = u16::from_le_bytes([
         frame_data[frame_data.len() - 2],
         frame_data[frame_data.len() - 1],
     ]);
-    
+
     // Calculate CRC over data (excluding the CRC field itself)
     let data_for_crc = &frame_data[..frame_data.len() - 2];
     let calculated_crc = calculate_wmbus_crc(data_for_crc);
-    
+
     frame_crc == calculated_crc
 }
 
@@ -137,10 +165,10 @@ pub fn verify_wmbus_crc(frame_data: &[u8]) -> bool {
 pub fn add_wmbus_crc(frame_data: &[u8]) -> Vec<u8> {
     let crc = calculate_wmbus_crc(frame_data);
     let mut result = frame_data.to_vec();
-    
+
     // Append CRC in little-endian format
     result.extend_from_slice(&crc.to_le_bytes());
-    
+
     result
 }
 
@@ -172,14 +200,14 @@ pub fn parse_wmbus_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
     if raw_bytes.len() >= 3 && raw_bytes[2] == 0x79 {
         return parse_compact_frame(raw_bytes);
     }
-    
+
     // Minimum frame size: L(1) + C(1) + M(2) + A(4) + V(1) + T(1) + CI(1) + CRC(2) = 13 bytes
     if raw_bytes.len() < 13 {
         return Err(ParseError::BufferTooShort);
     }
-    
+
     let length = raw_bytes[0];
-    
+
     // Validate that L-field matches actual frame length
     // L-field represents bytes following the L-field, excluding CRC
     // So: total_length = L-field + 1 (for L-field) + 2 (for CRC)
@@ -187,20 +215,33 @@ pub fn parse_wmbus_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
     if raw_bytes.len() != expected_total_len {
         return Err(ParseError::InvalidLength);
     }
-    
-    // Verify CRC before proceeding with parsing
-    if !verify_wmbus_crc(raw_bytes) {
-        return Err(ParseError::InvalidCrc);
-    }
-    
-    // Extract header fields
+
+    // Extract header fields first to check for encryption
     let control_field = raw_bytes[1];
     let manufacturer_id = u16::from_le_bytes([raw_bytes[2], raw_bytes[3]]);
-    let device_address = u32::from_le_bytes([raw_bytes[4], raw_bytes[5], raw_bytes[6], raw_bytes[7]]);
+    let device_address =
+        u32::from_le_bytes([raw_bytes[4], raw_bytes[5], raw_bytes[6], raw_bytes[7]]);
     let version = raw_bytes[8];
     let device_type = raw_bytes[9];
     let control_info = raw_bytes[10];
-    
+
+    // Check if frame is encrypted
+    let encrypted = is_encrypted_frame(control_field, control_info);
+
+    // Only verify CRC for non-encrypted frames (encrypted frames need post-decrypt CRC)
+    if !encrypted && !verify_wmbus_crc(raw_bytes) {
+        // Track CRC error for this device
+        let device_id = format!("{device_address:08X}");
+        update_device_error(&device_id, ErrorType::Crc);
+        return Err(ParseError::InvalidCrc);
+    }
+
+    if encrypted {
+        log::debug!(
+            "Encrypted frame detected (CI=0x{control_info:02X}, C=0x{control_field:02X}), deferring CRC validation"
+        );
+    }
+
     // Extract payload (everything between CI field and CRC)
     let payload_start = 11;
     let payload_end = raw_bytes.len() - 2; // Exclude 2-byte CRC
@@ -209,13 +250,17 @@ pub fn parse_wmbus_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
     } else {
         vec![]
     };
-    
+
     // Extract CRC from last 2 bytes
     let crc = u16::from_le_bytes([
         raw_bytes[raw_bytes.len() - 2],
         raw_bytes[raw_bytes.len() - 1],
     ]);
-    
+
+    // Track successful frame parsing
+    let device_id = format!("{device_address:08X}");
+    update_device_success(&device_id);
+
     Ok(WMBusFrame {
         length,
         control_field,
@@ -226,6 +271,7 @@ pub fn parse_wmbus_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
         control_info,
         payload,
         crc,
+        encrypted,
     })
 }
 
@@ -243,23 +289,23 @@ fn parse_compact_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
     if raw_bytes.len() < 7 {
         return Err(ParseError::BufferTooShort);
     }
-    
+
     let length = raw_bytes[0];
     let control_field = raw_bytes[1];
     let control_info = raw_bytes[2]; // Should be 0x79
-    
+
     if control_info != 0x79 {
         return Err(ParseError::InvalidLength);
     }
-    
+
     // Extract signature (used to lookup cached device info)
     let signature = u16::from_le_bytes([raw_bytes[3], raw_bytes[4]]);
-    
+
     // Verify CRC
     if !verify_wmbus_crc(raw_bytes) {
         return Err(ParseError::InvalidCrc);
     }
-    
+
     // Extract payload (everything between signature and CRC)
     let payload_start = 5;
     let payload_end = raw_bytes.len() - 2;
@@ -268,13 +314,13 @@ fn parse_compact_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
     } else {
         vec![]
     };
-    
+
     // Extract CRC
     let crc = u16::from_le_bytes([
         raw_bytes[raw_bytes.len() - 2],
         raw_bytes[raw_bytes.len() - 1],
     ]);
-    
+
     // For compact frames, device info would be retrieved from cache using signature
     // Here we use placeholder values - in production, lookup from cache
     Ok(WMBusFrame {
@@ -282,12 +328,46 @@ fn parse_compact_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
         control_field,
         manufacturer_id: signature, // Use signature as manufacturer ID placeholder
         device_address: 0,          // Would be retrieved from cache
-        version: 0,                 // Would be retrieved from cache  
+        version: 0,                 // Would be retrieved from cache
         device_type: 0,             // Would be retrieved from cache
         control_info,
         payload,
         crc,
+        encrypted: false,           // Compact frames are typically not encrypted
     })
+}
+
+/// Parse wM-Bus frame with vendor extension support
+///
+/// This function adds vendor-specific CI handling for the range 0xA0-0xB7
+/// as defined in EN 13757-4 for manufacturer-specific control information.
+pub fn parse_wmbus_frame_with_vendor(
+    raw_bytes: &[u8],
+    manufacturer_id: Option<&str>,
+    registry: Option<&vendors::VendorRegistry>,
+) -> Result<WMBusFrame, ParseError> {
+    let mut frame = parse_wmbus_frame(raw_bytes)?;
+
+    // Check for vendor-specific CI range (0xA0-0xB7)
+    if let (Some(mfr_id), Some(reg)) = (manufacturer_id, registry) {
+        if frame.control_info >= 0xA0 && frame.control_info <= 0xB7 {
+            // Dispatch to vendor hook
+            if let Ok(Some(_vendor_record)) = vendors::dispatch_ci_hook(
+                reg,
+                mfr_id,
+                frame.control_info,
+                &frame.payload,
+            ) {
+                // For now, just mark in payload that vendor handling occurred
+                // In a full implementation, we'd convert vendor_record to appropriate format
+                let mut modified_payload = vec![0xFF]; // Vendor marker
+                modified_payload.extend_from_slice(&frame.payload);
+                frame.payload = modified_payload;
+            }
+        }
+    }
+
+    Ok(frame)
 }
 
 impl WMBusFrame {
@@ -335,22 +415,22 @@ impl WMBusFrame {
         // Calculate frame length (excluding L-field itself and CRC)
         let frame_length = 1 + 2 + 4 + 1 + 1 + 1 + payload.len(); // C + M + A + V + T + CI + payload
         let l_field = frame_length as u8;
-        
+
         // Build frame without CRC
         let mut frame = Vec::new();
-        frame.push(l_field);                                    // L-field
-        frame.push(control_field);                              // C-field
+        frame.push(l_field); // L-field
+        frame.push(control_field); // C-field
         frame.extend_from_slice(&manufacturer_id.to_le_bytes()); // M-field (2 bytes)
-        frame.extend_from_slice(&device_address.to_le_bytes());  // A-field (4 bytes)
-        frame.push(version);                                    // V-field
-        frame.push(device_type);                                // T-field
-        frame.push(control_info);                               // CI-field
-        frame.extend_from_slice(payload);                       // Payload
-        
+        frame.extend_from_slice(&device_address.to_le_bytes()); // A-field (4 bytes)
+        frame.push(version); // V-field
+        frame.push(device_type); // T-field
+        frame.push(control_info); // CI-field
+        frame.extend_from_slice(payload); // Payload
+
         // Calculate and append CRC
         add_wmbus_crc(&frame)
     }
-    
+
     /// Get raw frame bytes with CRC
     ///
     /// Converts this frame structure back to raw bytes that can be transmitted.
@@ -359,6 +439,8 @@ impl WMBusFrame {
     ///
     /// * Complete frame data as bytes
     pub fn to_bytes(&self) -> Vec<u8> {
+        // Note: build() creates unencrypted frames by default
+        // Encrypted frames should be created through crypto module
         Self::build(
             self.control_field,
             self.manufacturer_id,
@@ -369,7 +451,7 @@ impl WMBusFrame {
             &self.payload,
         )
     }
-    
+
     /// Verify the CRC of this frame
     ///
     /// Checks if the stored CRC matches the calculated CRC for the frame data.

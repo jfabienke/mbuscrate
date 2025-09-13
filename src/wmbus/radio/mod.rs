@@ -4,6 +4,9 @@ pub mod irq;
 pub mod modulation;
 pub mod radio_driver;
 
+// LoRa support
+pub mod lora;
+
 // RFM69 packet processing (always available for testing)
 pub mod rfm69_packet;
 pub mod rfm69_registers;

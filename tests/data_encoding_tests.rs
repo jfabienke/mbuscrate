@@ -67,7 +67,7 @@ fn test_bcd_round_trip() {
     for value in test_values {
         let encoded = encode_bcd(value);
         let (_, decoded) = decode_bcd(&encoded).unwrap();
-        assert_eq!(decoded, value, "Round trip failed for {}", value);
+        assert_eq!(decoded, value, "Round trip failed for {value}");
     }
 }
 
@@ -176,8 +176,7 @@ fn test_manufacturer_round_trip() {
         let decoded = mbus_decode_manufacturer(encoded[0], encoded[1]);
         assert_eq!(
             decoded, manufacturer,
-            "Round trip failed for {}",
-            manufacturer
+            "Round trip failed for {manufacturer}"
         );
     }
 }

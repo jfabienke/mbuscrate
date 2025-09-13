@@ -65,11 +65,11 @@ pub struct WMBusConfig {
 impl Default for WMBusConfig {
     fn default() -> Self {
         Self {
-            frequency_hz: 868_950_000,  // EU wM-Bus S-mode
-            bitrate: 100_000,           // 100 kbps
-            output_power_dbm: 14,       // +14 dBm
+            frequency_hz: 868_950_000, // EU wM-Bus S-mode
+            bitrate: 100_000,          // 100 kbps
+            output_power_dbm: 14,      // +14 dBm
             agc_enabled: true,
-            crc_polynomial: 0x3D65,     // wM-Bus CRC
+            crc_polynomial: 0x3D65,      // wM-Bus CRC
             sync_word: vec![0x54, 0x3D], // Common wM-Bus sync
         }
     }

@@ -238,9 +238,9 @@ impl EnhancedGpio {
         {
             // For non-Raspberry Pi platforms, we'd implement other GPIO interfaces
             log::warn!("GPIO interrupts not supported on this platform");
-            return Err(EnhancedGpioError::InitializationFailed {
+            Err(EnhancedGpioError::InitializationFailed {
                 reason: "Platform not supported".to_string(),
-            });
+            })
         }
 
         #[cfg(feature = "raspberry-pi")]
@@ -432,7 +432,7 @@ impl EnhancedGpio {
             times.remove(&pin);
         }
 
-        log::info!("GPIO {} interrupt removed", pin);
+        log::info!("GPIO {pin} interrupt removed");
         Ok(())
     }
 
@@ -571,7 +571,7 @@ pub mod helpers {
         let event = gpio.wait_for_pin_event(dio_pin, timeout_ms).await?;
 
         if event.level {
-            log::debug!("Packet reception complete on GPIO {}", dio_pin);
+            log::debug!("Packet reception complete on GPIO {dio_pin}");
             Ok(())
         } else {
             Err(EnhancedGpioError::OperationFailed {

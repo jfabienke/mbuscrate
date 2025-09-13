@@ -54,21 +54,21 @@ fn main() {
 }
 
 #[cfg(feature = "raspberry-pi")]
+use log::{error, info, warn};
+#[cfg(feature = "raspberry-pi")]
 use mbus_rs::wmbus::radio::{
     driver::Sx126xDriver,
-    hal::{RaspberryPiHal, GpioPins},
+    hal::{GpioPins, RaspberryPiHal},
 };
 #[cfg(feature = "raspberry-pi")]
 use std::time::Duration;
-#[cfg(feature = "raspberry-pi")]
-use log::{info, warn, error};
 
 /// Default GPIO pin configuration for SX126x on Raspberry Pi
 #[cfg(feature = "raspberry-pi")]
 const DEFAULT_GPIO_PINS: GpioPins = GpioPins {
-    busy: 25,      // Pin 22
-    dio1: 24,      // Pin 18
-    dio2: Some(23), // Pin 16 (optional)
+    busy: 25,        // Pin 22
+    dio1: 24,        // Pin 18
+    dio2: Some(23),  // Pin 16 (optional)
     reset: Some(22), // Pin 15 (optional)
 };
 
@@ -88,8 +88,7 @@ const CRYSTAL_FREQ: u32 = 32_000_000;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     info!("Starting Raspberry Pi wM-Bus example");
 
@@ -104,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {
             eprintln!("Usage: {} [receive|transmit|test]", args[0]);
             eprintln!("  receive  - Listen for wM-Bus frames (default)");
-            eprintln!("  transmit - Send test wM-Bus frames");  
+            eprintln!("  transmit - Send test wM-Bus frames");
             eprintln!("  test     - Test hardware connectivity");
             std::process::exit(1);
         }
@@ -141,11 +140,15 @@ async fn run_receiver() -> Result<(), Box<dyn std::error::Error>> {
         match driver.process_irqs() {
             Ok(Some(payload)) => {
                 packet_count += 1;
-                info!("📡 Received wM-Bus frame #{}: {} bytes", packet_count, payload.len());
-                
+                info!(
+                    "📡 Received wM-Bus frame #{}: {} bytes",
+                    packet_count,
+                    payload.len()
+                );
+
                 // Display frame data
                 print_frame_data(&payload);
-                
+
                 // Optionally parse as M-Bus frame
                 if let Err(e) = parse_wmbus_frame(&payload) {
                     warn!("Frame parsing failed: {}", e);
@@ -193,14 +196,18 @@ async fn run_transmitter() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         // Generate test wM-Bus frame
         let test_frame = generate_test_frame(sequence);
-        
+
         // Load frame into radio buffer
         driver.write_buffer(0, &test_frame)?;
-        
+
         // Start transmission
-        info!("📤 Transmitting test frame #{} ({} bytes)", sequence, test_frame.len());
+        info!(
+            "📤 Transmitting test frame #{} ({} bytes)",
+            sequence,
+            test_frame.len()
+        );
         driver.set_tx(5000)?; // 5 second timeout
-        
+
         // Wait for transmission to complete
         let start = std::time::Instant::now();
         loop {
@@ -228,18 +235,18 @@ async fn run_transmitter() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
             }
-            
+
             // Check for overall timeout
             if start.elapsed() > Duration::from_secs(10) {
                 error!("❌ Transmission timeout (10s)");
                 break;
             }
-            
+
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
         sequence = sequence.wrapping_add(1);
-        
+
         // Wait before next transmission (regulatory compliance)
         info!("Waiting 10 seconds before next transmission...");
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -267,11 +274,14 @@ async fn run_hardware_test() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test basic communication
     info!("Testing radio communication...");
-    
+
     // Try to read radio version/status
     match driver.get_irq_status() {
         Ok(status) => {
-            info!("✅ SPI communication working - IRQ status: 0x{:04X}", status.raw());
+            info!(
+                "✅ SPI communication working - IRQ status: 0x{:04X}",
+                status.raw()
+            );
         }
         Err(e) => {
             error!("❌ SPI communication failed: {}", e);
@@ -281,7 +291,7 @@ async fn run_hardware_test() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test GPIO pins
     info!("Testing GPIO pins...");
-    
+
     // Check DIO1 pin
     match driver.gpio_read(1) {
         Ok(state) => info!("✅ DIO1 pin read: {}", if state { "HIGH" } else { "LOW" }),
@@ -311,11 +321,12 @@ async fn run_hardware_test() -> Result<(), Box<dyn std::error::Error>> {
 
     // Brief receive test
     info!("Testing receive mode...");
-    match driver.set_rx(1000) { // 1 second receive test
+    match driver.set_rx(1000) {
+        // 1 second receive test
         Ok(()) => {
             info!("✅ Receive mode activated");
             tokio::time::sleep(Duration::from_millis(1100)).await; // Wait for timeout
-            
+
             // Check for any received data or timeout
             match driver.process_irqs() {
                 Ok(Some(data)) => info!("📡 Received {} bytes during test", data.len()),
@@ -339,25 +350,29 @@ async fn run_hardware_test() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(feature = "raspberry-pi")]
 fn print_frame_data(data: &[u8]) {
     const BYTES_PER_LINE: usize = 16;
-    
+
     println!("Frame data ({} bytes):", data.len());
     for (i, chunk) in data.chunks(BYTES_PER_LINE).enumerate() {
         print!("  {:04X}: ", i * BYTES_PER_LINE);
-        
+
         // Print hex bytes
         for (j, byte) in chunk.iter().enumerate() {
             print!("{:02X} ", byte);
-            if j == 7 { print!(" "); } // Add space in middle
+            if j == 7 {
+                print!(" ");
+            } // Add space in middle
         }
-        
+
         // Pad if last line is incomplete
         if chunk.len() < BYTES_PER_LINE {
             for j in chunk.len()..BYTES_PER_LINE {
                 print!("   ");
-                if j == 7 { print!(" "); }
+                if j == 7 {
+                    print!(" ");
+                }
             }
         }
-        
+
         // Print ASCII representation
         print!(" |");
         for byte in chunk {
@@ -382,27 +397,34 @@ fn parse_wmbus_frame(data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     // Basic wM-Bus frame structure check
     let length = data[0];
     if length as usize != data.len() - 1 {
-        return Err(format!("Length mismatch: declared {}, actual {}", length, data.len() - 1).into());
+        return Err(format!(
+            "Length mismatch: declared {}, actual {}",
+            length,
+            data.len() - 1
+        )
+        .into());
     }
 
     // Extract basic fields (simplified)
     let c_field = data[1];
     let m_field = u16::from_le_bytes([data[2], data[3]]);
     let a_field = [data[4], data[5], data[6], data[7], data[8], data[9]];
-    
+
     println!("wM-Bus Frame Analysis:");
     println!("  Length: {} bytes", length);
     println!("  C-Field: 0x{:02X}", c_field);
     println!("  M-Field: 0x{:04X}", m_field);
-    println!("  A-Field: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", 
-             a_field[0], a_field[1], a_field[2], a_field[3], a_field[4], a_field[5]);
-    
+    println!(
+        "  A-Field: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        a_field[0], a_field[1], a_field[2], a_field[3], a_field[4], a_field[5]
+    );
+
     // Decode manufacturer
     if m_field != 0 {
         let man_id = decode_manufacturer_id(m_field);
         println!("  Manufacturer: {}", man_id);
     }
-    
+
     println!();
     Ok(())
 }
@@ -413,12 +435,12 @@ fn decode_manufacturer_id(m_field: u16) -> String {
     if m_field == 0 {
         return "Unknown".to_string();
     }
-    
+
     // M-Bus manufacturer ID encoding: 5 bits per character, A=1, B=2, ..., Z=26
     let char1 = ((m_field >> 10) & 0x1F) as u8;
     let char2 = ((m_field >> 5) & 0x1F) as u8;
     let char3 = (m_field & 0x1F) as u8;
-    
+
     let mut result = String::new();
     for &char_val in &[char1, char2, char3] {
         if char_val >= 1 && char_val <= 26 {
@@ -427,7 +449,7 @@ fn decode_manufacturer_id(m_field: u16) -> String {
             result.push('?');
         }
     }
-    
+
     result
 }
 
@@ -435,17 +457,17 @@ fn decode_manufacturer_id(m_field: u16) -> String {
 #[cfg(feature = "raspberry-pi")]
 fn generate_test_frame(sequence: u16) -> Vec<u8> {
     let mut frame = Vec::new();
-    
+
     // Length (will be set at the end)
     frame.push(0x00);
-    
+
     // C-Field (SND_NR = Send No Reply)
     frame.push(0x44);
-    
+
     // M-Field (Manufacturer ID) - "TST" = Test
     let m_field = encode_manufacturer_id("TST");
     frame.extend_from_slice(&m_field.to_le_bytes());
-    
+
     // A-Field (Address) - use sequence number
     frame.extend_from_slice(&[
         sequence as u8,
@@ -455,17 +477,17 @@ fn generate_test_frame(sequence: u16) -> Vec<u8> {
         0x00,
         0x00,
     ]);
-    
+
     // CI-Field (Control Information) - Simple test data
     frame.push(0x72); // Variable data structure
-    
+
     // Test payload
     let payload = format!("Test frame #{:04}", sequence);
     frame.extend_from_slice(payload.as_bytes());
-    
+
     // Update length field (total frame length - 1)
     frame[0] = (frame.len() - 1) as u8;
-    
+
     frame
 }
 
@@ -475,7 +497,7 @@ fn encode_manufacturer_id(id: &str) -> u16 {
     if id.len() != 3 {
         return 0;
     }
-    
+
     let mut result = 0u16;
     for (i, ch) in id.chars().take(3).enumerate() {
         let upper = ch.to_ascii_uppercase();
@@ -484,7 +506,7 @@ fn encode_manufacturer_id(id: &str) -> u16 {
             result |= char_value << (10 - i * 5);
         }
     }
-    
+
     result
 }
 

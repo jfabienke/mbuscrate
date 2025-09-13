@@ -70,6 +70,6 @@ pub enum MBusError {
 
 impl From<crate::wmbus::handle::WMBusError> for MBusError {
     fn from(err: crate::wmbus::handle::WMBusError) -> Self {
-        MBusError::WMBusError(format!("{}", err))
+        MBusError::WMBusError(format!("{err}"))
     }
 }

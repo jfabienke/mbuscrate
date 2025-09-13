@@ -48,7 +48,7 @@ pub fn parse_vife(input: &[u8]) -> IResult<&[u8], VifInfo> {
 pub fn parse_vib(input: &[u8]) -> IResult<&[u8], Vec<VifInfo>> {
     let (mut remaining, vif) = parse_vif(input)?;
     let mut vifes = Vec::new();
-    
+
     // Parse VIFEs if present (check for FD or FB extension codes)
     while !remaining.is_empty() {
         if remaining[0] == 0xFD || remaining[0] == 0xFB {

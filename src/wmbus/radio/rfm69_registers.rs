@@ -232,7 +232,7 @@ pub const REG_AESKEY16: u8 = 0x4D;
 /// Temperature sensor control
 pub const REG_TEMP1: u8 = 0x4E;
 
-/// Temperature sensor control 
+/// Temperature sensor control
 pub const REG_TEMP2: u8 = 0x4F;
 
 /// Test register for AGC
@@ -289,7 +289,7 @@ pub const RF_IRQFLAGS2_FIFONOTEMPTY: u8 = 0x40;
 pub const RF_IRQFLAGS2_FIFOFULL: u8 = 0x80;
 
 // =============================================================================
-// Configuration Constants  
+// Configuration Constants
 // =============================================================================
 
 /// RC oscillator calibration flags

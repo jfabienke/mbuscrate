@@ -33,6 +33,7 @@
 //! ```
 
 use crate::util::{hex, logging};
+use crate::vendors;
 use thiserror::Error;
 
 /// Enhanced encryption errors with specific failure types
@@ -219,6 +220,58 @@ impl WMBusCrypto {
 
     fn is_full_tag_mode(&self) -> bool {
         self.full_tag_compatibility
+    }
+
+    /// Decrypt wM-Bus frame with vendor key provisioning support
+    ///
+    /// This function allows vendor extensions to provide custom AES keys
+    /// for decryption, bypassing the standard key derivation process.
+    pub fn decrypt_frame_with_vendor(
+        &mut self,
+        encrypted_frame: &[u8],
+        device_info: &DeviceInfo,
+        manufacturer_id: Option<&str>,
+        registry: Option<&vendors::VendorRegistry>,
+    ) -> Result<Vec<u8>, CryptoError> {
+        // Check for vendor-provided key
+        if let (Some(mfr_id), Some(reg)) = (manufacturer_id, registry) {
+            // Convert device info for vendor hook
+            let vendor_info = vendors::VendorDeviceInfo {
+                manufacturer_id: device_info.manufacturer,
+                device_id: device_info.device_id,
+                version: device_info.version,
+                device_type: device_info.device_type,
+                model: None,
+                serial_number: None,
+                firmware_version: None,
+                additional_info: std::collections::HashMap::new(),
+            };
+
+            // Try to get vendor-provided key
+            if let Ok(Some(vendor_key)) = vendors::dispatch_key_hook(reg, mfr_id, &vendor_info, encrypted_frame) {
+                // Use vendor key instead of derived key
+                let device_key = AesKey::from_bytes(&vendor_key)
+                    .map_err(|_| CryptoError::InvalidKeyLength {
+                        expected: 16,
+                        actual: vendor_key.len(),
+                    })?;
+
+                // Save current master key and temporarily replace with vendor key
+                let original_key = self.master_key.clone();
+                self.master_key = device_key;
+
+                // Decrypt with vendor key
+                let result = self.decrypt_frame(encrypted_frame, device_info);
+
+                // Restore original key
+                self.master_key = original_key;
+
+                return result;
+            }
+        }
+
+        // Fall back to standard decryption
+        self.decrypt_frame(encrypted_frame, device_info)
     }
 
     /// Decrypt wM-Bus frame with automatic mode detection
@@ -523,7 +576,7 @@ impl WMBusCrypto {
         let pad_len = data[data.len() - 1] as usize;
         if pad_len == 0 || pad_len > 16 || pad_len > data.len() {
             return Err(CryptoError::DecryptionFailed {
-                reason: format!("Invalid padding length: {}", pad_len),
+                reason: format!("Invalid padding length: {pad_len}"),
             });
         }
 
@@ -914,7 +967,7 @@ impl WMBusCrypto {
 
         // Access number (6 bytes, little-endian from u64)
         // Use provided access number or derive from device info
-        let access_number = device_info.access_number.unwrap_or_else(|| {
+        let access_number = device_info.access_number.unwrap_or({
             // Fallback: derive from version and type for compatibility
             ((device_info.version as u64) << 8) | (device_info.device_type as u64)
         });

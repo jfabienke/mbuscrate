@@ -44,7 +44,7 @@
 /// These can be combined using bitwise OR operations to create interrupt masks.
 ///
 /// # Bit Assignments
-/// 
+///
 /// The interrupt register follows this bit layout:
 /// ```text
 /// Bit 15-10: Reserved
@@ -64,10 +64,10 @@
 pub enum IrqMaskBit {
     /// No interrupts enabled
     None = 0x0000,
-    /// Reception completed (packet received)
-    RxDone = 1 << 0,
     /// Transmission completed successfully
-    TxDone = 1 << 1,
+    TxDone = 1 << 0,
+    /// Reception completed (packet received)
+    RxDone = 1 << 1,
     /// Preamble pattern detected during reception
     PreambleDetected = 1 << 2,
     /// Valid sync word detected
@@ -104,7 +104,7 @@ impl IrqMask {
     /// # Examples
     /// ```rust
     /// use crate::wmbus::radio::irq::IrqMask;
-    /// 
+    ///
     /// let mask = IrqMask::none();
     /// assert_eq!(u16::from(mask), 0x0000);
     /// ```
@@ -119,7 +119,7 @@ impl IrqMask {
     /// # Examples
     /// ```rust
     /// use crate::wmbus::radio::irq::IrqMask;
-    /// 
+    ///
     /// let mask = IrqMask::all();
     /// assert_eq!(u16::from(mask), 0xFFFF);
     /// ```
@@ -137,7 +137,7 @@ impl IrqMask {
     /// # Examples
     /// ```rust
     /// use crate::wmbus::radio::irq::{IrqMask, IrqMaskBit};
-    /// 
+    ///
     /// let mask = IrqMask::none()
     ///     .combine(IrqMaskBit::RxDone)
     ///     .combine(IrqMaskBit::TxDone);
@@ -190,10 +190,12 @@ impl Default for IrqMask {
 /// driver.clear_irq_status(0xFFFF)?;
 /// ```
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub struct IrqStatus {
     /// Raw 16-bit interrupt status register value
     inner: u16,
 }
+
 
 impl From<u16> for IrqStatus {
     /// Create IrqStatus from raw 16-bit register value
@@ -234,7 +236,7 @@ impl IrqStatus {
     /// Check if preamble pattern was detected
     ///
     /// This indicates the start of a potential packet reception.
-    /// 
+    ///
     /// # Returns
     /// * `true` - Preamble detected during reception
     /// * `false` - No preamble detection event

@@ -16,8 +16,11 @@ impl TestableDeviceHandle {
     pub fn from_mock(_mock: MockSerialPort) -> Self {
         TestableDeviceHandle
     }
-    
-    pub async fn send_request(&mut self, _address: u8) -> Result<Vec<mbus_rs::payload::record::MBusRecord>, MBusError> {
+
+    pub async fn send_request(
+        &mut self,
+        _address: u8,
+    ) -> Result<Vec<mbus_rs::payload::record::MBusRecord>, MBusError> {
         Ok(Vec::new())
     }
 }

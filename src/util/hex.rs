@@ -35,13 +35,13 @@ use thiserror::Error;
 pub enum HexError {
     #[error("Invalid hex character: {0}")]
     InvalidCharacter(char),
-    
+
     #[error("Odd number of hex characters: {0}")]
     OddLength(usize),
-    
+
     #[error("Empty hex string")]
     EmptyString,
-    
+
     #[error("Hex decoding error: {0}")]
     DecodeError(String),
 }
@@ -67,16 +67,14 @@ pub fn decode_hex(hex_str: &str) -> Result<Vec<u8>, HexError> {
     if hex_str.is_empty() {
         return Err(HexError::EmptyString);
     }
-    
+
     // Remove whitespace and normalize
-    let cleaned: String = hex_str.chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    
+    let cleaned: String = hex_str.chars().filter(|c| !c.is_whitespace()).collect();
+
     if cleaned.len() % 2 != 0 {
         return Err(HexError::OddLength(cleaned.len()));
     }
-    
+
     hex::decode(&cleaned).map_err(|e| HexError::DecodeError(e.to_string()))
 }
 
@@ -88,21 +86,21 @@ pub fn pretty_hex(data: &[u8], bytes_per_line: usize) -> String {
     if data.is_empty() {
         return String::new();
     }
-    
+
     let mut result = String::new();
-    
+
     for (i, chunk) in data.chunks(bytes_per_line).enumerate() {
         // Add offset
         result.push_str(&format!("{:04x}: ", i * bytes_per_line));
-        
+
         // Add hex bytes with spacing
         for (j, byte) in chunk.iter().enumerate() {
-            result.push_str(&format!("{:02x}", byte));
+            result.push_str(&format!("{byte:02x}"));
             if j % 2 == 1 {
                 result.push(' '); // Space every 2 bytes
             }
         }
-        
+
         // Pad if incomplete line
         if chunk.len() < bytes_per_line {
             let missing = bytes_per_line - chunk.len();
@@ -113,7 +111,7 @@ pub fn pretty_hex(data: &[u8], bytes_per_line: usize) -> String {
                 }
             }
         }
-        
+
         // Add ASCII representation
         result.push_str(" |");
         for &byte in chunk {
@@ -124,12 +122,12 @@ pub fn pretty_hex(data: &[u8], bytes_per_line: usize) -> String {
             }
         }
         result.push('|');
-        
-        if i < (data.len() + bytes_per_line - 1) / bytes_per_line - 1 {
+
+        if i < data.len().div_ceil(bytes_per_line) - 1 {
             result.push('\n');
         }
     }
-    
+
     result
 }
 
@@ -138,7 +136,7 @@ pub fn pretty_hex(data: &[u8], bytes_per_line: usize) -> String {
 /// Formats data as "68 31 31 68" with spaces between bytes.
 pub fn format_hex_compact(data: &[u8]) -> String {
     data.iter()
-        .map(|b| format!("{:02x}", b))
+        .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -147,18 +145,16 @@ pub fn format_hex_compact(data: &[u8]) -> String {
 ///
 /// More lenient than decode_hex, strips all non-hex characters.
 pub fn parse_hex_lenient(input: &str) -> Result<Vec<u8>, HexError> {
-    let hex_chars: String = input.chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .collect();
-    
+    let hex_chars: String = input.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+
     if hex_chars.is_empty() {
         return Err(HexError::EmptyString);
     }
-    
+
     if hex_chars.len() % 2 != 0 {
         return Err(HexError::OddLength(hex_chars.len()));
     }
-    
+
     hex::decode(&hex_chars).map_err(|e| HexError::DecodeError(e.to_string()))
 }
 
@@ -167,9 +163,10 @@ pub fn hex_byte(hex: &str) -> Result<u8, HexError> {
     if hex.len() != 2 {
         return Err(HexError::OddLength(hex.len()));
     }
-    
-    u8::from_str_radix(hex, 16)
-        .map_err(|_| HexError::InvalidCharacter(hex.chars().find(|c| !c.is_ascii_hexdigit()).unwrap_or('?')))
+
+    u8::from_str_radix(hex, 16).map_err(|_| {
+        HexError::InvalidCharacter(hex.chars().find(|c| !c.is_ascii_hexdigit()).unwrap_or('?'))
+    })
 }
 
 /// Helper for creating test data from hex strings

@@ -83,7 +83,7 @@ fn test_mbus_data_record_decode_float() {
 
     match record.value {
         MBusRecordValue::Numeric(val) => {
-            assert!((val - 10.0).abs() < 0.001, "Expected 10.0, got {}", val);
+            assert!((val - 10.0).abs() < 0.001, "Expected 10.0, got {val}");
         }
         _ => panic!("Expected numeric value"),
     }
@@ -222,13 +222,10 @@ fn test_mbus_data_record_decode_bcd_values() {
             MBusRecordValue::Numeric(val) => {
                 assert!(
                     (val - expected).abs() < 0.001,
-                    "Failed for DIF 0x{:02X}: expected {}, got {}",
-                    dif,
-                    expected,
-                    val
+                    "Failed for DIF 0x{dif:02X}: expected {expected}, got {val}"
                 );
             }
-            _ => panic!("Expected numeric value for DIF 0x{:02X}", dif),
+            _ => panic!("Expected numeric value for DIF 0x{dif:02X}"),
         }
     }
 }
@@ -323,12 +320,9 @@ fn test_mbus_data_record_decode_insufficient_data() {
     let result = mbus_data_record_decode(&input);
     if result.is_ok() {
         let (_, record) = result.unwrap();
-        match record.value {
-            MBusRecordValue::Numeric(val) => {
-                // Should handle partial data gracefully
-                assert!(val >= 0.0);
-            }
-            _ => {}
+        if let MBusRecordValue::Numeric(val) = record.value {
+            // Should handle partial data gracefully
+            assert!(val >= 0.0);
         }
     }
 }

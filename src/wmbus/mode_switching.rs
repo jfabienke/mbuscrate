@@ -354,13 +354,7 @@ impl ModeNegotiator {
             WMBusMode::S2,
         ];
 
-        for mode in preference_order {
-            if self.supported_modes.contains(&mode) && remote_modes.contains(&mode) {
-                return Some(mode);
-            }
-        }
-
-        None
+        preference_order.into_iter().find(|&mode| self.supported_modes.contains(&mode) && remote_modes.contains(&mode))
     }
 }
 

@@ -108,7 +108,7 @@ pub fn parse_enhanced_variable_data_record(input: &[u8]) -> IResult<&[u8], Enhan
             let (remaining, len) = be_u8(remaining)?;
             take(len as usize)(remaining)?
         } else {
-            (&remaining[..], &[] as &[u8])
+            (remaining, &[] as &[u8])
         }
     };
 
@@ -182,7 +182,7 @@ fn parse_special_vif_chain<'a>(
             // Extract manufacturer-specific data
             let mfg_data: Vec<String> = vif_chain[1..]
                 .iter()
-                .map(|b| format!("{:02X}", b))
+                .map(|b| format!("{b:02X}"))
                 .collect();
             let unit = format!("MFG[{}]", mfg_data.join(" "));
             Ok((unit, 1.0, "Manufacturer".to_string()))

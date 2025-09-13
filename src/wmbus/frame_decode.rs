@@ -35,7 +35,7 @@ pub mod sync {
     pub const A_RAW: u8 = 0xB3;
     /// Type B sync byte (raw, before bit reversal)  
     pub const B_RAW: u8 = 0xBC;
-    
+
     /// Type A sync byte (normalized, after bit reversal)
     pub const A_NORM: u8 = 0xCD;
     /// Type B sync byte (normalized, after bit reversal)
@@ -55,25 +55,32 @@ pub enum FrameType {
 pub enum DecodeError {
     #[error("Buffer too short: need {needed} bytes, got {actual}")]
     BufferTooShort { needed: usize, actual: usize },
-    
+
     #[error("Invalid wM-Bus header: sync patterns not found")]
     InvalidHeader,
-    
+
     #[error("CRC validation failed: expected {expected:04X}, calculated {calculated:04X}")]
     CrcMismatch { expected: u16, calculated: u16 },
-    
+
     #[error("Frame too short for type {frame_type:?}: {length} bytes")]
-    FrameTooShort { frame_type: FrameType, length: usize },
-    
+    FrameTooShort {
+        frame_type: FrameType,
+        length: usize,
+    },
+
     #[error("Invalid length field: {length}")]
     InvalidLength { length: u8 },
-    
+
     #[error("Encryption detected: frame requires decryption before CRC validation")]
     EncryptionDetected,
-    
+
     #[error("Invalid block size: block {block_num} has {actual} bytes, expected {expected}")]
-    InvalidBlockSize { block_num: usize, expected: usize, actual: usize },
-    
+    InvalidBlockSize {
+        block_num: usize,
+        expected: usize,
+        actual: usize,
+    },
+
     #[error("Frame processing error: {message}")]
     ProcessingError { message: String },
 }
@@ -120,7 +127,7 @@ impl FrameDecoder {
             expected_size: None,
             stats: DecodeStats::default(),
             error_throttle: logging::LogThrottle::new(1000, 5), // 5 errors per second
-            multi_block_buffer: Vec::with_capacity(260), // Max 260 bytes per EN 13757-4
+            multi_block_buffer: Vec::with_capacity(260),        // Max 260 bytes per EN 13757-4
             current_block: 0,
             total_blocks: 0,
         }
@@ -133,11 +140,13 @@ impl FrameDecoder {
     pub fn add_bytes(&mut self, data: &[u8]) -> Result<(), DecodeError> {
         // Apply bit reversal for wM-Bus MSB-first to LSB-first conversion
         let normalized_data = bitrev::rev8_vec(data);
-        
-        self.buffer.write(&normalized_data).map_err(|e| DecodeError::ProcessingError {
-            message: format!("Buffer write failed: {}", e),
-        })?;
-        
+
+        self.buffer
+            .write(&normalized_data)
+            .map_err(|e| DecodeError::ProcessingError {
+                message: format!("Buffer write failed: {e}"),
+            })?;
+
         Ok(())
     }
 
@@ -156,7 +165,7 @@ impl FrameDecoder {
             }
 
             let expected_size = self.expected_size.unwrap();
-            
+
             // Check if we have enough data
             if self.buffer.len() < expected_size {
                 return Ok(None); // Need more data
@@ -165,7 +174,7 @@ impl FrameDecoder {
             // Extract frame data
             let frame_data = self.buffer.consume_exact(expected_size).map_err(|e| {
                 DecodeError::ProcessingError {
-                    message: format!("Failed to extract frame: {}", e),
+                    message: format!("Failed to extract frame: {e}"),
                 }
             })?;
 
@@ -209,10 +218,10 @@ impl FrameDecoder {
             PacketSizeResult::Size(size, frame_type) => {
                 self.current_frame_type = Some(frame_type);
                 logging::debug::log_frame_type_detection(
-                    header_data.get(0).copied().unwrap_or(0),
+                    header_data.first().copied().unwrap_or(0),
                     match frame_type {
                         FrameType::TypeA => "Type A",
-                        FrameType::TypeB => "Type B", 
+                        FrameType::TypeB => "Type B",
                         FrameType::Unknown => "Unknown",
                     },
                 );
@@ -230,7 +239,7 @@ impl FrameDecoder {
     /// Process a complete frame with enhanced validation
     fn process_frame(&mut self, frame_data: &[u8]) -> Result<WMBusFrame, DecodeError> {
         let frame_type = self.current_frame_type.unwrap_or(FrameType::Unknown);
-        
+
         // Update type statistics
         match frame_type {
             FrameType::TypeA => self.stats.type_a_frames += 1,
@@ -252,12 +261,15 @@ impl FrameDecoder {
         if !self.validate_frame_crc(frame_data, frame_type)? {
             self.stats.crc_errors += 1;
             let (expected, calculated) = self.calculate_crc_values(frame_data, frame_type);
-            
+
             if self.error_throttle.allow() {
                 logging::debug::log_crc_result(expected, calculated, false);
             }
-            
-            return Err(DecodeError::CrcMismatch { expected, calculated });
+
+            return Err(DecodeError::CrcMismatch {
+                expected,
+                calculated,
+            });
         }
 
         // Parse frame structure
@@ -265,7 +277,11 @@ impl FrameDecoder {
     }
 
     /// Enhanced CRC validation with type-specific block boundaries (Fix #5)
-    fn validate_frame_crc(&self, frame_data: &[u8], frame_type: FrameType) -> Result<bool, DecodeError> {
+    fn validate_frame_crc(
+        &self,
+        frame_data: &[u8],
+        frame_type: FrameType,
+    ) -> Result<bool, DecodeError> {
         match frame_type {
             FrameType::TypeA => self.validate_type_a_crc(frame_data),
             FrameType::TypeB => self.validate_type_b_crc(frame_data),
@@ -288,7 +304,7 @@ impl FrameDecoder {
 
         let l_field = frame_data[0];
         let block_len = l_field as usize;
-        
+
         if frame_data.len() < block_len + 3 {
             return Err(DecodeError::BufferTooShort {
                 needed: block_len + 3,
@@ -298,18 +314,15 @@ impl FrameDecoder {
 
         // For Type A: CRC covers L-field + block_len bytes
         let crc_data = &frame_data[..block_len + 1];
-        let crc_read = u16::from_le_bytes([
-            frame_data[block_len + 1],
-            frame_data[block_len + 2],
-        ]);
-        
+        let crc_read = u16::from_le_bytes([frame_data[block_len + 1], frame_data[block_len + 2]]);
+
         // Calculate CRC without complement (raw CRC)
         let crc_raw = calculate_wmbus_crc_raw(crc_data);
-        
+
         // Per EN 13757-4: Type A uses complement of CRC
         // Check if frame uses complement (standard) or raw (some meters)
         let crc_complement = !crc_raw;
-        
+
         Ok(crc_read == crc_complement || crc_read == crc_raw)
     }
 
@@ -324,7 +337,7 @@ impl FrameDecoder {
 
         let l_field = frame_data[1]; // L-field at position 1 for Type B
         let block_len = l_field as usize;
-        
+
         if frame_data.len() < block_len + 4 {
             return Err(DecodeError::BufferTooShort {
                 needed: block_len + 4,
@@ -334,18 +347,15 @@ impl FrameDecoder {
 
         // For Type B: CRC covers sync + L-field + block_len bytes
         let crc_data = &frame_data[..block_len + 2];
-        let crc_read = u16::from_le_bytes([
-            frame_data[block_len + 2],
-            frame_data[block_len + 3],
-        ]);
-        
+        let crc_read = u16::from_le_bytes([frame_data[block_len + 2], frame_data[block_len + 3]]);
+
         // Calculate CRC without complement (raw CRC)
         let crc_raw = calculate_wmbus_crc_raw(crc_data);
-        
+
         // Per EN 13757-4: Type B also uses complement of CRC
         // Check both complement (standard) and raw (compatibility)
         let crc_complement = !crc_raw;
-        
+
         Ok(crc_read == crc_complement || crc_read == crc_raw)
     }
 
@@ -356,10 +366,8 @@ impl FrameDecoder {
                 let l_field = frame_data[0];
                 let block_len = l_field as usize;
                 let crc_data = &frame_data[..block_len + 1];
-                let expected = u16::from_le_bytes([
-                    frame_data[block_len + 1],
-                    frame_data[block_len + 2],
-                ]);
+                let expected =
+                    u16::from_le_bytes([frame_data[block_len + 1], frame_data[block_len + 2]]);
                 let calculated = calculate_wmbus_crc_enhanced(crc_data);
                 (expected, calculated)
             }
@@ -367,10 +375,8 @@ impl FrameDecoder {
                 let l_field = frame_data[1];
                 let block_len = l_field as usize;
                 let crc_data = &frame_data[..block_len + 2];
-                let expected = u16::from_le_bytes([
-                    frame_data[block_len + 2],
-                    frame_data[block_len + 3],
-                ]);
+                let expected =
+                    u16::from_le_bytes([frame_data[block_len + 2], frame_data[block_len + 3]]);
                 let calculated = calculate_wmbus_crc_enhanced(crc_data);
                 (expected, calculated)
             }
@@ -387,9 +393,9 @@ impl FrameDecoder {
 
         // Extract CI and check for encryption indicator
         let ci_offset = match self.current_frame_type {
-            Some(FrameType::TypeA) => 10,  // L(1) + C(1) + M(2) + ID(4) + V(1) + T(1) + CI(1)
-            Some(FrameType::TypeB) => 11,  // Sync(1) + L(1) + C(1) + M(2) + ID(4) + V(1) + T(1) + CI(1)
-            _ => 10, // Default to Type A
+            Some(FrameType::TypeA) => 10, // L(1) + C(1) + M(2) + ID(4) + V(1) + T(1) + CI(1)
+            Some(FrameType::TypeB) => 11, // Sync(1) + L(1) + C(1) + M(2) + ID(4) + V(1) + T(1) + CI(1)
+            _ => 10,                      // Default to Type A
         };
 
         if frame_data.len() <= ci_offset {
@@ -397,13 +403,17 @@ impl FrameDecoder {
         }
 
         let ci = frame_data[ci_offset];
-        
+
         // Check for common encryption CI values
         matches!(ci, 0x7A | 0x7B | 0x8A | 0x8B)
     }
 
     /// Parse frame structure (with or without CRC validation)
-    fn parse_frame_structure(&self, frame_data: &[u8], encrypted: bool) -> Result<WMBusFrame, DecodeError> {
+    fn parse_frame_structure(
+        &self,
+        frame_data: &[u8],
+        encrypted: bool,
+    ) -> Result<WMBusFrame, DecodeError> {
         // Determine field offsets based on frame type
         let (l_offset, c_offset) = match self.current_frame_type {
             Some(FrameType::TypeA) => (0, 1),
@@ -420,10 +430,8 @@ impl FrameDecoder {
 
         let length = frame_data[l_offset];
         let control_field = frame_data[c_offset];
-        let manufacturer_id = u16::from_le_bytes([
-            frame_data[c_offset + 1],
-            frame_data[c_offset + 2],
-        ]);
+        let manufacturer_id =
+            u16::from_le_bytes([frame_data[c_offset + 1], frame_data[c_offset + 2]]);
         let device_address = u32::from_le_bytes([
             frame_data[c_offset + 3],
             frame_data[c_offset + 4],
@@ -468,6 +476,7 @@ impl FrameDecoder {
             control_info,
             payload,
             crc,
+            encrypted: false, // Default to unencrypted for raw frames
         })
     }
 
@@ -556,7 +565,7 @@ fn packet_size_enhanced(data: &[u8]) -> PacketSizeResult {
 /// Calculate CRC-16 without complement (raw CRC)
 pub fn calculate_wmbus_crc_raw(data: &[u8]) -> u16 {
     let mut crc = 0u16;
-    
+
     for &byte in data {
         crc ^= (byte as u16) << 8;
         for _ in 0..8 {
@@ -567,7 +576,7 @@ pub fn calculate_wmbus_crc_raw(data: &[u8]) -> u16 {
             }
         }
     }
-    
+
     crc // Return raw CRC without complement
 }
 
@@ -580,18 +589,24 @@ pub fn calculate_wmbus_crc_enhanced(data: &[u8]) -> u16 {
 impl FrameDecoder {
     /// Process multi-block Type A frame
     /// Type A has intermediate blocks of 16 bytes + 2-byte CRC, final block variable
-    pub fn process_multi_block_type_a(&mut self, data: &[u8]) -> Result<Option<Vec<u8>>, DecodeError> {
+    pub fn process_multi_block_type_a(
+        &mut self,
+        data: &[u8],
+    ) -> Result<Option<Vec<u8>>, DecodeError> {
         let mut pos = 0;
         let mut assembled_data = Vec::new();
-        
+
         // First byte is L-field (total user data length)
         if data.is_empty() {
-            return Err(DecodeError::BufferTooShort { needed: 1, actual: 0 });
+            return Err(DecodeError::BufferTooShort {
+                needed: 1,
+                actual: 0,
+            });
         }
-        
+
         let total_length = data[0] as usize;
         pos += 1;
-        
+
         // Calculate number of blocks
         // Intermediate blocks: 16 bytes each
         // Final block: remaining bytes
@@ -602,7 +617,7 @@ impl FrameDecoder {
         } else {
             intermediate_blocks
         };
-        
+
         // Process intermediate blocks (16 bytes + 2-byte CRC each)
         for block_num in 0..intermediate_blocks {
             let block_end = pos + 16;
@@ -612,41 +627,45 @@ impl FrameDecoder {
                     actual: data.len(),
                 });
             }
-            
+
             // Extract block data
             let block_data = &data[pos..block_end];
-            
+
             // STRICT VALIDATION: Intermediate blocks MUST be exactly 16 bytes
             // per EN 13757-3 standards for multi-block frames
             if block_data.len() != 16 {
-                log::error!("Intermediate block {} has invalid size: {} bytes (must be 16)", 
-                    block_num, block_data.len());
+                log::error!(
+                    "Intermediate block {} has invalid size: {} bytes (must be 16)",
+                    block_num,
+                    block_data.len()
+                );
                 return Err(DecodeError::InvalidBlockSize {
                     block_num,
                     expected: 16,
                     actual: block_data.len(),
                 });
             }
-            
+
             // Verify block CRC
             let crc_bytes = &data[block_end..block_end + 2];
             let crc_read = u16::from_le_bytes([crc_bytes[0], crc_bytes[1]]);
             let crc_calc = !calculate_wmbus_crc_raw(block_data); // Complement CRC
-            
+
             if crc_read != crc_calc {
-                log::debug!("Block {} CRC mismatch: expected {:04X}, got {:04X}", 
-                    block_num, crc_read, crc_calc);
+                log::debug!(
+                    "Block {block_num} CRC mismatch: expected {crc_read:04X}, got {crc_calc:04X}"
+                );
                 return Err(DecodeError::CrcMismatch {
                     expected: crc_read,
                     calculated: crc_calc,
                 });
             }
-            
+
             // Add block data to assembly buffer
             assembled_data.extend_from_slice(block_data);
             pos = block_end + 2;
         }
-        
+
         // Process final block (variable size + 2-byte CRC)
         if final_block_size > 0 {
             let block_end = pos + final_block_size;
@@ -656,45 +675,49 @@ impl FrameDecoder {
                     actual: data.len(),
                 });
             }
-            
+
             // Extract final block data
             let block_data = &data[pos..block_end];
-            
+
             // Verify final block CRC
             let crc_bytes = &data[block_end..block_end + 2];
             let crc_read = u16::from_le_bytes([crc_bytes[0], crc_bytes[1]]);
             let crc_calc = !calculate_wmbus_crc_raw(block_data); // Complement CRC
-            
+
             if crc_read != crc_calc {
-                log::debug!("Final block CRC mismatch: expected {:04X}, got {:04X}", 
-                    crc_read, crc_calc);
+                log::debug!(
+                    "Final block CRC mismatch: expected {crc_read:04X}, got {crc_calc:04X}"
+                );
                 return Err(DecodeError::CrcMismatch {
                     expected: crc_read,
                     calculated: crc_calc,
                 });
             }
-            
+
             // Add final block data
             assembled_data.extend_from_slice(block_data);
         }
-        
+
         // Verify total assembled length matches L-field
         if assembled_data.len() != total_length {
             return Err(DecodeError::ProcessingError {
-                message: format!("Assembled length {} != expected {}", 
-                    assembled_data.len(), total_length),
+                message: format!(
+                    "Assembled length {} != expected {}",
+                    assembled_data.len(),
+                    total_length
+                ),
             });
         }
-        
+
         Ok(Some(assembled_data))
     }
-    
+
     /// Check if frame is multi-block based on L-field
     pub fn is_multi_block_frame(&self, frame_data: &[u8]) -> bool {
         if frame_data.is_empty() {
             return false;
         }
-        
+
         let l_field = match self.current_frame_type {
             Some(FrameType::TypeA) => frame_data[0],
             Some(FrameType::TypeB) => {
@@ -706,11 +729,11 @@ impl FrameDecoder {
             }
             _ => return false,
         };
-        
+
         // Multi-block if L > 16 bytes (requires intermediate blocks)
         l_field > 16
     }
-    
+
     /// Reset multi-block assembly state
     pub fn reset_multi_block(&mut self) {
         self.multi_block_buffer.clear();
@@ -740,51 +763,51 @@ mod tests {
     fn test_multi_block_type_a_assembly() {
         let mut decoder = FrameDecoder::new();
         decoder.current_frame_type = Some(FrameType::TypeA);
-        
+
         // Create a multi-block frame: 20 bytes total
         // Block 1: 16 bytes + CRC
         // Block 2: 4 bytes + CRC
         let mut frame_data = vec![20]; // L-field = 20 bytes total
-        
+
         // First block: 16 bytes
         let block1: Vec<u8> = (0..16).collect();
         let crc1 = !calculate_wmbus_crc_raw(&block1);
         frame_data.extend_from_slice(&block1);
         frame_data.extend_from_slice(&crc1.to_le_bytes());
-        
-        // Final block: 4 bytes  
+
+        // Final block: 4 bytes
         let block2: Vec<u8> = vec![16, 17, 18, 19];
         let crc2 = !calculate_wmbus_crc_raw(&block2);
         frame_data.extend_from_slice(&block2);
         frame_data.extend_from_slice(&crc2.to_le_bytes());
-        
+
         // Process multi-block frame
         let result = decoder.process_multi_block_type_a(&frame_data).unwrap();
         assert!(result.is_some());
-        
+
         let assembled = result.unwrap();
         assert_eq!(assembled.len(), 20);
-        
+
         // Verify assembled data
         let expected: Vec<u8> = (0..20).collect();
         assert_eq!(assembled, expected);
     }
-    
+
     #[test]
     fn test_is_multi_block_detection() {
         let decoder = FrameDecoder::new();
-        
+
         // Single block frame (L=15)
         let single_block = vec![15, 0x44]; // L-field = 15
         assert!(!decoder.is_multi_block_frame(&single_block));
-        
+
         // Multi-block frame (L=20)
         let multi_block = vec![20, 0x44]; // L-field = 20
         let mut decoder = FrameDecoder::new();
         decoder.current_frame_type = Some(FrameType::TypeA);
         assert!(decoder.is_multi_block_frame(&multi_block));
     }
-    
+
     #[test]
     fn test_packet_size_enhanced_type_b() {
         // Case B: [SYNC_B][LEN] → L + 2
@@ -838,7 +861,7 @@ mod tests {
         // Test with known wM-Bus data
         let test_data = hex_to_bytes("44931568610528");
         let crc = calculate_wmbus_crc_enhanced(&test_data);
-        
+
         // The CRC should be consistent with wM-Bus specification
         assert_ne!(crc, 0); // Should produce non-zero CRC
     }
@@ -857,7 +880,7 @@ mod tests {
         let raw_sync_a = sync::A_RAW; // 0xB3
         let norm_sync_a = bitrev::rev8(raw_sync_a); // Should be 0xCD
         assert_eq!(norm_sync_a, sync::A_NORM);
-        
+
         let raw_sync_b = sync::B_RAW; // 0xBC
         let norm_sync_b = bitrev::rev8(raw_sync_b); // Should be 0x3D
         assert_eq!(norm_sync_b, sync::B_NORM);

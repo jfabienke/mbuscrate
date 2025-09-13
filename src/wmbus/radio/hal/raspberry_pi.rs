@@ -11,7 +11,7 @@
 //! ## Hardware Setup
 //!
 //! ### SPI Configuration
-//! 
+//!
 //! The Raspberry Pi provides two SPI controllers:
 //! - **SPI0**: `/dev/spidev0.0`, `/dev/spidev0.1` (recommended)
 //! - **SPI1**: `/dev/spidev1.0`, `/dev/spidev1.1`, `/dev/spidev1.2`
@@ -70,8 +70,8 @@
 use crate::wmbus::radio::hal::{Hal, HalError};
 #[cfg(feature = "rfm69")]
 use crate::wmbus::radio::rfm69_registers::SPI_SPEED as RFM69_SPI_SPEED;
-use rppal::gpio::{Gpio, InputPin, OutputPin, Level, Trigger};
-use rppal::spi::{Bus, SlaveSelect, Spi, Mode, BitOrder, Error as SpiError};
+use rppal::gpio::{Gpio, InputPin, Level, OutputPin, Trigger};
+use rppal::spi::{BitOrder, Bus, Error as SpiError, Mode, SlaveSelect, Spi};
 use std::thread;
 use std::time::Duration;
 use thiserror::Error;
@@ -141,9 +141,9 @@ impl Default for GpioPins {
     /// Default GPIO pin configuration for typical SX126x wiring
     fn default() -> Self {
         Self {
-            busy: 25,      // GPIO 25 (Pin 22)
-            dio1: 24,      // GPIO 24 (Pin 18)  
-            dio2: Some(23), // GPIO 23 (Pin 16)
+            busy: 25,        // GPIO 25 (Pin 22)
+            dio1: 24,        // GPIO 24 (Pin 18)
+            dio2: Some(23),  // GPIO 23 (Pin 16)
             reset: Some(22), // GPIO 22 (Pin 15)
         }
     }
@@ -212,7 +212,7 @@ impl RaspberryPiHal {
     /// // Custom pin configuration
     /// let pins = GpioPins {
     ///     busy: 25,
-    ///     dio1: 24, 
+    ///     dio1: 24,
     ///     dio2: None,        // Not using DIO2
     ///     reset: Some(22),   // Using reset control
     /// };
@@ -230,18 +230,24 @@ impl RaspberryPiHal {
         // Validate SPI bus number
         let (bus, slave_select) = match spi_bus {
             0 => (Bus::Spi0, SlaveSelect::Ss0),
-            1 => (Bus::Spi1, SlaveSelect::Ss0), 
-            _ => return Err(RpiHalError::InvalidConfig(
-                format!("Invalid SPI bus {}, only 0 and 1 are supported", spi_bus)
-            )),
+            1 => (Bus::Spi1, SlaveSelect::Ss0),
+            _ => {
+                return Err(RpiHalError::InvalidConfig(format!(
+                    "Invalid SPI bus {}, only 0 and 1 are supported",
+                    spi_bus
+                )))
+            }
         };
 
         // Initialize SPI with SX126x-compatible settings
-        let spi = Spi::new(bus, slave_select, 8_000_000, Mode::Mode0)?
-            .bit_order(BitOrder::MsbFirst);
+        let spi =
+            Spi::new(bus, slave_select, 8_000_000, Mode::Mode0)?.bit_order(BitOrder::MsbFirst);
 
-        let bus_info = format!("SPI{} ({})", spi_bus, 
-                              if spi_bus == 0 { "primary" } else { "auxiliary" });
+        let bus_info = format!(
+            "SPI{} ({})",
+            spi_bus,
+            if spi_bus == 0 { "primary" } else { "auxiliary" }
+        );
 
         // Initialize GPIO controller
         let gpio = Gpio::new()?;
@@ -249,7 +255,7 @@ impl RaspberryPiHal {
         // Configure input pins
         let busy_pin = gpio.get(gpio_pins.busy)?.into_input();
         let dio1_pin = gpio.get(gpio_pins.dio1)?.into_input();
-        
+
         let dio2_pin = if let Some(dio2) = gpio_pins.dio2 {
             Some(gpio.get(dio2)?.into_input())
         } else {
@@ -308,26 +314,26 @@ impl RaspberryPiHal {
     /// ```rust,no_run
     /// // Reset radio before configuration
     /// hal.reset_radio()?;
-    /// 
+    ///
     /// // Radio is now in clean state and ready for commands
     /// ```
     pub fn reset_radio(&mut self) -> Result<(), RpiHalError> {
         if let Some(ref mut reset_pin) = self.reset_pin {
             log::debug!("Performing hardware reset of SX126x");
-            
+
             // Assert reset (active low)
             reset_pin.set_low();
             thread::sleep(Duration::from_micros(100));
-            
-            // Deassert reset  
+
+            // Deassert reset
             reset_pin.set_high();
             thread::sleep(Duration::from_millis(1));
-            
+
             log::debug!("Hardware reset completed");
             Ok(())
         } else {
             Err(RpiHalError::InvalidConfig(
-                "No reset pin configured".to_string()
+                "No reset pin configured".to_string(),
             ))
         }
     }
@@ -349,7 +355,7 @@ impl RaspberryPiHal {
     fn wait_for_busy_low(&self, timeout_ms: u32) -> Result<(), RpiHalError> {
         let start = std::time::Instant::now();
         let timeout = Duration::from_millis(timeout_ms as u64);
-        
+
         while start.elapsed() < timeout {
             match self.busy_pin.read() {
                 Level::Low => return Ok(()), // Command processing complete
@@ -360,7 +366,7 @@ impl RaspberryPiHal {
                 }
             }
         }
-        
+
         log::warn!("BUSY pin timeout after {}ms", timeout_ms);
         Err(RpiHalError::BusyTimeout)
     }
@@ -384,24 +390,42 @@ impl RaspberryPiHal {
                     Ok(dio2_pin.read() == Level::High)
                 } else {
                     Err(RpiHalError::InvalidConfig(
-                        "DIO2 pin not configured".to_string()
+                        "DIO2 pin not configured".to_string(),
                     ))
                 }
             }
-            _ => Err(RpiHalError::InvalidConfig(
-                format!("Invalid DIO pin number: {}", dio_num)
-            )),
+            _ => Err(RpiHalError::InvalidConfig(format!(
+                "Invalid DIO pin number: {}",
+                dio_num
+            ))),
         }
     }
 
-    /// Get hardware and configuration information
+    /// Configure DIO2 for automatic RF switch control
     ///
-    /// Returns a string describing the HAL configuration for debugging.
-    pub fn get_info(&self) -> String {
-        format!("Raspberry Pi HAL - {}, BUSY: GPIO {}, DIO1: GPIO {}",
-                self.bus_info, self.pin_config.busy, self.pin_config.dio1)
+    /// If `enabled`, DIO2 will be configured as an output controlled by the radio
+    /// for automatic TX/RX switching. The pin must already be designated as DIO2
+    /// in the GPIO configuration.
+    ///
+    /// This requires calling the driver's `set_rf_switch_enabled(true)` after HAL setup.
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - Enable RF switch control on DIO2
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Configuration applied (no-op in HAL, handled in driver)
+    pub fn configure_rf_switch_dio2(&mut self, _enabled: bool) -> Result<(), RpiHalError> {
+        // DIO2 pin configuration is handled automatically by the radio when
+        // SetDIO2AsRfSwitchCtrl is called in the driver. Here we just log the intent.
+        if self.dio2_pin.is_some() {
+            log::info!("DIO2 (GPIO {}) configured for RF switch control", self.pin_config.dio2.unwrap_or(0));
+            Ok(())
+        } else {
+            Err(RpiHalError::InvalidConfig("DIO2 pin not configured".to_string()))
+        }
     }
-}
 
 impl Hal for RaspberryPiHal {
     fn write_command(&mut self, opcode: u8, data: &[u8]) -> Result<(), HalError> {
@@ -414,11 +438,11 @@ impl Hal for RaspberryPiHal {
         match self.spi.write(&cmd_buf) {
             Ok(_) => {
                 log::trace!("SPI write command 0x{:02X}, {} bytes", opcode, data.len());
-                
+
                 // Wait for radio to process command (BUSY pin monitoring)
                 self.wait_for_busy_low(100) // 100ms timeout for command processing
                     .map_err(|_| HalError::Spi)?;
-                
+
                 Ok(())
             }
             Err(e) => {
@@ -450,17 +474,16 @@ impl Hal for RaspberryPiHal {
         let mut cmd_buf = Vec::with_capacity(3 + data.len());
         cmd_buf.push(0x0D); // WriteRegister command
         cmd_buf.push((addr >> 8) as u8); // Address MSB
-        cmd_buf.push(addr as u8);        // Address LSB
+        cmd_buf.push(addr as u8); // Address LSB
         cmd_buf.extend_from_slice(data);
 
         match self.spi.write(&cmd_buf) {
             Ok(_) => {
                 log::trace!("Register write 0x{:04X}, {} bytes", addr, data.len());
-                
+
                 // Wait for command completion
-                self.wait_for_busy_low(50)
-                    .map_err(|_| HalError::Register)?;
-                
+                self.wait_for_busy_low(50).map_err(|_| HalError::Register)?;
+
                 Ok(())
             }
             Err(e) => {
@@ -556,8 +579,8 @@ pub struct RaspberryPiHalBuilder {
 impl Default for RaspberryPiHalBuilder {
     fn default() -> Self {
         Self {
-            spi_bus: 0,                // Primary SPI bus
-            spi_speed: 8_000_000,      // 8 MHz (safe for SX126x)
+            spi_bus: 0,           // Primary SPI bus
+            spi_speed: 8_000_000, // 8 MHz (safe for SX126x)
             gpio_pins: GpioPins::default(),
         }
     }
@@ -599,9 +622,12 @@ impl RaspberryPiHalBuilder {
         self
     }
 
-    /// Disable DIO2 pin
-    pub fn no_dio2(mut self) -> Self {
-        self.gpio_pins.dio2 = None;
+    /// Enable DIO2 as RF switch control pin
+    ///
+    /// Designates the DIO2 pin for automatic RF front-end switching.
+    /// DIO2 will go high during TX and low during RX when enabled in the driver.
+    pub fn rf_switch_dio2(mut self) -> Self {
+        self.gpio_pins.dio2 = self.gpio_pins.dio2.or(Some(23)); // Default to GPIO 23 if not set
         self
     }
 
@@ -621,15 +647,17 @@ impl RaspberryPiHalBuilder {
     pub fn build(self) -> Result<RaspberryPiHal, RpiHalError> {
         // Validate configuration
         if self.spi_bus > 1 {
-            return Err(RpiHalError::InvalidConfig(
-                format!("Invalid SPI bus {}, only 0 and 1 supported", self.spi_bus)
-            ));
+            return Err(RpiHalError::InvalidConfig(format!(
+                "Invalid SPI bus {}, only 0 and 1 supported",
+                self.spi_bus
+            )));
         }
 
         if self.spi_speed == 0 || self.spi_speed > 16_000_000 {
-            return Err(RpiHalError::InvalidConfig(
-                format!("Invalid SPI speed {} Hz, must be 1-16000000", self.spi_speed)
-            ));
+            return Err(RpiHalError::InvalidConfig(format!(
+                "Invalid SPI speed {} Hz, must be 1-16000000",
+                self.spi_speed
+            )));
         }
 
         // TODO: Add GPIO pin validation (check for conflicts, valid pin numbers)
@@ -681,7 +709,7 @@ mod tests {
 }
 
 // =============================================================================
-// RFM69-specific HAL Extensions  
+// RFM69-specific HAL Extensions
 // =============================================================================
 
 #[cfg(feature = "rfm69")]
@@ -698,7 +726,7 @@ pub struct Rfm69GpioPins {
 impl Default for Rfm69GpioPins {
     fn default() -> Self {
         Self {
-            reset: Some(5),   // GPIO 5 for reset (common configuration)
+            reset: Some(5),      // GPIO 5 for reset (common configuration)
             interrupt: Some(23), // GPIO 23 for interrupt (common configuration)
         }
     }
@@ -706,22 +734,26 @@ impl Default for Rfm69GpioPins {
 
 #[cfg(feature = "rfm69")]
 /// Create RFM69-specific SPI and GPIO setup for Raspberry Pi
-/// 
+///
 /// Returns (SpiDevice, OutputPin, InputPin) for RFM69 driver use
 pub fn new_rfm69_spi(
-    gpio: &Gpio, 
+    gpio: &Gpio,
     spi_device: Option<&str>,
-    pins: &Rfm69GpioPins
+    pins: &Rfm69GpioPins,
 ) -> Result<(Spi, Option<OutputPin>, Option<InputPin>), RpiHalError> {
     // Initialize SPI with RFM69-specific settings (1 MHz, Mode 0)
     let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, RFM69_SPI_SPEED, Mode::Mode0)?
         .bit_order(BitOrder::MsbFirst);
 
-    log::info!("RFM69 SPI initialized: {} Hz, Mode 0, MSB first", RFM69_SPI_SPEED);
+    log::info!(
+        "RFM69 SPI initialized: {} Hz, Mode 0, MSB first",
+        RFM69_SPI_SPEED
+    );
 
     // Setup reset pin if configured
     let reset_pin = if let Some(reset_num) = pins.reset {
-        let mut pin = gpio.get(reset_num)
+        let mut pin = gpio
+            .get(reset_num)
             .map_err(|e| RpiHalError::GpioInit(e))?
             .into_output();
         pin.set_low(); // RFM69 reset is active high, start low (not in reset)
@@ -734,7 +766,8 @@ pub fn new_rfm69_spi(
 
     // Setup interrupt pin if configured
     let interrupt_pin = if let Some(intr_num) = pins.interrupt {
-        let pin = gpio.get(intr_num)
+        let pin = gpio
+            .get(intr_num)
             .map_err(|e| RpiHalError::GpioInit(e))?
             .into_input();
         log::info!("RFM69 interrupt pin configured: GPIO {}", intr_num);

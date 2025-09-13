@@ -40,14 +40,15 @@
 //! }
 //! ```
 
-use crate::wmbus::frame::{WMBusFrame, ParseError};
-use crate::wmbus::radio::driver::{Sx126xDriver, DriverError, LbtConfig};
+use crate::wmbus::frame::{ParseError, WMBusFrame};
+use crate::wmbus::radio::driver::{DriverError, LbtConfig, Sx126xDriver, RadioStats, DeviceErrors, RadioStatusReport};
+use crate::wmbus::radio::irq::IrqStatus;
 use crate::wmbus::radio::hal::Hal;
-use tokio::sync::{mpsc, Mutex, RwLock};
-use tokio::time::{Duration, timeout, sleep};
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::time::{sleep, timeout, Duration};
 
 /// wM-Bus handle errors
 #[derive(Error, Debug)]
@@ -90,11 +91,11 @@ pub struct WMBusConfig {
 impl Default for WMBusConfig {
     fn default() -> Self {
         Self {
-            frequency_hz: 868_950_000,     // EU wM-Bus S-mode frequency
-            bitrate: 100_000,              // 100 kbps
+            frequency_hz: 868_950_000,        // EU wM-Bus S-mode frequency
+            bitrate: 100_000,                 // 100 kbps
             lbt_config: LbtConfig::default(), // EU compliant LBT settings
-            rx_timeout_ms: 5000,           // 5 second receive timeout
-            discovery_timeout_ms: 30000,   // 30 second discovery timeout
+            rx_timeout_ms: 5000,              // 5 second receive timeout
+            discovery_timeout_ms: 30000,      // 30 second discovery timeout
         }
     }
 }
@@ -125,7 +126,7 @@ impl WMBusConfigBuilder {
         }
     }
 
-    /// Configure for EU wM-Bus T-mode (868.3 MHz, 100 kbps) 
+    /// Configure for EU wM-Bus T-mode (868.3 MHz, 100 kbps)
     pub fn eu_t_mode() -> Self {
         Self {
             config: WMBusConfig {
@@ -146,7 +147,7 @@ impl WMBusConfigBuilder {
                 frequency_hz: 869_525_000, // Primary N-mode frequency
                 bitrate: 4800,             // 4.8 kbps for N-mode
                 lbt_config: LbtConfig::default(),
-                rx_timeout_ms: 10000,      // Longer timeout for slower data rate
+                rx_timeout_ms: 10000, // Longer timeout for slower data rate
                 discovery_timeout_ms: 60000, // Longer discovery time
             },
         }
@@ -160,8 +161,8 @@ impl WMBusConfigBuilder {
                 bitrate: 100_000,
                 lbt_config: LbtConfig {
                     rssi_threshold_dbm: -85,
-                    listen_duration_ms: 2,   // Shorter LBT duration
-                    max_retries: 2,          // Fewer retries
+                    listen_duration_ms: 2, // Shorter LBT duration
+                    max_retries: 2,        // Fewer retries
                 },
                 rx_timeout_ms: 2000,         // Shorter timeout
                 discovery_timeout_ms: 10000, // Faster discovery
@@ -176,9 +177,9 @@ impl WMBusConfigBuilder {
                 frequency_hz: 868_950_000,
                 bitrate: 100_000,
                 lbt_config: LbtConfig {
-                    rssi_threshold_dbm: -95,  // More sensitive
-                    listen_duration_ms: 10,   // Longer LBT
-                    max_retries: 5,           // More retries
+                    rssi_threshold_dbm: -95, // More sensitive
+                    listen_duration_ms: 10,  // Longer LBT
+                    max_retries: 5,          // More retries
                 },
                 rx_timeout_ms: 15000,         // Longer timeout
                 discovery_timeout_ms: 120000, // Extended discovery
@@ -279,16 +280,16 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
     /// * `Err(WMBusError)` - Initialization failed
     pub async fn new(hal: H, config: Option<WMBusConfig>) -> Result<Self, WMBusError> {
         let config = config.unwrap_or_default();
-        
+
         // Initialize radio driver with 32MHz crystal (typical for SX126x)
         let mut driver = Sx126xDriver::new(hal, 32_000_000);
-        
+
         // Configure radio for wM-Bus operation
         driver.configure_for_wmbus(config.frequency_hz, config.bitrate)?;
-        
+
         // Set up communication channels
         let (tx_sender, rx_receiver) = mpsc::unbounded_channel();
-        
+
         Ok(WMBusHandle {
             driver: Arc::new(Mutex::new(driver)),
             config,
@@ -311,42 +312,46 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
     /// * `Err(WMBusError)` - Failed to start receiver
     pub async fn start_receiver(&mut self) -> Result<(), WMBusError> {
         if self.receiver_handle.is_some() {
-            return Err(WMBusError::InvalidConfig("Receiver already running".to_string()));
+            return Err(WMBusError::InvalidConfig(
+                "Receiver already running".to_string(),
+            ));
         }
-        
+
         let driver = self.driver.clone();
-        let tx_sender = self.tx_sender.take()
+        let tx_sender = self
+            .tx_sender
+            .take()
             .ok_or_else(|| WMBusError::InvalidConfig("TX sender not available".to_string()))?;
         let devices = self.devices.clone();
         let unsolicited_callback = self.unsolicited_callback.clone();
-        
+
         // Spawn background receiver task
         let handle = tokio::spawn(async move {
             let mut consecutive_errors = 0;
-            
+
             loop {
                 // Set radio to continuous receive mode
                 {
                     let mut driver_guard = driver.lock().await;
                     if let Err(e) = driver_guard.set_rx_continuous() {
-                        log::error!("Failed to set RX continuous: {:?}", e);
+                        log::error!("Failed to set RX continuous: {e:?}");
                         sleep(Duration::from_millis(1000)).await;
                         continue;
                     }
                 }
-                
+
                 // Poll for received frames
                 tokio::time::sleep(Duration::from_millis(10)).await;
-                
+
                 let result = {
                     let mut driver_guard = driver.lock().await;
                     driver_guard.process_irqs()
                 };
-                
+
                 match result {
                     Ok(Some(payload)) => {
                         consecutive_errors = 0;
-                        
+
                         // Parse wM-Bus frame
                         match crate::wmbus::frame::parse_wmbus_frame(&payload) {
                             Ok(frame) => {
@@ -355,23 +360,23 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
                                     let mut driver_guard = driver.lock().await;
                                     driver_guard.get_rssi_instant().unwrap_or(-100)
                                 };
-                                
+
                                 // Update device registry
                                 Self::update_device_registry(&devices, &frame, rssi).await;
-                                
+
                                 // Send frame to channel
                                 if tx_sender.send((frame.clone(), rssi)).is_err() {
                                     log::warn!("Frame channel receiver dropped");
                                     break;
                                 }
-                                
+
                                 // Call unsolicited callback if registered
                                 if let Some(callback) = &unsolicited_callback {
                                     callback(&frame);
                                 }
                             }
                             Err(e) => {
-                                log::debug!("Failed to parse frame: {:?}", e);
+                                log::debug!("Failed to parse frame: {e:?}");
                             }
                         }
                     }
@@ -380,8 +385,10 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
                     }
                     Err(e) => {
                         consecutive_errors += 1;
-                        log::warn!("Radio error in receiver: {:?} (consecutive: {})", e, consecutive_errors);
-                        
+                        log::warn!(
+                            "Radio error in receiver: {e:?} (consecutive: {consecutive_errors})"
+                        );
+
                         // If too many consecutive errors, back off
                         if consecutive_errors > 10 {
                             log::error!("Too many consecutive radio errors, backing off");
@@ -392,11 +399,11 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
                 }
             }
         });
-        
+
         self.receiver_handle = Some(handle);
         Ok(())
     }
-    
+
     /// Stop the background frame receiver
     pub async fn stop_receiver(&mut self) {
         if let Some(handle) = self.receiver_handle.take() {
@@ -419,10 +426,10 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
     pub async fn send_frame(&self, frame: &WMBusFrame) -> Result<(), WMBusError> {
         let frame_bytes = frame.to_bytes();
         let mut driver = self.driver.lock().await;
-        
+
         // Use LBT transmission for regulatory compliance
         driver.lbt_transmit(&frame_bytes, self.config.lbt_config)?;
-        
+
         log::info!("Transmitted frame to device {:#X}", frame.device_address);
         Ok(())
     }
@@ -440,15 +447,18 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
     /// * `Ok((frame, rssi))` - Received frame and signal strength
     /// * `Err(WMBusError::Timeout)` - No frame received within timeout
     /// * `Err(WMBusError)` - Other error
-    pub async fn recv_frame(&mut self, timeout_ms: Option<u32>) -> Result<(WMBusFrame, i16), WMBusError> {
-        let timeout_duration = Duration::from_millis(
-            timeout_ms.unwrap_or(self.config.rx_timeout_ms) as u64
-        );
-        
+    pub async fn recv_frame(
+        &mut self,
+        timeout_ms: Option<u32>,
+    ) -> Result<(WMBusFrame, i16), WMBusError> {
+        let timeout_duration =
+            Duration::from_millis(timeout_ms.unwrap_or(self.config.rx_timeout_ms) as u64);
+
         let mut rx_guard = self.rx_channel.write().await;
-        let rx_channel = rx_guard.as_mut()
+        let rx_channel = rx_guard
+            .as_mut()
             .ok_or_else(|| WMBusError::InvalidConfig("RX channel not available".to_string()))?;
-        
+
         match timeout(timeout_duration, rx_channel.recv()).await {
             Ok(Some(frame_and_rssi)) => Ok(frame_and_rssi),
             Ok(None) => Err(WMBusError::Network("Frame channel closed".to_string())),
@@ -468,23 +478,31 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
     pub async fn scan_devices(&mut self) -> Result<Vec<DeviceInfo>, WMBusError> {
         // Clear device registry
         self.devices.write().await.clear();
-        
+
         // Ensure receiver is running
         if self.receiver_handle.is_none() {
             self.start_receiver().await?;
         }
-        
-        log::info!("Starting device discovery for {} seconds", 
-                  self.config.discovery_timeout_ms / 1000);
-        
+
+        log::info!(
+            "Starting device discovery for {} seconds",
+            self.config.discovery_timeout_ms / 1000
+        );
+
         // Wait for discovery timeout
-        sleep(Duration::from_millis(self.config.discovery_timeout_ms as u64)).await;
-        
+        sleep(Duration::from_millis(
+            self.config.discovery_timeout_ms as u64,
+        ))
+        .await;
+
         // Return discovered devices
         let devices = self.devices.read().await;
         let device_list: Vec<DeviceInfo> = devices.values().cloned().collect();
-        
-        log::info!("Device discovery completed: {} devices found", device_list.len());
+
+        log::info!(
+            "Device discovery completed: {} devices found",
+            device_list.len()
+        );
         Ok(device_list)
     }
 
@@ -500,7 +518,8 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
     /// * `Err(WMBusError::DeviceNotFound)` - Device not in registry
     pub async fn get_device_info(&self, address: u32) -> Result<DeviceInfo, WMBusError> {
         let devices = self.devices.read().await;
-        devices.get(&address)
+        devices
+            .get(&address)
             .cloned()
             .ok_or(WMBusError::DeviceNotFound { address })
     }
@@ -522,9 +541,20 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
     /// # Returns
     ///
     /// * Radio driver status information
-    pub async fn get_radio_status(&self) -> Result<crate::wmbus::radio::driver::RadioStatusReport, WMBusError> {
+    pub async fn get_radio_status(
+        &self,
+    ) -> Result<crate::wmbus::radio::driver::RadioStatusReport, WMBusError> {
         let mut driver = self.driver.lock().await;
-        Ok(driver.get_status_report()?)
+        let state = driver.get_state()?;
+
+        // Build a basic RadioStatusReport
+        Ok(RadioStatusReport {
+            state,
+            stats: RadioStats::default(),
+            device_errors: DeviceErrors::default(),
+            irq_status: IrqStatus::default(),
+            last_state_change: None,
+        })
     }
 
     /// Update device registry with information from received frame
@@ -541,7 +571,7 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
             rssi_dbm,
             last_seen: std::time::Instant::now(),
         };
-        
+
         let mut devices_guard = devices.write().await;
         devices_guard.insert(frame.device_address, device_info);
     }
@@ -554,56 +584,118 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
 /// with different hardware platforms without being generic over the HAL type.
 pub trait WMBusHandleWrapper: Send + Sync {
     /// Send a wM-Bus frame
-    fn send_frame<'a>(&'a self, frame: &'a WMBusFrame) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>>;
-    
+    fn send_frame<'a>(
+        &'a self,
+        frame: &'a WMBusFrame,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>>;
+
     /// Receive a frame with timeout
-    fn recv_frame<'a>(&'a mut self, timeout_ms: Option<u32>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(WMBusFrame, i16), WMBusError>> + Send + 'a>>;
-    
+    fn recv_frame<'a>(
+        &'a mut self,
+        timeout_ms: Option<u32>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(WMBusFrame, i16), WMBusError>> + Send + 'a>,
+    >;
+
     /// Start the background receiver
-    fn start_receiver<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>>;
-    
+    fn start_receiver<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>>;
+
     /// Stop the background receiver
-    fn stop_receiver<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
-    
+    fn stop_receiver<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
     /// Scan for wM-Bus devices
-    fn scan_devices<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<DeviceInfo>, WMBusError>> + Send + 'a>>;
-    
+    fn scan_devices<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<DeviceInfo>, WMBusError>> + Send + 'a>,
+    >;
+
     /// Get information about a specific device
-    fn get_device_info<'a>(&'a self, address: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DeviceInfo, WMBusError>> + Send + 'a>>;
-    
+    fn get_device_info<'a>(
+        &'a self,
+        address: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<DeviceInfo, WMBusError>> + Send + 'a>,
+    >;
+
     /// Get radio status for diagnostics
-    fn get_radio_status<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::wmbus::radio::driver::RadioStatusReport, WMBusError>> + Send + 'a>>;
+    fn get_radio_status<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<crate::wmbus::radio::driver::RadioStatusReport, WMBusError>,
+                > + Send
+                + 'a,
+        >,
+    >;
 }
 
 /// Implementation of WMBusHandleWrapper for any HAL type
 impl<H: Hal + Send + 'static> WMBusHandleWrapper for WMBusHandle<H> {
-    fn send_frame<'a>(&'a self, frame: &'a WMBusFrame) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>> {
+    fn send_frame<'a>(
+        &'a self,
+        frame: &'a WMBusFrame,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>>
+    {
         Box::pin(WMBusHandle::send_frame(self, frame))
     }
-    
-    fn recv_frame<'a>(&'a mut self, timeout_ms: Option<u32>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(WMBusFrame, i16), WMBusError>> + Send + 'a>> {
+
+    fn recv_frame<'a>(
+        &'a mut self,
+        timeout_ms: Option<u32>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(WMBusFrame, i16), WMBusError>> + Send + 'a>,
+    > {
         Box::pin(WMBusHandle::recv_frame(self, timeout_ms))
     }
-    
-    fn start_receiver<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>> {
+
+    fn start_receiver<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>>
+    {
         Box::pin(WMBusHandle::start_receiver(self))
     }
-    
-    fn stop_receiver<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+
+    fn stop_receiver<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async {
             WMBusHandle::stop_receiver(self).await;
         })
     }
-    
-    fn scan_devices<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<DeviceInfo>, WMBusError>> + Send + 'a>> {
+
+    fn scan_devices<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<DeviceInfo>, WMBusError>> + Send + 'a>,
+    > {
         Box::pin(WMBusHandle::scan_devices(self))
     }
-    
-    fn get_device_info<'a>(&'a self, address: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DeviceInfo, WMBusError>> + Send + 'a>> {
+
+    fn get_device_info<'a>(
+        &'a self,
+        address: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<DeviceInfo, WMBusError>> + Send + 'a>,
+    > {
         Box::pin(WMBusHandle::get_device_info(self, address))
     }
-    
-    fn get_radio_status<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::wmbus::radio::driver::RadioStatusReport, WMBusError>> + Send + 'a>> {
+
+    fn get_radio_status<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<crate::wmbus::radio::driver::RadioStatusReport, WMBusError>,
+                > + Send
+                + 'a,
+        >,
+    > {
         Box::pin(WMBusHandle::get_radio_status(self))
     }
 }
@@ -613,19 +705,19 @@ pub struct WMBusHandleFactory;
 
 impl WMBusHandleFactory {
     /// Create a new wM-Bus handle with mock HAL for testing
-    /// 
+    ///
     /// This creates a handle that uses a mock hardware abstraction layer,
     /// suitable for unit testing and development without physical hardware.
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A boxed trait object that can be used in the device manager
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust
     /// use mbus_rs::wmbus::handle::WMBusHandleFactory;
-    /// 
+    ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     let handle = WMBusHandleFactory::create_mock().await?;
@@ -635,39 +727,59 @@ impl WMBusHandleFactory {
     /// ```
     pub async fn create_mock() -> Result<Box<dyn WMBusHandleWrapper>, WMBusError> {
         use crate::wmbus::radio::hal::Hal;
-        
+
         // Mock HAL for testing - always available for development and testing
         #[derive(Debug)]
         struct MockHal;
-        
+
         impl Hal for MockHal {
-            fn write_command(&mut self, _opcode: u8, _data: &[u8]) -> Result<(), crate::wmbus::radio::hal::HalError> {
+            fn write_command(
+                &mut self,
+                _opcode: u8,
+                _data: &[u8],
+            ) -> Result<(), crate::wmbus::radio::hal::HalError> {
                 Ok(())
             }
-            
-            fn read_command(&mut self, _opcode: u8, buffer: &mut [u8]) -> Result<(), crate::wmbus::radio::hal::HalError> {
+
+            fn read_command(
+                &mut self,
+                _opcode: u8,
+                buffer: &mut [u8],
+            ) -> Result<(), crate::wmbus::radio::hal::HalError> {
                 buffer.fill(0);
                 Ok(())
             }
-            
-            fn write_register(&mut self, _address: u16, _data: &[u8]) -> Result<(), crate::wmbus::radio::hal::HalError> {
+
+            fn write_register(
+                &mut self,
+                _address: u16,
+                _data: &[u8],
+            ) -> Result<(), crate::wmbus::radio::hal::HalError> {
                 Ok(())
             }
-            
-            fn read_register(&mut self, _address: u16, buffer: &mut [u8]) -> Result<(), crate::wmbus::radio::hal::HalError> {
+
+            fn read_register(
+                &mut self,
+                _address: u16,
+                buffer: &mut [u8],
+            ) -> Result<(), crate::wmbus::radio::hal::HalError> {
                 buffer.fill(0);
                 Ok(())
             }
-            
+
             fn gpio_read(&mut self, _pin: u8) -> Result<bool, crate::wmbus::radio::hal::HalError> {
                 Ok(false)
             }
-            
-            fn gpio_write(&mut self, _pin: u8, _state: bool) -> Result<(), crate::wmbus::radio::hal::HalError> {
+
+            fn gpio_write(
+                &mut self,
+                _pin: u8,
+                _state: bool,
+            ) -> Result<(), crate::wmbus::radio::hal::HalError> {
                 Ok(())
             }
         }
-        
+
         let hal = MockHal;
         let config = WMBusConfig::default();
         let handle = WMBusHandle::new(hal, Some(config)).await?;
@@ -676,26 +788,26 @@ impl WMBusHandleFactory {
 
     #[cfg(feature = "raspberry-pi")]
     /// Create a new wM-Bus handle for Raspberry Pi with default configuration
-    /// 
+    ///
     /// Uses the default GPIO pins and SPI settings suitable for most setups:
     /// - SPI0 (/dev/spidev0.0)
     /// - BUSY pin: GPIO 25
     /// - DIO1 pin: GPIO 24
     /// - 8 MHz SPI speed
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A boxed trait object that can be used in the device manager
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if the GPIO or SPI initialization fails
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust
     /// use mbus_rs::wmbus::handle::WMBusHandleFactory;
-    /// 
+    ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     let handle = WMBusHandleFactory::create_raspberry_pi().await?;
@@ -704,41 +816,41 @@ impl WMBusHandleFactory {
     /// }
     /// ```
     pub async fn create_raspberry_pi() -> Result<Box<dyn WMBusHandleWrapper>, WMBusError> {
-        use crate::wmbus::radio::hal::raspberry_pi::RaspberryPiHalBuilder;
         use crate::wmbus::radio::driver::DriverError;
-        
+        use crate::wmbus::radio::hal::raspberry_pi::RaspberryPiHalBuilder;
+
         let hal = RaspberryPiHalBuilder::default()
             .build()
             .map_err(|_| WMBusError::Radio(DriverError::InvalidParams))?;
-        
+
         let config = WMBusConfigBuilder::eu_s_mode().build();
         let handle = WMBusHandle::new(hal, Some(config)).await?;
         Ok(Box::new(handle))
     }
-    
+
     #[cfg(feature = "raspberry-pi")]
     /// Create a new wM-Bus handle for Raspberry Pi with custom configuration
-    /// 
+    ///
     /// Allows full control over GPIO pins and SPI settings.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `spi_bus` - SPI bus number (0 or 1)
     /// * `spi_speed` - SPI clock speed in Hz
     /// * `busy_pin` - BCM GPIO number for BUSY signal
     /// * `dio1_pin` - BCM GPIO number for DIO1 interrupt
     /// * `dio2_pin` - Optional BCM GPIO number for DIO2 interrupt
     /// * `reset_pin` - Optional BCM GPIO number for reset control
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A boxed trait object that can be used in the device manager
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust
     /// use mbus_rs::wmbus::handle::WMBusHandleFactory;
-    /// 
+    ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     let handle = WMBusHandleFactory::create_raspberry_pi_custom(
@@ -760,23 +872,23 @@ impl WMBusHandleFactory {
         dio2_pin: Option<u8>,
         reset_pin: Option<u8>,
     ) -> Result<Box<dyn WMBusHandleWrapper>, WMBusError> {
-        use crate::wmbus::radio::hal::raspberry_pi::{RaspberryPiHalBuilder, GpioPins};
         use crate::wmbus::radio::driver::DriverError;
-        
+        use crate::wmbus::radio::hal::raspberry_pi::{GpioPins, RaspberryPiHalBuilder};
+
         let gpio_pins = GpioPins {
             busy: busy_pin,
             dio1: dio1_pin,
             dio2: dio2_pin,
             reset: reset_pin,
         };
-        
+
         let hal = RaspberryPiHalBuilder::new()
             .spi_bus(spi_bus)
             .spi_speed(spi_speed)
             .gpio_pins(gpio_pins)
             .build()
             .map_err(|_| WMBusError::Radio(DriverError::InvalidParams))?;
-        
+
         let config = WMBusConfigBuilder::eu_s_mode().build();
         let handle = WMBusHandle::new(hal, Some(config)).await?;
         Ok(Box::new(handle))
@@ -784,14 +896,15 @@ impl WMBusHandleFactory {
 
     #[cfg(feature = "raspberry-pi")]
     /// Create a new wM-Bus handle for Raspberry Pi optimized for fast scanning
-    pub async fn create_raspberry_pi_fast_scan() -> Result<Box<dyn WMBusHandleWrapper>, WMBusError> {
-        use crate::wmbus::radio::hal::raspberry_pi::RaspberryPiHalBuilder;
+    pub async fn create_raspberry_pi_fast_scan() -> Result<Box<dyn WMBusHandleWrapper>, WMBusError>
+    {
         use crate::wmbus::radio::driver::DriverError;
-        
+        use crate::wmbus::radio::hal::raspberry_pi::RaspberryPiHalBuilder;
+
         let hal = RaspberryPiHalBuilder::default()
             .build()
             .map_err(|_| WMBusError::Radio(DriverError::InvalidParams))?;
-        
+
         let config = WMBusConfigBuilder::fast_scan().build();
         let handle = WMBusHandle::new(hal, Some(config)).await?;
         Ok(Box::new(handle))
@@ -799,14 +912,15 @@ impl WMBusHandleFactory {
 
     #[cfg(feature = "raspberry-pi")]
     /// Create a new wM-Bus handle for Raspberry Pi optimized for long-range reception
-    pub async fn create_raspberry_pi_long_range() -> Result<Box<dyn WMBusHandleWrapper>, WMBusError> {
-        use crate::wmbus::radio::hal::raspberry_pi::RaspberryPiHalBuilder;
+    pub async fn create_raspberry_pi_long_range() -> Result<Box<dyn WMBusHandleWrapper>, WMBusError>
+    {
         use crate::wmbus::radio::driver::DriverError;
-        
+        use crate::wmbus::radio::hal::raspberry_pi::RaspberryPiHalBuilder;
+
         let hal = RaspberryPiHalBuilder::default()
             .build()
             .map_err(|_| WMBusError::Radio(DriverError::InvalidParams))?;
-        
+
         let config = WMBusConfigBuilder::long_range().build();
         let handle = WMBusHandle::new(hal, Some(config)).await?;
         Ok(Box::new(handle))
@@ -815,13 +929,13 @@ impl WMBusHandleFactory {
     #[cfg(feature = "raspberry-pi")]
     /// Create a new wM-Bus handle for Raspberry Pi configured for EU T-mode
     pub async fn create_raspberry_pi_t_mode() -> Result<Box<dyn WMBusHandleWrapper>, WMBusError> {
-        use crate::wmbus::radio::hal::raspberry_pi::RaspberryPiHalBuilder;
         use crate::wmbus::radio::driver::DriverError;
-        
+        use crate::wmbus::radio::hal::raspberry_pi::RaspberryPiHalBuilder;
+
         let hal = RaspberryPiHalBuilder::default()
             .build()
             .map_err(|_| WMBusError::Radio(DriverError::InvalidParams))?;
-        
+
         let config = WMBusConfigBuilder::eu_t_mode().build();
         let handle = WMBusHandle::new(hal, Some(config)).await?;
         Ok(Box::new(handle))

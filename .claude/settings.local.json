@@ -51,7 +51,13 @@
       "Bash(then)",
       "Bash(fi)",
       "Bash(done)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Read(///**)",
+      "Read(//Users/jvindahl/Development/**)",
+      "Bash(mv:*)",
+      "Bash(do grep -q \"fn clone_box\" \"/Users/jvindahl/Development/mbuscrate/src/wmbus/radio/lora/decoders/$file.rs\")",
+      "Bash(do grep -q \"fn clone_box\" \"/Users/jvindahl/Development/mbuscrate/src/wmbus/radio/lora/decoders/nom/$file.rs\")",
+      "Bash(cargo fix:*)"
     ],
     "deny": [],
     "ask": []

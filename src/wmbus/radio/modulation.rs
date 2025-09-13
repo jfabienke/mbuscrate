@@ -57,21 +57,52 @@
 //! ```
 
 /// Radio packet type selection
-///
-/// Defines the fundamental modulation scheme used by the radio.
-/// Currently only GFSK is implemented, with LoRa planned for future versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketType {
     /// Gaussian Frequency Shift Keying - used for wM-Bus and similar protocols
     Gfsk,
-    // LoRa modulation support planned for future implementation
+    /// Long Range modulation for LoRa
+    LoRa,
+}
+
+/// Spreading Factor (SF) for LoRa (Table 13-47)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum SpreadingFactor {
+    SF5  = 0x05,
+    SF6  = 0x06,
+    SF7  = 0x07,
+    SF8  = 0x08,
+    SF9  = 0x09,
+    SF10 = 0x0A,
+    SF11 = 0x0B,
+    SF12 = 0x0C,
+}
+
+/// Bandwidth for LoRa (Table 13-48)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LoRaBandwidth {
+    BW7_8  = 0x00, // 7.8 kHz
+    BW10_4 = 0x08, // 10.4 kHz
+    BW15_6 = 0x01, // 15.6 kHz
+    BW20_8 = 0x09, // 20.8 kHz
+    BW31_2 = 0x02, // 31.25 kHz
+    BW41_7 = 0x0A, // 41.7 kHz
+    BW62_5 = 0x03, // 62.5 kHz
+    BW125  = 0x04, // 125 kHz
+    BW250  = 0x05, // 250 kHz
+    BW500  = 0x06, // 500 kHz
+}
+
+/// Coding Rate (CR) for LoRa (Table 13-49)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CodingRate {
+    CR4_5 = 0x01,
+    CR4_6 = 0x02,
+    CR4_7 = 0x03,
+    CR4_8 = 0x04,
 }
 
 /// GFSK modulation parameters
-///
-/// This structure defines all the parameters needed to configure GFSK modulation
-/// on the SX126x radio. Proper parameter selection is critical for reliable
-/// communication and regulatory compliance.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GfskModParams {
     /// Data transmission rate in bits per second
@@ -100,41 +131,63 @@ pub struct GfskModParams {
     pub fdev: u32,
 }
 
+/// LoRa modulation parameters
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoRaModParams {
+    pub sf: SpreadingFactor,
+    pub bw: LoRaBandwidth,
+    pub cr: CodingRate,
+    /// Enable Low Data Rate Optimization for SF11/SF12 on 125kHz or lower
+    pub low_data_rate_optimize: bool,
+}
+
 /// Complete modulation parameter set for the radio
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ModulationParams {
-    /// The modulation scheme to use
-    pub packet_type: PacketType,
-    /// GFSK-specific modulation parameters
-    pub params: GfskModParams,
+pub enum ModulationParams {
+    Gfsk {
+        /// GFSK-specific modulation parameters
+        params: GfskModParams,
+    },
+    LoRa {
+        /// LoRa-specific modulation parameters
+        params: LoRaModParams,
+    },
+}
+
+/// LoRa packet parameters
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoRaPacketParams {
+    pub preamble_len: u16,      // 8 to 65535 symbols
+    pub implicit_header: bool,  // true for implicit, false for explicit
+    pub payload_len: u8,        // For implicit header mode
+    pub crc_on: bool,
+    pub iq_inverted: bool,
 }
 
 /// Packet structure configuration parameters
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PacketParams {
-    /// The packet type (must match modulation type)
-    pub packet_type: PacketType,
+pub enum PacketParams {
+    Gfsk {
+        /// GFSK-specific packet parameters
+        preamble_len: u16,
+        header_type: HeaderType,
+        payload_len: u8,
+        crc_on: bool,
+        crc_type: CrcType,
+        sync_word_len: u8,
+    },
+    LoRa {
+        /// LoRa-specific packet parameters
+        params: LoRaPacketParams,
+    },
+}
 
-    /// Preamble length in bits
-    ///
-    /// Range: 8 to 65535 bits
-    /// Typical values: 16-64 bits
-    pub preamble_len: u16,
-
-    /// Packet header configuration
-    pub header_type: HeaderType,
-
-    /// Maximum payload length in bytes (0 to 255)
-    pub payload_len: u8,
-
-    /// Enable CRC error detection
-    pub crc_on: bool,
-
-    /// CRC length configuration
-    pub crc_type: CrcType,
-
-    /// Sync word length in bytes (1 to 8)
-    pub sync_word_len: u8,
+/// LoRa packet status (metadata from received LoRa packets)
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoRaPacketStatus {
+    pub rssi_pkt_dbm: i16,
+    pub snr_pkt_db: f32,
+    pub signal_rssi_pkt_dbm: i16,
 }
 
 /// Packet header type configuration
@@ -197,64 +250,64 @@ impl TimeOnAir {
     pub fn s_mode(frame_bytes: usize) -> Self {
         Self {
             frame_bytes,
-            preamble_bits: 48,  // Typical S-mode preamble
-            sync_bits: 16,      // 2-byte sync word
-            crc_bytes: 2,       // 16-bit CRC
+            preamble_bits: 48, // Typical S-mode preamble
+            sync_bits: 16,     // 2-byte sync word
+            crc_bytes: 2,      // 16-bit CRC
             bitrate: 32768,    // 32.768 kbps chip rate
             encoding: EncodingType::Manchester,
         }
     }
-    
+
     /// Create a new ToA calculator for T-mode (3-out-of-6)
     pub fn t_mode(frame_bytes: usize) -> Self {
         Self {
             frame_bytes,
-            preamble_bits: 48,  // Typical T-mode preamble
-            sync_bits: 16,      // 2-byte sync word
-            crc_bytes: 2,       // 16-bit CRC
+            preamble_bits: 48, // Typical T-mode preamble
+            sync_bits: 16,     // 2-byte sync word
+            crc_bytes: 2,      // 16-bit CRC
             bitrate: 100000,   // 100 kbps chip rate
             encoding: EncodingType::ThreeOutOfSix,
         }
     }
-    
+
     /// Create a new ToA calculator for C-mode (NRZ)
     pub fn c_mode(frame_bytes: usize) -> Self {
         Self {
             frame_bytes,
-            preamble_bits: 48,  // Typical C-mode preamble
-            sync_bits: 16,      // 2-byte sync word
-            crc_bytes: 2,       // 16-bit CRC
+            preamble_bits: 48, // Typical C-mode preamble
+            sync_bits: 16,     // 2-byte sync word
+            crc_bytes: 2,      // 16-bit CRC
             bitrate: 100000,   // 100 kbps data rate (no chip encoding)
             encoding: EncodingType::Nrz,
         }
     }
-    
+
     /// Calculate time-on-air in milliseconds
     pub fn calculate_ms(&self) -> f64 {
         // Total bits before encoding
         let data_bits = (self.frame_bytes + self.crc_bytes) * 8;
         let total_bits = self.preamble_bits + self.sync_bits + data_bits;
-        
+
         // Apply encoding overhead
         let encoded_bits = match self.encoding {
-            EncodingType::Manchester => total_bits * 2,        // 2× for Manchester
+            EncodingType::Manchester => total_bits * 2, // 2× for Manchester
             EncodingType::ThreeOutOfSix => (total_bits * 3) / 2, // 1.5× for 3-out-of-6
             EncodingType::Nrz | EncodingType::None => total_bits, // No overhead for NRZ/None
         };
-        
+
         // Calculate time in seconds, then convert to milliseconds
         (encoded_bits as f64 / self.bitrate as f64) * 1000.0
     }
-    
+
     /// Check if transmission meets duty cycle requirement (<0.9% in 1 hour)
     pub fn check_duty_cycle(&self, transmissions_per_hour: u32) -> bool {
         let toa_ms = self.calculate_ms();
         let total_ms_per_hour = toa_ms * transmissions_per_hour as f64;
         let duty_cycle = total_ms_per_hour / (3600.0 * 1000.0); // Hour in ms
-        
+
         duty_cycle < 0.009 // Less than 0.9%
     }
-    
+
     /// Calculate maximum transmissions per hour for duty cycle compliance
     pub fn max_transmissions_per_hour(&self) -> u32 {
         let toa_ms = self.calculate_ms();
@@ -280,30 +333,30 @@ impl ListenBeforeTalk {
     /// Create new LBT with standard ETSI parameters
     pub fn new_etsi() -> Self {
         Self {
-            rssi_threshold: -85,      // -85 dBm threshold
-            min_listen_time_ms: 5,     // 5ms minimum listen
-            max_backoff_ms: 1000,      // 1 second max backoff
+            rssi_threshold: -85,   // -85 dBm threshold
+            min_listen_time_ms: 5, // 5ms minimum listen
+            max_backoff_ms: 1000,  // 1 second max backoff
             backoff_counter: 0,
         }
     }
-    
+
     /// Check if channel is clear based on RSSI
     pub fn is_channel_clear(&self, rssi_dbm: i16) -> bool {
         rssi_dbm < self.rssi_threshold
     }
-    
+
     /// Calculate backoff time with exponential backoff
     pub fn calculate_backoff_ms(&mut self) -> u32 {
         let backoff = (2_u32.pow(self.backoff_counter) * 10).min(self.max_backoff_ms);
         self.backoff_counter = (self.backoff_counter + 1).min(10); // Cap at 2^10
         backoff
     }
-    
+
     /// Reset backoff counter on successful transmission
     pub fn reset_backoff(&mut self) {
         self.backoff_counter = 0;
     }
-    
+
     /// Calculate total channel access time including LBT
     pub fn total_access_time_ms(&self, toa_ms: f64) -> f64 {
         self.min_listen_time_ms as f64 + toa_ms

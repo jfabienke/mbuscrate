@@ -45,6 +45,12 @@ pub struct PacketBuffer {
     stats: PacketStats,
 }
 
+impl Default for PacketBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PacketBuffer {
     /// Create a new packet buffer
     pub fn new() -> Self {
@@ -99,7 +105,7 @@ impl PacketBuffer {
         match want {
             size if size > 0 => {
                 self.expected_size = Some(size as usize);
-                log::debug!("Determined packet size: {} bytes", size);
+                log::debug!("Determined packet size: {size} bytes");
                 self.expected_size
             }
             -2 => {

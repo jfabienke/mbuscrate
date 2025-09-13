@@ -14,7 +14,7 @@ fn main() {
 #[cfg(feature = "raspberry-pi")]
 use mbus_rs::wmbus::radio::{
     driver::Sx126xDriver,
-    hal::{RaspberryPiHalBuilder, GpioPins},
+    hal::{GpioPins, RaspberryPiHalBuilder},
 };
 #[cfg(feature = "raspberry-pi")]
 use std::time::Duration;
@@ -28,9 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Method 1: Use default pin configuration
     let hal = RaspberryPiHalBuilder::new().build()?;
-    
+
     /* Alternative configurations:
-    
+
     // Method 2: Custom pin configuration
     let hal = RaspberryPiHalBuilder::new()
         .spi_bus(0)           // Use primary SPI bus
@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .dio2_pin(23)         // GPIO 23 for DIO2
         .reset_pin(22)        // GPIO 22 for RESET
         .build()?;
-    
+
     // Method 3: Minimal configuration (no optional pins)
     let hal = RaspberryPiHalBuilder::new()
         .busy_pin(25)
@@ -69,12 +69,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         if let Some(payload) = driver.process_irqs()? {
             frame_count += 1;
-            println!("📦 Frame #{}: {} bytes - {:02X?}", 
-                     frame_count, 
-                     payload.len(),
-                     &payload[..payload.len().min(16)]); // Show first 16 bytes
+            println!(
+                "📦 Frame #{}: {} bytes - {:02X?}",
+                frame_count,
+                payload.len(),
+                &payload[..payload.len().min(16)]
+            ); // Show first 16 bytes
         }
-        
+
         std::thread::sleep(Duration::from_millis(100));
     }
 }

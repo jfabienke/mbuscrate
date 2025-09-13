@@ -48,17 +48,17 @@ impl StateMachine {
     }
 
     /// Selects a device using primary addressing (direct) or secondary addressing (selection sequence).
-    /// 
+    ///
     /// # Arguments
     /// * `address` - For primary addressing (1-250): the device's primary address.
     ///   For secondary addressing: use 253, requires prior secondary address selection
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` - Device successfully selected or primary address validated
     /// * `Err(MBusError)` - Invalid address range or selection failed
     pub async fn select_device(&mut self, address: u8) -> Result<(), MBusError> {
         self.state = MBusProtocolState::Selecting;
-        
+
         // Validate address range according to M-Bus specification
         match address {
             1..=250 => {
@@ -76,15 +76,21 @@ impl StateMachine {
             }
             0 => {
                 // Address 0 is for unconfigured slaves - not recommended for normal operation
-                Err(MBusError::Other("Address 0 is for unconfigured devices".to_string()))
+                Err(MBusError::Other(
+                    "Address 0 is for unconfigured devices".to_string(),
+                ))
             }
             254 => {
                 // Test address - causes all devices to respond (collision)
-                Err(MBusError::Other("Address 254 is test address, causes collisions".to_string()))
+                Err(MBusError::Other(
+                    "Address 254 is test address, causes collisions".to_string(),
+                ))
             }
             255 => {
                 // Broadcast address - no device replies
-                Err(MBusError::Other("Address 255 is broadcast, no replies expected".to_string()))
+                Err(MBusError::Other(
+                    "Address 255 is broadcast, no replies expected".to_string(),
+                ))
             }
             _ => {
                 // Invalid address
@@ -95,111 +101,120 @@ impl StateMachine {
 
     /// Selects a device using secondary addressing (8-byte unique identifier).
     /// After successful selection, the device will respond to primary address 253 (0xFD).
-    /// 
+    ///
     /// # Arguments
     /// * `secondary_address` - 8-byte unique identifier (Manufacturer ID + Device ID + Version + Medium)
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` - Device successfully selected, now responds to address 253
     /// * `Err(MBusError)` - Selection failed or invalid secondary address
-    pub async fn select_device_by_secondary_address(&mut self, secondary_address: &[u8; 8]) -> Result<(), MBusError> {
+    pub async fn select_device_by_secondary_address(
+        &mut self,
+        secondary_address: &[u8; 8],
+    ) -> Result<(), MBusError> {
         self.state = MBusProtocolState::Selecting;
-        
+
         if secondary_address.len() != 8 {
-            return Err(MBusError::Other("Secondary address must be exactly 8 bytes".to_string()));
+            return Err(MBusError::Other(
+                "Secondary address must be exactly 8 bytes".to_string(),
+            ));
         }
 
         // Create SND_UD frame for device selection
         // Frame structure: [68h] [0Bh] [0Bh] [68h] [53h] [FDh] [52h] [Secondary Address...] [CS] [16h]
         let selection_frame = MBusFrame {
             frame_type: MBusFrameType::Long,
-            control: 0x53,           // SND_UD control field
-            address: 0xFD,           // Selection address (253)
-            control_information: 0x52, // CI for Mode 1 selection
+            control: 0x53,                    // SND_UD control field
+            address: 0xFD,                    // Selection address (253)
+            control_information: 0x52,        // CI for Mode 1 selection
             data: secondary_address.to_vec(), // 8-byte secondary address
-            checksum: 0,             // Will be calculated by pack_frame
+            checksum: 0,                      // Will be calculated by pack_frame
             more_records_follow: false,
         };
 
         // TODO: This will be connected to actual serial transmission in integration
         // For now, we just validate the frame can be created correctly
         let _frame_bytes = frame::pack_frame(&selection_frame);
-        
+
         // After successful selection, device responds to address 253
         // The serial layer would need to:
         // 1. Send the selection frame
         // 2. Wait for E5h acknowledgment
         // 3. If ACK received, device is selected
-        
+
         Ok(())
     }
 
     /// Requests Class 2 data from the currently selected device using REQ_UD2.
     /// This is the standard request for meter readings.
-    /// 
+    ///
     /// # Returns
     /// * `Ok(MBusFrame)` - The constructed REQ_UD2 request frame ready for transmission
     /// * `Err(MBusError)` - No device selected or invalid state
     pub async fn request_data(&mut self) -> Result<MBusFrame, MBusError> {
         if self.current_address == 0 {
-            return Err(MBusError::Other("No device selected, call select_device first".to_string()));
+            return Err(MBusError::Other(
+                "No device selected, call select_device first".to_string(),
+            ));
         }
 
         self.state = MBusProtocolState::Requesting;
-        
+
         // Construct REQ_UD2 frame (Request for Class 2 Data)
         // Uses Short Frame format: [10h] [C-Field] [A-Field] [Checksum] [16h]
-        
+
         // Control field: 0x5B (REQ_UD2) or 0x7B (REQ_UD2 with FCB set)
         let control_field = if self.fcb {
-            0x7B  // REQ_UD2 with Frame Count Bit set
+            0x7B // REQ_UD2 with Frame Count Bit set
         } else {
-            0x5B  // REQ_UD2 without FCB
+            0x5B // REQ_UD2 without FCB
         };
 
         let request_frame = MBusFrame {
             frame_type: MBusFrameType::Short,
             control: control_field,
             address: self.current_address,
-            control_information: 0,  // Not used in short frames
-            data: Vec::new(),        // No data in REQ_UD2
-            checksum: 0,             // Will be calculated by pack_frame
+            control_information: 0, // Not used in short frames
+            data: Vec::new(),       // No data in REQ_UD2
+            checksum: 0,            // Will be calculated by pack_frame
             more_records_follow: false,
         };
 
         // Validate frame construction
         let _frame_bytes = frame::pack_frame(&request_frame);
-        
+
         Ok(request_frame)
     }
 
     /// Requests Class 1 data (alarm data) from the currently selected device using REQ_UD1.
     /// This is for high-priority alarm information.
-    /// 
+    ///
     /// # Returns
     /// * `Ok(MBusFrame)` - The constructed REQ_UD1 request frame ready for transmission
     /// * `Err(MBusError)` - No device selected or invalid state
     pub async fn request_alarm_data(&mut self) -> Result<MBusFrame, MBusError> {
         if self.current_address == 0 {
-            return Err(MBusError::Other("No device selected, call select_device first".to_string()));
+            return Err(MBusError::Other(
+                "No device selected, call select_device first".to_string(),
+            ));
         }
 
         self.state = MBusProtocolState::Requesting;
-        
+
         // Control field: 0x5A (REQ_UD1) or 0x7A (REQ_UD1 with FCB set)
         let control_field = if self.fcb {
-            0x7A  // REQ_UD1 with Frame Count Bit set
+            0x7A // REQ_UD1 with Frame Count Bit set
         } else {
-            0x5A  // REQ_UD1 without FCB
+            0x5A // REQ_UD1 without FCB
         };
 
         let request_frame = MBusFrame {
             frame_type: MBusFrameType::Short,
             control: control_field,
             address: self.current_address,
-            control_information: 0,  // Not used in short frames
-            data: Vec::new(),        // No data in REQ_UD1
-            checksum: 0,             // Will be calculated by pack_frame
+            control_information: 0, // Not used in short frames
+            data: Vec::new(),       // No data in REQ_UD1
+            checksum: 0,            // Will be calculated by pack_frame
             more_records_follow: false,
         };
 
@@ -219,16 +234,19 @@ impl StateMachine {
 
     /// Validates and processes a received RSP_UD (Response with User Data) frame.
     /// Performs all necessary frame validation according to M-Bus specification.
-    /// 
+    ///
     /// # Arguments
     /// * `received_frame` - The frame received from the device
-    /// 
+    ///
     /// # Returns
     /// * `Ok((Vec<u8>, bool))` - Tuple of (payload data, more_frames_follow)
     /// * `Err(MBusError)` - Frame validation failed or unexpected frame type
-    pub async fn receive_data(&mut self, received_frame: &MBusFrame) -> Result<(Vec<u8>, bool), MBusError> {
+    pub async fn receive_data(
+        &mut self,
+        received_frame: &MBusFrame,
+    ) -> Result<(Vec<u8>, bool), MBusError> {
         self.state = MBusProtocolState::Receiving;
-        
+
         // Validate frame type - expect Long frame for RSP_UD
         match received_frame.frame_type {
             MBusFrameType::Long => {
@@ -236,35 +254,40 @@ impl StateMachine {
             }
             MBusFrameType::Ack => {
                 // Single character acknowledgment (E5h) - not data response
-                return Err(MBusError::FrameParseError("Received ACK instead of data response".to_string()));
+                return Err(MBusError::FrameParseError(
+                    "Received ACK instead of data response".to_string(),
+                ));
             }
             _ => {
-                return Err(MBusError::FrameParseError("Expected Long frame for RSP_UD".to_string()));
+                return Err(MBusError::FrameParseError(
+                    "Expected Long frame for RSP_UD".to_string(),
+                ));
             }
         }
-        
+
         // Validate control field - expect 0x08 for RSP_UD
         if received_frame.control != 0x08 {
-            return Err(MBusError::FrameParseError(
-                format!("Expected control field 0x08 for RSP_UD, got 0x{:02X}", received_frame.control)
-            ));
+            return Err(MBusError::FrameParseError(format!(
+                "Expected control field 0x08 for RSP_UD, got 0x{:02X}",
+                received_frame.control
+            )));
         }
-        
+
         // Validate address matches our current device
         if received_frame.address != self.current_address {
-            return Err(MBusError::FrameParseError(
-                format!("Address mismatch: expected 0x{:02X}, got 0x{:02X}", 
-                    self.current_address, received_frame.address)
-            ));
+            return Err(MBusError::FrameParseError(format!(
+                "Address mismatch: expected 0x{:02X}, got 0x{:02X}",
+                self.current_address, received_frame.address
+            )));
         }
-        
+
         // Verify frame checksum using existing verification function
         frame::verify_frame(received_frame)?;
-        
+
         // Check for multi-frame indication
         // DIF code 0x1F in the data indicates more frames will follow
         let more_frames = self.check_multi_frame_indication(&received_frame.data);
-        
+
         // Extract payload data (remove any multi-frame indicators)
         let payload_data = if more_frames {
             // Remove the 0x1F DIF code from the data
@@ -272,15 +295,15 @@ impl StateMachine {
         } else {
             received_frame.data.clone()
         };
-        
+
         Ok((payload_data, more_frames))
     }
-    
+
     /// Checks if the received data contains multi-frame indication (DIF code 0x1F).
-    /// 
+    ///
     /// # Arguments
     /// * `data` - The data payload from the received frame
-    /// 
+    ///
     /// # Returns
     /// * `bool` - true if more frames follow, false if this is the last frame
     fn check_multi_frame_indication(&self, data: &[u8]) -> bool {
@@ -293,12 +316,12 @@ impl StateMachine {
         }
         false
     }
-    
+
     /// Extracts payload data while removing multi-frame DIF indicators.
-    /// 
+    ///
     /// # Arguments
     /// * `data` - The raw data payload from the frame
-    /// 
+    ///
     /// # Returns
     /// * `Vec<u8>` - Cleaned payload data without DIF 0x1F indicators
     fn extract_payload_without_multi_frame_dif(&self, data: &[u8]) -> Vec<u8> {
@@ -307,49 +330,55 @@ impl StateMachine {
         // the data structure and only remove DIF bytes, not data bytes that happen to be 0x1F
         data.iter().filter(|&&byte| byte != 0x1F).copied().collect()
     }
-    
+
     /// Validates that a received frame is a proper acknowledgment (E5h).
     /// Used after sending selection frames or other commands that expect ACK.
-    /// 
+    ///
     /// # Arguments
     /// * `received_frame` - The frame received from the device
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` - Valid acknowledgment received
     /// * `Err(MBusError)` - Not an acknowledgment or invalid
-    pub async fn receive_acknowledgment(&mut self, received_frame: &MBusFrame) -> Result<(), MBusError> {
+    pub async fn receive_acknowledgment(
+        &mut self,
+        received_frame: &MBusFrame,
+    ) -> Result<(), MBusError> {
         match received_frame.frame_type {
             MBusFrameType::Ack => {
                 // Valid acknowledgment received
                 Ok(())
             }
-            _ => {
-                Err(MBusError::FrameParseError("Expected acknowledgment (E5h) frame".to_string()))
-            }
+            _ => Err(MBusError::FrameParseError(
+                "Expected acknowledgment (E5h) frame".to_string(),
+            )),
         }
     }
 
     /// Processes raw payload data by extracting and parsing M-Bus data records.
     /// Converts the raw bytes into structured MBusRecord objects containing values, units, and metadata.
-    /// 
+    ///
     /// # Arguments
     /// * `payload_data` - Raw payload bytes from one or more RSP_UD frames
-    /// 
+    ///
     /// # Returns
     /// * `Ok(Vec<MBusRecord>)` - Successfully parsed data records
     /// * `Err(MBusError)` - Data parsing failed or invalid record format
-    pub async fn process_data(&mut self, payload_data: &[u8]) -> Result<Vec<MBusRecord>, MBusError> {
+    pub async fn process_data(
+        &mut self,
+        payload_data: &[u8],
+    ) -> Result<Vec<MBusRecord>, MBusError> {
         // Note: parse_variable_record and parse_fixed_record are used in helper methods
-        
+
         self.state = MBusProtocolState::Idle;
-        
+
         if payload_data.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         let mut records = Vec::new();
         let mut remaining_data = payload_data;
-        
+
         // Parse data records until all data is consumed
         while !remaining_data.is_empty() {
             // Try parsing as variable record first (most common format)
@@ -380,93 +409,93 @@ impl StateMachine {
                     }
                 }
             }
-            
+
             // Safety check to prevent infinite loops
             if remaining_data.len() >= payload_data.len() {
                 break;
             }
         }
-        
+
         // Post-processing: validate and normalize records
         for record in &mut records {
             self.validate_and_normalize_record(record)?;
         }
-        
+
         Ok(records)
     }
-    
+
     /// Attempts to parse data as a variable-length M-Bus record.
-    /// 
+    ///
     /// # Arguments
     /// * `data` - Raw data bytes to parse
-    /// 
+    ///
     /// # Returns
     /// * `Ok((MBusRecord, usize))` - Parsed record and bytes consumed
     /// * `Err(MBusError)` - Parsing failed
     fn try_parse_variable_record(&self, data: &[u8]) -> Result<(MBusRecord, usize), MBusError> {
         use crate::payload::record::parse_variable_record;
-        
+
         let _initial_len = data.len();
-        
+
         // Parse variable record - this function already handles the complex DIF/VIF parsing
         let record = parse_variable_record(data)?;
-        
+
         // Calculate consumed bytes (this is a simplification - in practice, we'd need
         // more sophisticated tracking of how many bytes were consumed)
         let consumed_bytes = self.calculate_record_size(&record);
-        
+
         Ok((record, consumed_bytes))
     }
-    
+
     /// Attempts to parse data as a fixed-length M-Bus record.
-    /// 
+    ///
     /// # Arguments
     /// * `data` - Raw data bytes to parse
-    /// 
+    ///
     /// # Returns
     /// * `Ok((MBusRecord, usize))` - Parsed record and bytes consumed  
     /// * `Err(MBusError)` - Parsing failed
     fn try_parse_fixed_record(&self, data: &[u8]) -> Result<(MBusRecord, usize), MBusError> {
         use crate::payload::record::parse_fixed_record;
-        
+
         let record = parse_fixed_record(data)?;
         let consumed_bytes = self.calculate_record_size(&record);
-        
+
         Ok((record, consumed_bytes))
     }
-    
+
     /// Estimates the size of a parsed record in bytes.
     /// This is used to advance the parser position in the data.
-    /// 
+    ///
     /// # Arguments
     /// * `record` - The parsed M-Bus record
-    /// 
+    ///
     /// # Returns
     /// * `usize` - Estimated size in bytes
     fn calculate_record_size(&self, record: &MBusRecord) -> usize {
         use crate::payload::record::mbus_dif_datalength_lookup;
-        
+
         // Base size: DIF (1 byte) + VIF (at least 1 byte) + data
         let mut size = 1 + 1; // DIF + VIF minimum
-        
+
         // Add data length based on DIF
         size += mbus_dif_datalength_lookup(record.drh.dib.dif);
-        
+
         // Add extended VIF bytes if present
         if record.drh.vib.vif > 0x7F {
             size += 1; // VIFE
         }
-        
+
         // Minimum record size is 3 bytes, maximum reasonable size is 255
         size.clamp(3, 255)
     }
-    
+
     /// Validates and normalizes a parsed M-Bus record.
     /// Checks for reasonable values and applies any necessary corrections.
-    /// 
+    ///
     /// # Arguments
     /// * `record` - Mutable reference to the record to validate
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` - Record is valid
     /// * `Err(MBusError)` - Record validation failed
@@ -474,14 +503,18 @@ impl StateMachine {
         // Check for error indicators in VIF codes
         // Some VIF codes indicate device errors or invalid data
         if record.drh.vib.vif == 0xFF {
-            return Err(MBusError::Other("Record indicates device error (VIF=0xFF)".to_string()));
+            return Err(MBusError::Other(
+                "Record indicates device error (VIF=0xFF)".to_string(),
+            ));
         }
-        
+
         // Validate data length is reasonable
         if record.data_len > 255 {
-            return Err(MBusError::Other("Record data length exceeds maximum".to_string()));
+            return Err(MBusError::Other(
+                "Record data length exceeds maximum".to_string(),
+            ));
         }
-        
+
         // Validate value is reasonable (not NaN, not infinite) for numeric values
         match &mut record.value {
             crate::payload::record::MBusRecordValue::Numeric(value) => {
@@ -494,22 +527,22 @@ impl StateMachine {
                 // String values don't need this validation
             }
         }
-        
+
         Ok(())
     }
 
     /// Handles errors during M-Bus communication and implements recovery strategies.
     /// Provides retry logic, timeout handling, and state recovery according to M-Bus specification.
-    /// 
+    ///
     /// # Arguments
     /// * `error` - The error that occurred during communication
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` - Error handled, retry communication
     /// * `Err(MBusError)` - Fatal error, communication should be aborted
     pub fn handle_error(&mut self, error: MBusError) -> Result<(), MBusError> {
         self.state = MBusProtocolState::Error;
-        
+
         match error {
             MBusError::SerialPortError(_) => {
                 // Serial port communication error - potentially recoverable
@@ -522,7 +555,7 @@ impl StateMachine {
             }
             MBusError::InvalidChecksum { .. } => {
                 // Checksum error - retry with same frame
-                Ok(()) // Indicate retry is possible  
+                Ok(()) // Indicate retry is possible
             }
             MBusError::NomError(_) => {
                 // Parsing error - potentially recoverable
@@ -537,10 +570,10 @@ impl StateMachine {
 
     /// Calculates the appropriate timeout for a given baud rate according to M-Bus specification.
     /// Master timeout should be (330 bit periods + 50ms).
-    /// 
+    ///
     /// # Arguments
     /// * `baud_rate` - The current serial communication baud rate
-    /// 
+    ///
     /// # Returns
     /// * `Duration` - Calculated timeout duration
     pub fn calculate_timeout(baud_rate: u32) -> std::time::Duration {
@@ -549,26 +582,26 @@ impl StateMachine {
         let bit_time_ms = 1000.0 / baud_rate as f64;
         let bit_period_timeout_ms = 330.0 * bit_time_ms;
         let total_timeout_ms = bit_period_timeout_ms + 50.0;
-        
+
         // Add some safety margin for the master timeout
         let master_timeout_ms = total_timeout_ms + 20.0;
-        
+
         std::time::Duration::from_millis(master_timeout_ms as u64)
     }
 
     /// Calculates inter-frame delay according to M-Bus specification.
     /// Minimum delay between frames is 11 bit times.
-    /// 
+    ///
     /// # Arguments  
     /// * `baud_rate` - The current serial communication baud rate
-    /// 
+    ///
     /// # Returns
     /// * `Duration` - Minimum delay duration between frames
     pub fn calculate_inter_frame_delay(baud_rate: u32) -> std::time::Duration {
         // M-Bus spec: minimum 11 bit times between frames
         let bit_time_ms = 1000.0 / baud_rate as f64;
         let delay_ms = 11.0 * bit_time_ms;
-        
+
         std::time::Duration::from_millis(delay_ms.ceil() as u64)
     }
 
@@ -595,7 +628,6 @@ impl MBusProtocol {
     pub fn new() -> Self {
         MBusProtocol::default()
     }
-
 }
 
 /// Handles the processing of M-Bus frames.

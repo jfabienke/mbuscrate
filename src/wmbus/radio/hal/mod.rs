@@ -11,16 +11,16 @@ use thiserror::Error;
 pub enum HalError {
     #[error("SPI communication error")]
     Spi,
-    
+
     #[error("GPIO operation error")]
     Gpio,
-    
+
     #[error("Register access error")]
     Register,
-    
+
     #[error("Timeout waiting for operation")]
     Timeout,
-    
+
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
 }
@@ -55,10 +55,9 @@ pub mod raspberry_pi;
 
 // Re-export enhanced GPIO types
 pub use enhanced_gpio::{
-    EnhancedGpio, EnhancedGpioError, GpioEvent, GpioConfig, 
-    EdgeType, GpioEventType, GpioStats
+    EdgeType, EnhancedGpio, EnhancedGpioError, GpioConfig, GpioEvent, GpioEventType, GpioStats,
 };
 
 // Re-export platform implementations for convenience
 #[cfg(feature = "raspberry-pi")]
-pub use raspberry_pi::{RaspberryPiHal, RaspberryPiHalBuilder, GpioPins};
+pub use raspberry_pi::{GpioPins, RaspberryPiHal, RaspberryPiHalBuilder};

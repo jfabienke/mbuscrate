@@ -1,6 +1,7 @@
 use crate::constants::*;
 use crate::error::MBusError;
 use crate::payload::data_encoding::mbus_data_str_decode;
+use crate::vendors;
 use nom::{bytes::complete::take, number::complete::be_u8, IResult};
 use std::time::SystemTime;
 
@@ -47,7 +48,7 @@ pub struct MBusValueInformationBlock {
 }
 
 /// Represents the value of an M-Bus data record.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MBusRecordValue {
     Numeric(f64),
     String(String),
@@ -483,6 +484,74 @@ pub fn mbus_data_record_append(record: &mut MBusRecord) {
         record.more_records_follow = 1;
     }
     // Additional logic can be added here as needed
+}
+
+/// Parse variable record with vendor extension support
+pub fn parse_variable_record_with_vendor(
+    input: &[u8],
+    manufacturer_id: Option<&str>,
+    registry: Option<&vendors::VendorRegistry>,
+) -> Result<MBusRecord, MBusError> {
+    let mut record = parse_variable_record(input)?;
+
+    // Check for vendor-specific DIF handling (0x0F or 0x1F)
+    if let (Some(mfr_id), Some(reg)) = (manufacturer_id, registry) {
+        if record.drh.dib.dif == 0x0F || record.drh.dib.dif == 0x1F {
+            if let Some(vendor_records) = vendors::dispatch_dif_hook(reg, mfr_id, record.drh.dib.dif, &record.data[..record.data_len])? {
+                // Convert first vendor record to MBusRecord (simplified)
+                if let Some(first) = vendor_records.first() {
+                    record.unit = first.unit.clone();
+                    record.quantity = first.quantity.clone();
+                    record.value = match &first.value {
+                        vendors::VendorVariable::Numeric(n) => MBusRecordValue::Numeric(*n),
+                        vendors::VendorVariable::String(s) => MBusRecordValue::String(s.clone()),
+                        _ => MBusRecordValue::String("Vendor specific".to_string()),
+                    };
+                }
+            }
+        }
+
+        // Check for vendor-specific VIF handling (0x7F or 0xFF)
+        if record.drh.vib.vif == 0x7F || record.drh.vib.vif == 0xFF {
+            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(reg, mfr_id, record.drh.vib.vif, &record.data[..record.data_len])? {
+                record.unit = unit;
+                record.quantity = qty;
+                record.value = match var {
+                    vendors::VendorVariable::Numeric(n) => {
+                        // Apply exponent
+                        let scaled = n * 10_f64.powi(exp as i32);
+                        MBusRecordValue::Numeric(scaled)
+                    },
+                    vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
+                    _ => MBusRecordValue::String("Vendor specific".to_string()),
+                };
+            }
+        }
+
+        // Check for status bits in data (if present)
+        if record.data_len > 0 {
+            // Status byte is often at the end of fixed data structures
+            let status_byte = record.data[record.data_len - 1];
+            if (status_byte & 0xE0) != 0 {  // Check bits [7:5]
+                if let Some(status_vars) = vendors::dispatch_status_hook(reg, mfr_id, status_byte)? {
+                    // Add status to quantity/unit for visibility
+                    let status_str = status_vars.iter()
+                        .filter_map(|v| match v {
+                            vendors::VendorVariable::Boolean(true) => Some("ALARM"),
+                            vendors::VendorVariable::ErrorFlags { flags } if *flags != 0 => Some("ERROR"),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    if !status_str.is_empty() {
+                        record.quantity = format!("{} [{}]", record.quantity, status_str);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(record)
 }
 
 fn parse_variable_data_length(input: u8) -> Result<usize, MBusError> {
