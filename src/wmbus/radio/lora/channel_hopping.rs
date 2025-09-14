@@ -199,7 +199,7 @@ impl ChannelHopper {
 
         // Calculate quality metric (0.0 to 1.0)
         // Better RSSI and success rate = higher quality
-        let rssi_quality = ((rssi + 120) as f32 / 70.0).max(0.0).min(1.0);
+        let rssi_quality = ((rssi + 120) as f32 / 70.0).clamp(0.0, 1.0);
         let success_factor = if success { 1.0 } else { 0.5 };
         let new_quality = rssi_quality * success_factor;
 
@@ -242,7 +242,7 @@ impl ChannelHopper {
 
             // Update quality based on noise floor
             // Lower noise = better quality
-            let noise_quality = ((-noise_floor - 70.0) / 50.0).max(0.0).min(1.0);
+            let noise_quality = ((-noise_floor - 70.0) / 50.0).clamp(0.0, 1.0);
             channel.quality = channel.quality * 0.7 + noise_quality * 0.3;
 
             debug!("Channel {} noise floor: {:.1} dBm, quality: {:.2}",
@@ -305,11 +305,17 @@ mod tests {
     fn test_adaptive_hopping() {
         let mut hopper = ChannelHopper::new_eu868(HoppingStrategy::Adaptive);
 
-        // Update quality for channel 0
-        hopper.update_quality(0, -70, true);  // Good quality
+        // Update quality for multiple channels to ensure channel 0 is best
+        hopper.update_quality(0, -70, true);   // Good quality
         hopper.update_quality(1, -100, false); // Poor quality
+        hopper.update_quality(2, -110, false); // Very poor quality
 
-        // Should prefer channel 0
+        // Update a few more channels to be sure
+        for i in 3..8 {
+            hopper.update_quality(i, -120, false); // Worst quality
+        }
+
+        // Should prefer channel 0 as it has the best quality
         let selected = hopper.next_channel();
         assert_eq!(selected.frequency_hz, EU868_CHANNELS[0].frequency_hz);
     }

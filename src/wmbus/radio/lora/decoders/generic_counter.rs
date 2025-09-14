@@ -195,7 +195,7 @@ impl LoRaPayloadDecoder for GenericCounterDecoder {
 }
 
 /// Specialized decoder for standard pulse counter format
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StandardPulseDecoder;
 
 impl StandardPulseDecoder {
@@ -204,17 +204,8 @@ impl StandardPulseDecoder {
     /// [4-5]: Delta (16-bit LE)
     /// [6]: Status
     /// [7]: Battery %
-    pub fn new() -> GenericCounterDecoder {
-        GenericCounterDecoder {
-            config: GenericCounterConfig {
-                big_endian: false,
-                counter_size: 4,
-                unit: "pulses".to_string(),
-                scale_factor: 1.0,
-                has_timestamp: false,
-                has_battery: true,
-            },
-        }
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -229,7 +220,7 @@ mod tests {
         // Counter = 1000 (little-endian), battery = 75%
         let payload = vec![
             0xE8, 0x03, 0x00, 0x00, // Counter = 1000
-            0x00, 0x0A, // Delta = 10
+            0x0A, 0x00, // Delta = 10 (little-endian)
             0x00, // Status = 0
             75,   // Battery = 75%
         ];
@@ -288,9 +279,9 @@ mod tests {
 
         // Unix timestamp (2024-01-01 00:00:00 = 1704067200)
         let payload = vec![
-            0x00, 0x90, 0x93, 0x65, // Timestamp (LE)
+            0x80, 0x00, 0x92, 0x65, // Timestamp (LE)
             0xE8, 0x03, 0x00, 0x00, // Counter = 1000
-            0x00, 0x0A, // Delta = 10
+            0x0A, 0x00, // Delta = 10 (little-endian)
             0x00, // Status
             90,   // Battery
         ];

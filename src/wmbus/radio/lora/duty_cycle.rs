@@ -195,12 +195,12 @@ impl PowerEstimator {
 
     /// Calculate average current consumption in mA
     fn calculate_average_current(&self) -> f32 {
-        let total_time = Instant::now().duration_since(self.start_time);
-        if total_time.is_zero() {
+        let total_recorded_time = self.sleep_time + self.standby_time + self.rx_time + self.tx_time;
+        if total_recorded_time.is_zero() {
             return 0.0;
         }
 
-        let total_ms = total_time.as_millis() as f32;
+        let total_ms = total_recorded_time.as_millis() as f32;
 
         let sleep_contribution = (self.sleep_time.as_millis() as f32 / total_ms) * self.sleep_current_ma;
         let standby_contribution = (self.standby_time.as_millis() as f32 / total_ms) * self.standby_current_ma;

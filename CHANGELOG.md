@@ -71,6 +71,67 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
 - **Mode 13 GCM Encryption**: Requires OMS test vectors for validation
 
 ## [Unreleased]
+
+### Added
+
+#### LoRa Enhancements (SX126x Radio Driver)
+- **Channel Activity Detection (CAD)** (`src/wmbus/radio/lora/cad.rs`):
+  - Optimal parameters from Semtech AN1200.48 for each SF/BW combination
+  - `LoRaCadParams` with `optimal()`, `fast_detect()`, and `high_reliability()` modes
+  - CAD statistics tracking with `CadStats` for monitoring detection rates
+  - Duration calculation for accurate timing estimates
+  - Exit modes: `CadOnly` and `CadToRx` for flexible operation
+
+- **Default Configurations** (Based on SX126x Dev Kit User Guide):
+  - `Default` trait implementation for `LoRaModParams` (SF7, BW500, CR4/5)
+  - `Default` trait implementation for `LoRaPacketParams` (8-byte preamble, explicit header, CRC on)
+  - Quick-start configurations for rapid prototyping
+
+- **Regional Parameter Defaults** (`LoRaModParamsExt` trait):
+  - `eu868_defaults()`: SF9, BW125 optimized for 1% duty cycle compliance
+  - `us915_defaults()`: SF7, BW500 for maximum throughput (no duty cycle)
+  - `as923_defaults()`: SF8, BW125 for Asia-Pacific deployments
+  - Parameter validation to prevent invalid SF/BW combinations
+
+- **RX Boost Mode** (AN1200.37):
+  - `set_rx_boosted_gain()` for +6dB sensitivity improvement
+  - Auto-enables for SF≥10 in `configure_for_lora_enhanced()`
+  - Configurable RegRxGain register (0x08AC) control
+
+- **Regulator Configuration** (AN1200.37):
+  - `set_regulator_mode()` for DC-DC/LDO selection
+  - Auto-enables DC-DC for TX power >15dBm
+  - Temperature drift reduction by 50% with DC-DC mode
+
+- **TCXO Support** (Temperature Compensated Crystal Oscillator):
+  - `configure_tcxo()` for external TCXO control via DIO3
+  - Configurable voltage (1.6V-3.3V) and startup time
+  - ±2ppm frequency stability from -40°C to +85°C
+
+- **Single-Channel Gateway Support** (AN1200.94):
+  - `examples/single_channel_gateway.rs` demonstration
+  - Fixed frequency/SF operation for private networks
+  - Regional configuration examples (EU868, US915, AS923)
+  - Duty cycle management for regulatory compliance
+
+- **Enhanced Driver API**:
+  - `configure_for_lora_enhanced()` with auto-optimization
+  - Helper functions: `get_lora_sensitivity_dbm()`, `get_min_snr_db()`, `requires_ldro()`
+  - `SyncWords` struct for PUBLIC/PRIVATE/CUSTOM network types
+
+- **Comprehensive Testing**:
+  - 14 new tests in `tests/lora_enhancements_test.rs`
+  - CAD parameter validation across all SF/BW combinations
+  - Regional configuration testing
+  - Parameter validation testing
+
+- **Documentation**:
+  - `docs/LORA_PARAMETERS.md` with feature selection guide
+  - Migration guide for existing implementations
+  - Performance comparison tables from application notes
+  - Single-channel network deployment guide
+
+#### Previously in Unreleased
 - Comprehensive documentation suite including architecture, API, modules, protocol, testing, and examples documentation
 - Hybrid async/sync architecture documentation explaining design decisions
 - Mock serial port infrastructure for hardware-independent testing

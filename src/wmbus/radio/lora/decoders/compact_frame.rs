@@ -206,6 +206,7 @@ mod tests {
             0xE8, 0x03, 0x00, 0x00, // Counter = 1000 (little-endian)
             0x01, 0x00, // Status flags
             85,   // Battery percentage
+            0x00, // Padding to meet 12-byte minimum
         ];
 
         let result = decoder.decode(&payload, 1).unwrap();

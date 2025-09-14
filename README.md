@@ -10,6 +10,7 @@ Connect to electricity, gas, water, and heat meters with confidence—featuring 
 - 🔒 **Secure** - AES-128 encryption (Modes 5/7/9) with proven OMS compliance
 - 🚀 **Async-first** - Built on tokio for concurrent multi-device operations
 - 📡 **Wireless ready** - Native Raspberry Pi support with SX126x radio drivers
+- 🌐 **LoRa optimized** - Advanced CAD, RX Boost (+6dB), and regional configurations
 - 🛠️ **Production proven** - 85% test coverage with extensive real-world testing
 
 ## 🚀 Quick Start
@@ -47,6 +48,7 @@ async fn main() -> Result<(), mbus_rs::MBusError> {
 |---------|--------|-------------|
 | **Wired M-Bus** | ✅ Full EN 13757-2/3 | Auto-baud 300-38400 bps |
 | **Wireless M-Bus** | ✅ S/T/C modes | 868 MHz, <0.9% duty cycle |
+| **LoRa Support** | ✅ SX126x advanced | CAD, RX Boost, regional configs |
 | **Multi-telegram** | ✅ FCB handling | Reassemble 2-10 frames |
 | **Encryption** | ✅ AES-128 CTR/CBC/GCM | <5ms decrypt time |
 | **Device scanning** | ✅ Primary/secondary | 100 devices in <30s |
@@ -85,6 +87,30 @@ radio.configure_for_wmbus(868_950_000, 100_000)?;
 // Listen for wireless frames...
 ```
 
+### Advanced LoRa Configuration
+Leverage optimized LoRa features for better performance:
+
+```rust
+use mbus_rs::wmbus::radio::lora::{LoRaModParams, LoRaCadParams};
+
+// Use regional defaults for quick setup
+let params = LoRaModParams::eu868_defaults(); // Or us915_defaults()
+
+// Configure with auto-optimization (enables RX Boost for SF≥10)
+radio.configure_for_lora_enhanced(
+    868_100_000,           // Frequency
+    SpreadingFactor::SF10, // Auto-enables RX Boost
+    LoRaBandwidth::BW125,
+    CodingRate::CR4_5,
+    14,                    // TX power (dBm)
+    true                   // Auto-optimize
+)?;
+
+// Enable CAD for 50-80% fewer collisions
+let cad_params = LoRaCadParams::optimal(SF10, BW125);
+radio.set_cad_params(cad_params)?;
+```
+
 More examples in [`examples/`](examples/) directory.
 
 ## Standards Compliance
@@ -96,10 +122,43 @@ More examples in [`examples/`](examples/) directory.
 - ✅ OMS v4.0.4: Modes 5/7/9 encryption
 - ✅ Multi-telegram: FCB handling and frame reassembly
 
+## 🌐 LoRa Features
+
+Advanced SX126x radio features based on Semtech application notes:
+
+### Channel Activity Detection (CAD)
+- **50-80% fewer collisions** compared to RSSI-based LBT
+- Optimal parameters from AN1200.48 for each SF/BW combination
+- Fast detect, high reliability, and optimal modes
+- Real-time statistics tracking
+
+### Performance Enhancements
+- **RX Boost Mode**: +6dB sensitivity improvement (auto-enabled for SF≥10)
+- **DC-DC Regulator**: 50% temperature drift reduction for TX >15dBm
+- **TCXO Support**: ±2ppm frequency stability from -40°C to +85°C
+- **LDRO**: Automatic Low Data Rate Optimization for SF11/SF12
+
+### Regional Configurations
+Pre-configured regional defaults for quick deployment:
+- **EU868**: SF9, BW125, 1% duty cycle compliant
+- **US915**: SF7, BW500, maximum throughput
+- **AS923**: SF8, BW125, Asia-Pacific optimized
+- **Custom**: Private network configurations
+
+### Single-Channel Gateway
+Perfect for private metering networks:
+- Fixed frequency/SF operation (no ADR)
+- Example configurations for all regions
+- Duty cycle management
+- See [`examples/single_channel_gateway.rs`](examples/single_channel_gateway.rs)
+
+Full LoRa documentation in [docs/LORA_PARAMETERS.md](docs/LORA_PARAMETERS.md).
+
 ## 📖 Documentation
 
 - [Architecture](ARCHITECTURE.md) - System design and components
 - [API Reference](docs/API.md) - Complete API documentation
+- [LoRa Parameters](docs/LORA_PARAMETERS.md) - Advanced LoRa configuration guide
 - [Raspberry Pi Setup](docs/RASPBERRY_PI_SETUP.md) - Hardware guide
 - [Examples](docs/EXAMPLES.md) - Code samples and patterns
 - [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues

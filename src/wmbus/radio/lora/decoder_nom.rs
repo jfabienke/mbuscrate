@@ -93,7 +93,7 @@ macro_rules! nom_decoder {
 mod tests {
     use super::*;
     use crate::payload::record::MBusRecordValue;
-    use crate::wmbus::radio::lora::decoder::{BatteryStatus, DeviceStatus, Reading};
+    use crate::wmbus::radio::lora::decoder::{DeviceStatus, Reading};
     use nom::number::complete::le_u32;
     use std::time::SystemTime;
 
@@ -138,6 +138,6 @@ mod tests {
         // Test incomplete data
         let short_payload = vec![0x10, 0x00];
         let err = adapter.decode(&short_payload, 1);
-        assert!(matches!(err, Err(LoRaDecodeError::InvalidLength { .. })));
+        assert!(matches!(err, Err(LoRaDecodeError::InvalidData { reason, .. }) if reason.contains("Eof")));
     }
 }

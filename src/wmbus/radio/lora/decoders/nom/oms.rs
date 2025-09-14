@@ -15,6 +15,9 @@ use nom::{
 };
 use std::time::SystemTime;
 
+/// Type alias for OMS header parser result
+type OmsHeaderResult<'a> = IResult<&'a [u8], (u8, u8, u16, u32, u8, OmsMedium, u8, u8)>;
+
 /// OMS version
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OmsVersion {
@@ -92,7 +95,7 @@ pub struct OmsDataRecord {
 }
 
 /// Parse OMS frame header
-pub fn parse_oms_header(input: &[u8]) -> IResult<&[u8], (u8, u8, u16, u32, u8, OmsMedium, u8, u8)> {
+pub fn parse_oms_header(input: &[u8]) -> OmsHeaderResult<'_> {
     let (input, length) = parse_u8(input)?;
     let (input, c_field) = parse_u8(input)?;
     let (input, manufacturer) = le_u16(input)?;

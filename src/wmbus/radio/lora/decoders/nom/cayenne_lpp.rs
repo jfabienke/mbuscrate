@@ -78,9 +78,9 @@ impl CayenneType {
             Self::AnalogInput
             | Self::AnalogOutput
             | Self::Temperature
-            | Self::Humidity
             | Self::Illuminance
             | Self::Direction => 2,
+            Self::Humidity => 1,
             Self::Barometer | Self::Altitude => 2,
             Self::Battery | Self::Voltage | Self::Current | Self::Percentage => 2,
             Self::Frequency | Self::Power => 2,
@@ -526,7 +526,7 @@ mod tests {
 
         let payload = vec![
             0x01, 0x67, 0x01, 0x10, // Temperature: 27.2°C
-            0x02, 0x77, 0x0B, 0xB8, // Battery: 3.0V
+            0x02, 0x77, 0x01, 0x2C, // Battery: 3.0V (300/100)
         ];
 
         let result = decoder.decode(&payload, 1).unwrap();

@@ -5,6 +5,7 @@
 //! for OTAA/ABP handling in non-LoRaWAN metering gateways.
 
 pub mod adr;
+pub mod cad;
 pub mod channel_hopping;
 pub mod class_bc;
 pub mod decoder;
@@ -20,6 +21,7 @@ pub mod single_channel;
 pub mod smart_decoder;
 
 pub use adr::{AdrController, AdrConfig, AdrDecision, AdrReason, SignalMetrics};
+pub use cad::{CadExitMode, CadStats, LoRaCadParams};
 pub use channel_hopping::{ChannelHopper, Channel, HoppingStrategy, ChannelStats};
 pub use class_bc::{ClassBCController, DeviceClass, BeaconConfig, MulticastSession, ClassBCStatus};
 pub use decoder::{
@@ -36,7 +38,7 @@ pub use packet::{
     build_trigger_frame, calc_cumulative_delta, decode_lora_packet, parse_abp_data, parse_otaa_join,
 };
 pub use params::{
-    CodingRate, LoRaBandwidth, LoRaModParams, LoRaPacketParams, SpreadingFactor,
+    CodingRate, LoRaBandwidth, LoRaModParams, LoRaModParamsExt, LoRaPacketParams, SpreadingFactor,
 };
 pub use single_channel::{SingleChannelConfig, DutyCycleLimiter};
 pub use smart_decoder::{DeviceStats, SmartDecoder};

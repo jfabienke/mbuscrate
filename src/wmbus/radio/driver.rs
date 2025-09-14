@@ -1455,12 +1455,19 @@ impl<H: Hal> Sx126xDriver<H> {
         self.set_packet_type(PacketType::LoRa)?;
 
         // Configure LoRa modulation parameters
+        // Per AN1200.22: Enable LDRO for SF11/SF12 when BW <= 125kHz
+        let ldro_needed = matches!(sf, SpreadingFactor::SF11 | SpreadingFactor::SF12)
+            && matches!(bw, LoRaBandwidth::BW7_8 | LoRaBandwidth::BW10_4 |
+                           LoRaBandwidth::BW15_6 | LoRaBandwidth::BW20_8 |
+                           LoRaBandwidth::BW31_2 | LoRaBandwidth::BW41_7 |
+                           LoRaBandwidth::BW62_5 | LoRaBandwidth::BW125);
+
         let mod_params = ModulationParams::LoRa {
             params: LoRaModParams {
                 sf,
                 bw,
                 cr,
-                low_data_rate_optimize: matches!(sf, SpreadingFactor::SF11 | SpreadingFactor::SF12),
+                low_data_rate_optimize: ldro_needed,
             }
         };
         self.set_modulation_params(mod_params)?;
@@ -1539,6 +1546,346 @@ impl<H: Hal> Sx126xDriver<H> {
         self.set_packet_type(PacketType::Gfsk)?;
         log::debug!("Switched to GFSK mode");
         Ok(())
+    }
+
+    // ========================== PERFORMANCE ENHANCEMENT METHODS ==========================
+
+    /// Sets receiver gain mode for improved sensitivity
+    ///
+    /// From SX126x Development Kit User Guide Fig. 12: RxBoost provides +6dB sensitivity
+    /// improvement at the cost of +20mA current consumption (25mA vs 4.6mA).
+    /// Recommended for noisy urban environments or when using SF >= 10.
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - true for boosted gain (+6dB), false for normal gain
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Gain mode set successfully
+    /// * `Err(DriverError)` - Configuration failed
+    pub fn set_rx_boosted_gain(&mut self, enabled: bool) -> Result<(), DriverError> {
+        self.set_standby(StandbyMode::RC)?;
+
+        // RegRxGain (0x08AC): 0x96 for boost, 0x94 for normal
+        let gain_value = if enabled { 0x96 } else { 0x94 };
+        self.hal.write_register(0x08AC, &[gain_value])?;
+
+        log::info!(
+            "RX gain mode: {} ({}mA current)",
+            if enabled { "boosted (+6dB)" } else { "normal" },
+            if enabled { "25" } else { "4.6" }
+        );
+        Ok(())
+    }
+
+    /// Sets regulator mode for optimal power efficiency
+    ///
+    /// From AN1200.37: Use DC-DC regulator for TX power >+15dBm or long packets
+    /// to reduce heat generation and frequency drift by up to 50%.
+    /// LDO mode provides lower noise but higher power consumption.
+    ///
+    /// # Arguments
+    ///
+    /// * `use_dcdc` - true for DC-DC mode (efficient), false for LDO mode (low noise)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Regulator mode set successfully
+    /// * `Err(DriverError)` - Configuration failed
+    pub fn set_regulator_mode(&mut self, use_dcdc: bool) -> Result<(), DriverError> {
+        self.set_standby(StandbyMode::RC)?;
+
+        // SetRegulatorMode command (0x96)
+        let mode = if use_dcdc { 0x01 } else { 0x00 };
+        self.hal.write_command(0x96, &[mode])?;
+
+        log::info!(
+            "Regulator mode: {}",
+            if use_dcdc { "DC-DC (efficient, lower drift)" } else { "LDO (low noise)" }
+        );
+        Ok(())
+    }
+
+    /// Configures external Temperature Compensated Crystal Oscillator (TCXO)
+    ///
+    /// From AN1200.37: TCXO provides frequency stability across -40°C to +85°C
+    /// with typical ±2ppm accuracy. Essential for outdoor/industrial deployments.
+    /// Requires external TCXO hardware connected to DIO3.
+    ///
+    /// # Arguments
+    ///
+    /// * `voltage_mv` - TCXO supply voltage in millivolts (1600-3600mV)
+    /// * `startup_time_us` - TCXO startup time in microseconds (typically 1000-5000µs)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - TCXO configured successfully
+    /// * `Err(DriverError)` - Invalid parameters or configuration failed
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// // Configure for 3.3V TCXO with 1ms startup time
+    /// driver.configure_tcxo(3300, 1000)?;
+    /// ```
+    pub fn configure_tcxo(&mut self, voltage_mv: u16, startup_time_us: u16) -> Result<(), DriverError> {
+        if voltage_mv < 1600 || voltage_mv > 3600 {
+            return Err(DriverError::InvalidParams);
+        }
+
+        self.set_standby(StandbyMode::RC)?;
+
+        // Calculate TCXO trim value (1.6V=0x00, 1.7V=0x01, ... 3.3V=0x07)
+        let trim = ((voltage_mv.saturating_sub(1600)) / 200).min(7) as u8;
+
+        // Convert startup time to 15.625µs units (24-bit value)
+        let delay_units = ((startup_time_us as u32) * 64 / 1000) & 0xFFFFFF;
+
+        let buf = [
+            trim & 0x07,
+            (delay_units >> 16) as u8,
+            (delay_units >> 8) as u8,
+            delay_units as u8,
+        ];
+
+        // SetDio3AsTcxoCtrl command (0x97)
+        self.hal.write_command(0x97, &buf)?;
+
+        log::info!(
+            "TCXO configured: {}mV supply, {}µs startup",
+            voltage_mv, startup_time_us
+        );
+        Ok(())
+    }
+
+    /// Configure LoRa modulation with enhanced features
+    ///
+    /// Combines standard LoRa configuration with optional performance enhancements
+    /// based on Semtech application notes. Automatically enables optimizations
+    /// when `auto_optimize` is true.
+    ///
+    /// # Arguments
+    ///
+    /// * `freq_hz` - RF frequency in Hz
+    /// * `sf` - Spreading Factor (SF5-SF12)
+    /// * `bw` - Bandwidth
+    /// * `cr` - Coding Rate
+    /// * `tx_power_dbm` - Transmit power in dBm
+    /// * `auto_optimize` - Enable automatic optimizations (RX boost for SF>=10, DC-DC for >15dBm)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Configuration successful
+    /// * `Err(DriverError)` - Configuration failed
+    pub fn configure_for_lora_enhanced(
+        &mut self,
+        freq_hz: u32,
+        sf: crate::wmbus::radio::modulation::SpreadingFactor,
+        bw: crate::wmbus::radio::modulation::LoRaBandwidth,
+        cr: crate::wmbus::radio::modulation::CodingRate,
+        tx_power_dbm: i8,
+        auto_optimize: bool,
+    ) -> Result<(), DriverError> {
+        use crate::wmbus::radio::modulation::{ModulationParams, PacketParams, LoRaPacketParams, LoRaModParams};
+
+        // Set packet type to LoRa
+        self.set_packet_type(PacketType::LoRa)?;
+
+        // Configure modulation parameters
+        // Check if LDRO is needed (SF11/SF12 with BW <= 125kHz)
+        let ldro = matches!(sf, crate::wmbus::radio::modulation::SpreadingFactor::SF11 |
+                                crate::wmbus::radio::modulation::SpreadingFactor::SF12)
+            && matches!(bw, crate::wmbus::radio::modulation::LoRaBandwidth::BW7_8 |
+                           crate::wmbus::radio::modulation::LoRaBandwidth::BW10_4 |
+                           crate::wmbus::radio::modulation::LoRaBandwidth::BW15_6 |
+                           crate::wmbus::radio::modulation::LoRaBandwidth::BW20_8 |
+                           crate::wmbus::radio::modulation::LoRaBandwidth::BW31_2 |
+                           crate::wmbus::radio::modulation::LoRaBandwidth::BW41_7 |
+                           crate::wmbus::radio::modulation::LoRaBandwidth::BW62_5 |
+                           crate::wmbus::radio::modulation::LoRaBandwidth::BW125);
+
+        let lora_mod_params = LoRaModParams {
+            sf,
+            bw,
+            cr,
+            low_data_rate_optimize: ldro,
+        };
+        let mod_params = ModulationParams::LoRa {
+            params: lora_mod_params,
+        };
+        self.set_modulation_params(mod_params)?;
+
+        // Configure packet parameters (standard defaults)
+        let lora_packet_params = LoRaPacketParams {
+            preamble_len: 8,
+            implicit_header: false,
+            payload_len: 255,
+            crc_on: true,
+            iq_inverted: false,
+        };
+        let packet_params = PacketParams::LoRa {
+            params: lora_packet_params,
+        };
+        self.set_packet_params(packet_params)?;
+
+        // Set frequency
+        self.set_rf_frequency(freq_hz)?;
+
+        // Set TX power
+        self.set_tx_params(tx_power_dbm, 0x04)?; // 0x04 = 200µs ramp time
+
+        if auto_optimize {
+            // Auto-enable RX boost for long-range SF
+            let rx_boost = sf as u8 >= 10;
+            if rx_boost {
+                self.set_rx_boosted_gain(true)?;
+                log::debug!("Auto-enabled RX boost for SF{}", sf as u8);
+            }
+
+            // Auto-enable DC-DC for high power
+            if tx_power_dbm > 15 {
+                self.set_regulator_mode(true)?;
+                log::debug!("Auto-enabled DC-DC regulator for {}dBm TX power", tx_power_dbm);
+            }
+        }
+
+        log::info!(
+            "LoRa configured: {:.3}MHz, SF{}, BW{:?}, CR{:?}, {}dBm{}",
+            freq_hz as f64 / 1_000_000.0,
+            sf as u8,
+            bw,
+            cr,
+            tx_power_dbm,
+            if auto_optimize { " (optimized)" } else { "" }
+        );
+
+        Ok(())
+    }
+
+    // ========================== CAD (CHANNEL ACTIVITY DETECTION) METHODS ==========================
+
+    /// Sets Channel Activity Detection parameters
+    ///
+    /// From AN1200.48: CAD provides 50-80% better detection accuracy than RSSI
+    /// for LoRa signals with typical detection time of 1-2ms.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - CAD configuration parameters
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - CAD parameters set successfully
+    /// * `Err(DriverError)` - Configuration failed
+    pub fn set_cad_params(&mut self, params: &crate::wmbus::radio::lora::LoRaCadParams) -> Result<(), DriverError> {
+        self.set_standby(StandbyMode::RC)?;
+
+        // SetCadParams command (0x88)
+        // Format: SymbolNum(1), DetPeak(1), DetMin(1), ExitMode(1), Timeout(3)
+        let buf = [
+            params.symbol_num,
+            params.det_peak,
+            params.det_min,
+            params.exit_mode as u8,
+            0x00, 0x00, 0x00,  // 24-bit timeout (0 = indefinite)
+        ];
+
+        self.hal.write_command(0x88, &buf)?;
+
+        log::debug!(
+            "CAD configured: {} symbols, peak={}, min={}, mode={:?}",
+            params.symbol_num, params.det_peak, params.det_min, params.exit_mode
+        );
+        Ok(())
+    }
+
+    /// Performs Channel Activity Detection
+    ///
+    /// Executes a single CAD operation to detect LoRa signals on the current
+    /// frequency. Returns whether activity was detected.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` - LoRa activity detected
+    /// * `Ok(false)` - No activity detected (channel clear)
+    /// * `Err(DriverError)` - CAD operation failed
+    pub fn perform_cad(&mut self) -> Result<bool, DriverError> {
+        // Start CAD operation (0xC5)
+        self.hal.write_command(0xC5, &[])?;
+
+        // Wait for CAD completion (typical 1-10ms depending on symbols)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+
+        loop {
+            let irq_status = self.get_irq_status()?;
+
+            if irq_status.cad_done() {
+                let detected = irq_status.cad_detected();
+                self.clear_irq_status(0x0180)?; // Clear CAD bits (7 and 8)
+
+                log::debug!(
+                    "CAD complete: {} ({}ms)",
+                    if detected { "activity detected" } else { "channel clear" },
+                    start.elapsed().as_millis()
+                );
+                return Ok(detected);
+            }
+
+            if start.elapsed() > timeout {
+                return Err(DriverError::Timeout);
+            }
+
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+    }
+
+    /// Performs CAD-based Listen Before Talk
+    ///
+    /// Uses optimal CAD parameters for the given SF/BW combination to check
+    /// for channel activity before transmission. Provides 50-80% better
+    /// accuracy than RSSI-based LBT with faster detection time.
+    ///
+    /// # Arguments
+    ///
+    /// * `sf` - Spreading Factor
+    /// * `bw` - Bandwidth
+    /// * `retries` - Number of CAD attempts if activity detected
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` - Channel is clear for transmission
+    /// * `Ok(false)` - Channel is busy
+    /// * `Err(DriverError)` - LBT check failed
+    pub fn cad_lbt(
+        &mut self,
+        sf: crate::wmbus::radio::modulation::SpreadingFactor,
+        bw: crate::wmbus::radio::modulation::LoRaBandwidth,
+        retries: u8,
+    ) -> Result<bool, DriverError> {
+        use crate::wmbus::radio::lora::LoRaCadParams;
+
+        // Use optimal CAD parameters from AN1200.48
+        let cad_params = LoRaCadParams::optimal(sf, bw);
+        self.set_cad_params(&cad_params)?;
+
+        // Perform CAD with retries
+        for attempt in 0..=retries {
+            if !self.perform_cad()? {
+                // Channel clear
+                return Ok(true);
+            }
+
+            if attempt < retries {
+                log::debug!("CAD detected activity, retry {}/{}", attempt + 1, retries);
+                // Wait before retry (backoff)
+                std::thread::sleep(std::time::Duration::from_millis(10 * (attempt as u64 + 1)));
+            }
+        }
+
+        log::debug!("Channel busy after {} CAD attempts", retries + 1);
+        Ok(false)
     }
 }
 

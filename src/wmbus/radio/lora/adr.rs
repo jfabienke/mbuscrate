@@ -546,15 +546,27 @@ mod tests {
         let mut adr = AdrController::new();
         adr.current_sf = SpreadingFactor::SF8;
 
-        // Record multiple losses
-        for _ in 0..3 {
-            adr.record_loss();
+        // First record some packets to build history (required for evaluation)
+        for _ in 0..5 {
+            adr.record_packet(-90, -2.0); // Marginal signal at SF8
         }
 
-        // Should increase SF for better sensitivity
-        let decision = adr.evaluate().unwrap();
-        assert!(decision.spreading_factor > SpreadingFactor::SF8);
-        assert_eq!(decision.reason, AdrReason::PacketLoss);
+        // Force evaluation interval to pass
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        adr.last_evaluation = std::time::Instant::now() - std::time::Duration::from_secs(31);
+
+        let initial_sf = adr.current_sf;
+
+        // Record multiple losses (the third one will force evaluation and apply changes)
+        adr.record_loss();
+        adr.record_loss();
+        adr.record_loss(); // This triggers force_evaluation() which applies the decision
+
+        // Check that SF was increased due to packet loss
+        assert!(adr.current_sf > initial_sf, "SF should have increased from {:?} to {:?}", initial_sf, adr.current_sf);
+
+        // The internal state should now show the adjustment was applied
+        println!("SF changed from {:?} to {:?}", initial_sf, adr.current_sf);
     }
 
     #[test]

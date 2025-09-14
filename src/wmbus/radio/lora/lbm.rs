@@ -320,7 +320,7 @@ impl LbmCore {
     pub async fn update_node(&self, address: String, rssi: i16, is_gateway: bool) {
         let mut nodes = self.nodes.write().await;
 
-        let link_quality = ((rssi + 120) as f32 / 70.0).max(0.0).min(1.0);
+        let link_quality = ((rssi + 120) as f32 / 70.0).clamp(0.0, 1.0);
 
         nodes.entry(address.clone())
             .and_modify(|info| {

@@ -91,7 +91,7 @@ impl DraginoDecoder {
                         name: "LeakTimes".to_string(),
                         offset: 3,
                         size: 2,
-                        unit: None,
+                        unit: Some("count".to_string()),
                         scale: 1.0,
                     },
                     DraginoField {

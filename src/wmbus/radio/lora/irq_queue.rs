@@ -162,10 +162,6 @@ impl IrqEventQueue {
         }
     }
 
-    /// Create a new IRQ event queue with default capacity
-    pub fn default() -> Self {
-        Self::new(64)  // Default to 64 events queue depth
-    }
 
     /// Queue an IRQ event for processing
     ///
@@ -377,9 +373,16 @@ pub async fn irq_processor_task<F>(
     debug!("IRQ processor task stopped");
 }
 
+impl Default for IrqEventQueue {
+    fn default() -> Self {
+        Self::new(64)  // Default to 64 events queue depth
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wmbus::radio::irq::IrqMaskBit;
 
     #[tokio::test]
     async fn test_event_queue_basic() {
