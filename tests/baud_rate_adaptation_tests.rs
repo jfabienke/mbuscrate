@@ -115,8 +115,7 @@ fn test_standards_compliance() {
     for expected in &expected_rates {
         assert!(
             actual_rates.contains(expected),
-            "Missing standard baud rate: {}",
-            expected
+            "Missing standard baud rate: {expected}"
         );
     }
 }

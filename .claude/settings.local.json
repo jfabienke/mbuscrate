@@ -57,9 +57,21 @@
       "Bash(mv:*)",
       "Bash(do grep -q \"fn clone_box\" \"/Users/jvindahl/Development/mbuscrate/src/wmbus/radio/lora/decoders/$file.rs\")",
       "Bash(do grep -q \"fn clone_box\" \"/Users/jvindahl/Development/mbuscrate/src/wmbus/radio/lora/decoders/nom/$file.rs\")",
-      "Bash(cargo fix:*)"
+      "Bash(cargo fix:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test --lib wmbus::radio::lora::decoders::nom::cayenne_lpp::tests::test_parse_multiple_sensors -- --nocapture)",
+      "Bash(RUST_BACKTRACE=1 cargo test --lib wmbus::radio::lora::decoders::dragino::tests::test_lwl03a_leak_detected -- --nocapture)",
+      "Bash(RUST_BACKTRACE=1 cargo test --lib wmbus::radio::lora::decoder_nom::tests::test_nom_adapter -- --nocapture)",
+      "Bash(RUST_BACKTRACE=1 cargo test --lib wmbus::radio::lora::format_detector::tests::test_cayenne_detection -- --nocapture)",
+      "Bash(RUST_BACKTRACE=1 cargo test --lib wmbus::radio::lora::format_detector::tests::test_oms_detection -- --nocapture)",
+      "Bash(RUST_BACKTRACE=1 cargo test --lib instrumentation::stats::tests::test_success_rate -- --nocapture)",
+      "Bash(RUST_BACKTRACE=1 cargo test --test lora_enhancements_test -- --nocapture)",
+      "Bash(cargo bench:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test --lib test_qundis_date_g_decoding -- --nocapture)"
     ],
     "deny": [],
-    "ask": []
+    "ask": [],
+    "additionalDirectories": [
+      "/Users/jvindahl/Development/epulse"
+    ]
   }
 }

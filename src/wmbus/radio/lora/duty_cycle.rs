@@ -161,7 +161,7 @@ struct PowerEstimator {
     tx_time: Duration,
 
     /// Tracking start time
-    start_time: Instant,
+    _start_time: Instant,
 }
 
 impl PowerEstimator {
@@ -178,7 +178,7 @@ impl PowerEstimator {
             rx_time: Duration::ZERO,
             tx_time: Duration::ZERO,
 
-            start_time: Instant::now(),
+            _start_time: Instant::now(),
         }
     }
 

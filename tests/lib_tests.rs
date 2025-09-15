@@ -19,7 +19,7 @@ async fn test_connect_and_disconnect() -> Result<(), MBusError> {
             // Expected error for invalid port
         }
         Err(other) => {
-            panic!("Unexpected error type: {:?}", other);
+            panic!("Unexpected error type: {other:?}");
         }
         Ok(_) => {
             panic!("Connect should have failed with dummy port");

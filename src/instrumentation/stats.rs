@@ -193,11 +193,8 @@ impl DeviceStats {
         if let Some(&threshold) = self.alert_thresholds.get(&error_type) {
             if rate > threshold {
                 log::warn!(
-                    "Device {} exceeds {} error threshold: {:.1}/min (threshold: {:.1})",
+                    "Device {} exceeds {error_type:?} error threshold: {rate:.1}/min (threshold: {threshold:.1})",
                     self.device_id,
-                    format!("{:?}", error_type),
-                    rate,
-                    threshold
                 );
             }
         }
@@ -571,13 +568,15 @@ mod tests {
 
         assert_eq!(stats.get_success_rate(), 100.0); // No data yet
 
-        stats.increment_received();
-        stats.increment_received();
-        stats.increment_success();
+        stats.increment_received(); // Frame 1: received but failed
+        stats.increment_received(); // Frame 2: received but failed
+        stats.increment_success();  // Frame 3: received and successful
 
-        assert_eq!(stats.frames_received, 2);
-        assert_eq!(stats.frames_valid, 1);
-        assert_eq!(stats.get_success_rate(), 50.0);
+        assert_eq!(stats.frames_received, 3); // 2 failed + 1 successful
+        assert_eq!(stats.frames_valid, 1);    // 1 successful
+
+        let success_rate = stats.get_success_rate();
+        assert!((success_rate - 33.333333).abs() < 0.001, "Success rate should be ~33.33%, got {}", success_rate);
     }
 
     #[test]

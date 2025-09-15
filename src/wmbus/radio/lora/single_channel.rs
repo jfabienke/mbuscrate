@@ -184,9 +184,9 @@ impl SingleChannelConfig {
         let de = if ldro_enabled { 1 } else { 0 };
         let crc = if crc_on { 1 } else { 0 };
 
-        let payload_symb_nb = 8.0 + ((8 * payload_bytes as i32 - 4 * sf as i32
+        let payload_symb_nb = 8.0 + ((8 * payload_bytes as i32 - 4 * sf
             + 28 + 16 * crc - 20 * h) as f32
-            / (4 * (sf as i32 - 2 * de)) as f32).ceil() as f32
+            / (4 * (sf - 2 * de)) as f32).ceil()
             * (cr + 4) as f32;
 
         let payload_symb_nb = payload_symb_nb.max(0.0);

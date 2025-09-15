@@ -289,16 +289,15 @@ pub fn parse_secondary_from_frame_data(data: &[u8]) -> IResult<&[u8], SecondaryA
 /// Build M-Bus frame for secondary address selection
 /// Uses primary address 0xFD and CI field 0x52 for SND_UD command
 pub fn build_secondary_selection_frame(secondary_pattern: &[u8; 8]) -> Vec<u8> {
-    let mut frame = Vec::new();
-
-    // M-Bus Long Frame format with secondary addressing
-    frame.push(0x68); // Start byte 1
-    frame.push(0x0B); // L field (11 bytes: C + A + CI + 8 bytes secondary)
-    frame.push(0x0B); // L field (repeated)
-    frame.push(0x68); // Start byte 2
-    frame.push(0x53); // C field: SND_UD (Send User Data)
-    frame.push(0xFD); // A field: 253 (secondary addressing indicator)
-    frame.push(0x52); // CI field: Secondary addressing selection
+    let mut frame = vec![
+        0x68, // Start byte 1
+        0x0B, // L field (11 bytes: C + A + CI + 8 bytes secondary)
+        0x0B, // L field (repeated)
+        0x68, // Start byte 2
+        0x53, // C field: SND_UD (Send User Data)
+        0xFD, // A field: 253 (secondary addressing indicator)
+        0x52, // CI field: Secondary addressing selection
+    ];
 
     // 8-byte secondary address pattern (with wildcards)
     frame.extend_from_slice(secondary_pattern);
@@ -345,9 +344,8 @@ pub fn build_vif_search_frame(search_type: VifSearchType, pattern: &[u8]) -> Vec
     } else {
         frame.extend_from_slice(pattern);
         // Pad with wildcards (0xFF)
-        for _ in pattern.len()..pattern_len {
-            frame.push(0xFF);
-        }
+        let wildcards_needed = pattern_len - pattern.len();
+        frame.extend(std::iter::repeat_n(0xFF, wildcards_needed));
     }
 
     // Calculate checksum

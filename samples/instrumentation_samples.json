@@ -1,0 +1,525 @@
+{
+  "comment": "Instrumentation samples with dual-path separation (v2)",
+  "timestamp": "2024-01-15T14:30:00Z",
+
+  "metering_reports": [
+    {
+      "comment": "Clean metering data - only valid readings for business use",
+      "device_id": "12345678",
+      "manufacturer": "KAM",
+      "device_type": "WaterMeter",
+      "timestamp": "2024-01-15T14:30:00Z",
+      "readings": [
+        {
+          "name": "Volume",
+          "value": 1234.567,
+          "unit": "m³",
+          "timestamp": "2024-01-15T14:30:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Flow Rate",
+          "value": 0.125,
+          "unit": "m³/h",
+          "timestamp": "2024-01-15T14:30:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Temperature",
+          "value": 18.5,
+          "unit": "°C",
+          "timestamp": "2024-01-15T14:30:00Z",
+          "quality": "Good"
+        }
+      ]
+    },
+    {
+      "comment": "Heat meter - clean data only",
+      "device_id": "87654321",
+      "manufacturer": "ELS",
+      "device_type": "HeatMeter",
+      "timestamp": "2024-01-15T14:31:00Z",
+      "readings": [
+        {
+          "name": "Energy",
+          "value": 15678.9,
+          "unit": "kWh",
+          "timestamp": "2024-01-15T14:31:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Power",
+          "value": 12.5,
+          "unit": "kW",
+          "timestamp": "2024-01-15T14:31:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Flow Temperature",
+          "value": 65.2,
+          "unit": "°C",
+          "timestamp": "2024-01-15T14:31:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Return Temperature",
+          "value": 45.8,
+          "unit": "°C",
+          "timestamp": "2024-01-15T14:31:00Z",
+          "quality": "Good"
+        }
+      ]
+    }
+  ],
+
+  "instrumentation_reports": [
+    {
+      "comment": "Full instrumentation with diagnostics - Kamstrup MULTICAL 21",
+      "device_id": "12345678",
+      "manufacturer": "KAM",
+      "protocol": "WMBusMode(T1)",
+      "device_type": "WaterMeter",
+      "model": "MULTICAL 21",
+      "version": "1.5",
+      "timestamp": "2024-01-15T14:30:00Z",
+      "readings": [
+        {
+          "name": "Volume",
+          "value": 1234.567,
+          "unit": "m³",
+          "timestamp": "2024-01-15T14:30:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Flow Rate",
+          "value": 0.125,
+          "unit": "m³/h",
+          "timestamp": "2024-01-15T14:30:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Temperature",
+          "value": 18.5,
+          "unit": "°C",
+          "timestamp": "2024-01-15T14:30:00Z",
+          "quality": "Good"
+        }
+      ],
+      "bad_readings": null,
+      "battery_status": {
+        "voltage": 3.0,
+        "percentage": 75,
+        "low_battery": false,
+        "estimated_days_remaining": 1825
+      },
+      "device_status": {
+        "alarm": false,
+        "tamper": false,
+        "leak_detected": false,
+        "reverse_flow": false,
+        "burst_detected": false,
+        "dry_running": false,
+        "error_code": null
+      },
+      "radio_metrics": {
+        "rssi_dbm": -72,
+        "snr_db": null,
+        "frequency_hz": 868950000,
+        "spreading_factor": null,
+        "bandwidth_khz": null,
+        "packet_counter": 4567
+      },
+      "frame_statistics": {
+        "frames_received": 4567,
+        "frames_valid": 4560,
+        "crc_errors": 7,
+        "success_rate": 99.85
+      }
+    },
+    {
+      "comment": "Engelmann SensoStar with sensor failure",
+      "device_id": "87654321",
+      "manufacturer": "ELS",
+      "protocol": "MBusWired",
+      "device_type": "HeatMeter",
+      "model": "SensoStar",
+      "version": "2.1",
+      "timestamp": "2024-01-15T14:31:00Z",
+      "readings": [
+        {
+          "name": "Energy",
+          "value": 15678.9,
+          "unit": "kWh",
+          "timestamp": "2024-01-15T14:31:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Power",
+          "value": 12.5,
+          "unit": "kW",
+          "timestamp": "2024-01-15T14:31:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Flow Temperature",
+          "value": 65.2,
+          "unit": "°C",
+          "timestamp": "2024-01-15T14:31:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Return Temperature",
+          "value": 45.8,
+          "unit": "°C",
+          "timestamp": "2024-01-15T14:31:00Z",
+          "quality": "Good"
+        }
+      ],
+      "bad_readings": [
+        {
+          "name": "Secondary Temperature",
+          "value": 250.0,
+          "unit": "°C",
+          "timestamp": "2024-01-15T14:31:00Z",
+          "quality": "Invalid",
+          "comment": "Out of bounds - sensor failure"
+        },
+        {
+          "name": "Backup Flow Rate",
+          "value": -5.0,
+          "unit": "m³/h",
+          "timestamp": "2024-01-15T14:31:00Z",
+          "quality": "Invalid",
+          "comment": "Negative flow - sensor malfunction"
+        }
+      ],
+      "device_status": {
+        "alarm": true,
+        "tamper": false,
+        "leak_detected": false,
+        "reverse_flow": false,
+        "burst_detected": false,
+        "dry_running": false,
+        "error_code": 0x02,
+        "error_description": "Temperature sensor 2 failure"
+      },
+      "frame_statistics": {
+        "frames_received": 12890,
+        "frames_valid": 12889,
+        "crc_errors": 1,
+        "parsing_errors": 2,
+        "success_rate": 99.98
+      }
+    },
+    {
+      "comment": "LoRa Leak Sensor - Dragino LWL03A with active leak",
+      "device_id": "lora_device_001",
+      "manufacturer": "Dragino",
+      "protocol": "LoRa",
+      "device_type": "LeakSensor",
+      "model": "LWL03A",
+      "timestamp": "2024-01-15T14:32:00Z",
+      "readings": [
+        {
+          "name": "Event Count",
+          "value": 3,
+          "unit": "count",
+          "timestamp": "2024-01-15T14:32:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Duration",
+          "value": 45,
+          "unit": "min",
+          "timestamp": "2024-01-15T14:32:00Z",
+          "quality": "Good"
+        }
+      ],
+      "bad_readings": null,
+      "battery_status": {
+        "voltage": 2.85,
+        "percentage": 62,
+        "low_battery": false
+      },
+      "device_status": {
+        "alarm": true,
+        "tamper": false,
+        "leak_detected": true,
+        "reverse_flow": false,
+        "burst_detected": false,
+        "dry_running": false,
+        "error_code": null,
+        "error_description": "Active leak detected"
+      },
+      "radio_metrics": {
+        "rssi_dbm": -95,
+        "snr_db": 7.5,
+        "frequency_hz": 868100000,
+        "spreading_factor": 10,
+        "bandwidth_khz": 125,
+        "packet_counter": 156
+      }
+    },
+    {
+      "comment": "Electricity meter with data corruption",
+      "device_id": "98765432",
+      "manufacturer": "ELV",
+      "protocol": "WMBusMode(C1)",
+      "device_type": "ElectricityMeter",
+      "model": "AS3000",
+      "version": "3.0",
+      "timestamp": "2024-01-15T14:33:00Z",
+      "readings": [
+        {
+          "name": "Active Energy Import",
+          "value": 45678.123,
+          "unit": "kWh",
+          "timestamp": "2024-01-15T14:33:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Active Power",
+          "value": 3.456,
+          "unit": "kW",
+          "timestamp": "2024-01-15T14:33:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Voltage L1",
+          "value": 231.5,
+          "unit": "V",
+          "timestamp": "2024-01-15T14:33:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Power Factor",
+          "value": 0.98,
+          "unit": "",
+          "timestamp": "2024-01-15T14:33:00Z",
+          "quality": "Good"
+        }
+      ],
+      "bad_readings": [
+        {
+          "name": "Active Energy Export",
+          "value": -1234.567,
+          "unit": "kWh",
+          "timestamp": "2024-01-15T14:33:00Z",
+          "quality": "Invalid",
+          "comment": "Negative energy - data corruption"
+        },
+        {
+          "name": "Current L1",
+          "value": null,
+          "unit": "A",
+          "timestamp": "2024-01-15T14:33:00Z",
+          "quality": "Invalid",
+          "comment": "NaN value - sensor read error"
+        },
+        {
+          "name": "Frequency",
+          "value": 500.0,
+          "unit": "Hz",
+          "timestamp": "2024-01-15T14:33:00Z",
+          "quality": "Invalid",
+          "comment": "Out of bounds - expected 50Hz"
+        }
+      ],
+      "device_status": {
+        "alarm": true,
+        "tamper": false,
+        "leak_detected": false,
+        "reverse_flow": false,
+        "burst_detected": false,
+        "dry_running": false,
+        "error_code": 0x10,
+        "error_description": "Data integrity error detected"
+      },
+      "radio_metrics": {
+        "rssi_dbm": -68,
+        "frequency_hz": 869525000,
+        "packet_counter": 23456
+      },
+      "frame_statistics": {
+        "frames_received": 23456,
+        "frames_valid": 23450,
+        "crc_errors": 6,
+        "decryption_errors": 3,
+        "parsing_errors": 5,
+        "success_rate": 99.94
+      }
+    },
+    {
+      "comment": "Gas meter with tamper detection",
+      "device_id": "11223344",
+      "manufacturer": "SEN",
+      "protocol": "MBusWired",
+      "device_type": "GasMeter",
+      "model": "SENSUS 620",
+      "version": "1.8",
+      "timestamp": "2024-01-15T14:34:00Z",
+      "readings": [
+        {
+          "name": "Volume",
+          "value": 8765.432,
+          "unit": "m³",
+          "timestamp": "2024-01-15T14:34:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Volume at Base Conditions",
+          "value": 9102.345,
+          "unit": "m³",
+          "timestamp": "2024-01-15T14:34:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Flow Rate",
+          "value": 2.34,
+          "unit": "m³/h",
+          "timestamp": "2024-01-15T14:34:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Temperature",
+          "value": 15.2,
+          "unit": "°C",
+          "timestamp": "2024-01-15T14:34:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Pressure",
+          "value": 1.021,
+          "unit": "bar",
+          "timestamp": "2024-01-15T14:34:00Z",
+          "quality": "Good"
+        }
+      ],
+      "bad_readings": null,
+      "device_status": {
+        "alarm": false,
+        "tamper": true,
+        "leak_detected": false,
+        "reverse_flow": false,
+        "burst_detected": false,
+        "dry_running": false,
+        "error_code": 0x02,
+        "error_description": "Tamper detection - enclosure opened"
+      },
+      "frame_statistics": {
+        "frames_received": 87650,
+        "frames_valid": 87649,
+        "crc_errors": 1,
+        "success_rate": 99.99
+      }
+    },
+    {
+      "comment": "LoRa Environmental Sensor with mixed quality",
+      "device_id": "lora_env_42",
+      "manufacturer": "Unknown",
+      "protocol": "LoRa",
+      "device_type": "EnvironmentalSensor",
+      "timestamp": "2024-01-15T14:35:00Z",
+      "readings": [
+        {
+          "name": "Temperature",
+          "value": 22.5,
+          "unit": "°C",
+          "timestamp": "2024-01-15T14:35:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Humidity",
+          "value": 65.0,
+          "unit": "%",
+          "timestamp": "2024-01-15T14:35:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Pressure",
+          "value": 1013.25,
+          "unit": "hPa",
+          "timestamp": "2024-01-15T14:35:00Z",
+          "quality": "Good"
+        },
+        {
+          "name": "Illuminance",
+          "value": 850,
+          "unit": "lux",
+          "timestamp": "2024-01-15T14:35:00Z",
+          "quality": "Good"
+        }
+      ],
+      "bad_readings": [
+        {
+          "name": "CO2",
+          "value": -425,
+          "unit": "ppm",
+          "timestamp": "2024-01-15T14:35:00Z",
+          "quality": "Invalid",
+          "comment": "Negative CO2 - sensor error"
+        },
+        {
+          "name": "Temperature 2",
+          "value": 180.0,
+          "unit": "°C",
+          "timestamp": "2024-01-15T14:35:00Z",
+          "quality": "Invalid",
+          "comment": "Out of bounds"
+        }
+      ],
+      "battery_status": {
+        "voltage": 3.3,
+        "percentage": 85,
+        "low_battery": false
+      },
+      "device_status": {
+        "alarm": false,
+        "tamper": false,
+        "leak_detected": false,
+        "reverse_flow": false,
+        "burst_detected": false,
+        "dry_running": false,
+        "error_code": 0x08,
+        "error_description": "Sensor calibration needed"
+      },
+      "radio_metrics": {
+        "rssi_dbm": -82,
+        "snr_db": 10.2,
+        "frequency_hz": 868300000,
+        "spreading_factor": 7,
+        "bandwidth_khz": 125,
+        "packet_counter": 8901
+      }
+    }
+  ],
+
+  "csv_export_example": {
+    "comment": "Example CSV output from MeteringReport",
+    "device_id": "12345678",
+    "csv_content": "timestamp,device_id,manufacturer,reading_name,value,unit\n1705327800,12345678,KAM,Volume,1234.567,m³\n1705327800,12345678,KAM,Flow Rate,0.125,m³/h\n1705327800,12345678,KAM,Temperature,18.5,°C"
+  },
+
+  "summary": {
+    "total_devices": 6,
+    "metering_reports": {
+      "count": 2,
+      "total_good_readings": 7,
+      "description": "Clean data for business analytics"
+    },
+    "instrumentation_reports": {
+      "count": 6,
+      "total_good_readings": 29,
+      "total_bad_readings": 8,
+      "devices_with_errors": 4,
+      "description": "Full diagnostics including errors"
+    },
+    "benefits": [
+      "Clean metering path prevents noisy data in production",
+      "Bad readings preserved for troubleshooting",
+      "Device health metrics separate from business data",
+      "CSV export for time-series databases",
+      "JSON export for modern APIs"
+    ]
+  }
+}

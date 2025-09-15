@@ -81,14 +81,13 @@ fn test_wired_basic_long_frame() {
 
     match result {
         Ok((remaining, frame)) => {
-            println!("Remaining bytes after parse: {:02X?}", remaining);
+            println!("Remaining bytes after parse: {remaining:02X?}");
             println!("Frame type: {:?}", frame.frame_type);
             println!("Frame data length: {}", frame.data.len());
             // The parser should now consume the stop byte (0x16)
             assert!(
                 remaining.is_empty(),
-                "Frame not fully consumed, remaining: {:02X?}",
-                remaining
+                "Frame not fully consumed, remaining: {remaining:02X?}"
             );
             assert_eq!(frame.frame_type, MBusFrameType::Long);
             assert_eq!(frame.control, 0x08); // RSP_UD
@@ -126,7 +125,7 @@ fn test_wired_basic_long_frame() {
 
             assert_eq!(frame.checksum, 0x3C);
         }
-        Err(e) => panic!("Failed to parse basic long frame: {:?}", e),
+        Err(e) => panic!("Failed to parse basic long frame: {e:?}"),
     }
 }
 
@@ -170,14 +169,14 @@ fn test_wired_variable_data_block() {
 
             println!("Variable data block frame data: {:02X?}", frame.data);
         }
-        Err(e) => panic!("Failed to parse variable data block: {:?}", e),
+        Err(e) => panic!("Failed to parse variable data block: {e:?}"),
     }
 }
 
 #[test]
 fn test_wired_secondary_addressing() {
     let bytes = hex_to_bytes(WIRED_SECONDARY_ADDRESSING);
-    println!("Secondary addressing frame bytes: {:02X?}", bytes);
+    println!("Secondary addressing frame bytes: {bytes:02X?}");
     let result: IResult<&[u8], MBusFrame> = parse_frame(&bytes);
 
     match result {
@@ -201,7 +200,7 @@ fn test_wired_secondary_addressing() {
 
             assert_eq!(frame.checksum, 0x4C);
         }
-        Err(e) => panic!("Failed to parse secondary addressing frame: {:?}", e),
+        Err(e) => panic!("Failed to parse secondary addressing frame: {e:?}"),
     }
 }
 
@@ -224,7 +223,7 @@ fn test_wired_wildcard_secondary() {
                 "Wildcard pattern"
             );
         }
-        Err(e) => panic!("Failed to parse wildcard secondary frame: {:?}", e),
+        Err(e) => panic!("Failed to parse wildcard secondary frame: {e:?}"),
     }
 }
 
@@ -235,7 +234,7 @@ fn test_wired_wildcard_secondary() {
 #[ignore] // Will be enabled once wireless parsing is implemented
 fn test_wmbus_type_a_multiblock() {
     let bytes = hex_to_bytes(WMBUS_TYPE_A_MULTIBLOCK);
-    println!("Type A Multi-block frame bytes: {:02X?}", bytes);
+    println!("Type A Multi-block frame bytes: {bytes:02X?}");
 
     // Expected behavior:
     // - L-field = 0x1D (29 bytes user data excluding CRCs)
@@ -248,7 +247,7 @@ fn test_wmbus_type_a_multiblock() {
 #[ignore] // Will be enabled once wireless parsing is implemented
 fn test_wmbus_compact_frame() {
     let bytes = hex_to_bytes(WMBUS_COMPACT_FRAME);
-    println!("Compact frame bytes: {:02X?}", bytes);
+    println!("Compact frame bytes: {bytes:02X?}");
 
     // Expected behavior:
     // - CI = 0x79 indicates compact frame
@@ -289,7 +288,7 @@ fn validate_crc16(data: &[u8], expected: u16, complement: bool) -> bool {
 #[test]
 fn test_checksum_calculation() {
     // Test with known frame segment
-    let data = vec![0x08, 0x05, 0x73]; // C + A + CI from basic frame
+    let data = [0x08, 0x05, 0x73]; // C + A + CI from basic frame
     let checksum = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
     assert_eq!(checksum, 0x80);
 }
@@ -299,7 +298,7 @@ fn test_crc16_calculation() {
     // Test CRC16 with known data
     let data = vec![0x12, 0x34, 0x56, 0x78];
     let crc = validate_crc16(&data, 0x1234, false); // Placeholder expected value
-    println!("CRC16 test result: {}", crc);
+    println!("CRC16 test result: {crc}");
 }
 
 // ================================================================================

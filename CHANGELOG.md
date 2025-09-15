@@ -74,6 +74,53 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
 
 ### Added
 
+#### Crypto Security Enhancements
+- CMAC, HMAC, and SHA1 support for advanced wM-Bus encryption (preparing for Mode 13 TLS)
+- Expanded `crypto` feature flag to include new cryptographic primitives
+- New `crypto_benchmark.rs` for performance testing of encryption operations
+
+#### Instrumentation Improvements
+- Split good/bad readings in converters with `bad_readings` field
+- New `MeteringReport` type for clean, validated metering data
+- Instrumentation-only mode for diagnostic reporting without good readings
+- `validate_reading()` function for reading quality checks
+
+#### SIMD/NEON Optimizations (Raspberry Pi 4/5 Support)
+- **ARM NEON CRC Implementation** (`src/wmbus/simd_crc.rs`):
+  - Complete NEON-optimized CRC with correct wM-Bus polynomial (0x8408)
+  - `calculate_crc_table_neon()` using NEON vector loads for efficient table lookups
+  - `calculate_block_crc_neon()` with vectorized processing for multi-block frames
+  - Fixed ARM CRC32 instruction polynomial mismatch via optimized table approach
+- **ARM NEON Checksum** (`src/mbus/simd.rs`):
+  - 64-byte chunk processing optimized for Cortex-A72 (Pi 4) and Cortex-A76 (Pi 5) cache lines
+  - 4x16 byte unrolled loops for maximum throughput
+  - Runtime CPU feature detection with automatic NEON enablement
+- **Raspberry Pi Detection**:
+  - Automatic model detection via `/proc/cpuinfo` parsing
+  - Specific optimizations for BCM2711/Cortex-A72 (Pi 4) and BCM2712/Cortex-A76 (Pi 5)
+  - Feature logging for debugging and performance tuning
+- **Performance Results**:
+  - Checksum: ~2.7 Gbps throughput (4-8x improvement over scalar)
+  - CRC: ~1.1 Gbps throughput (3-5x improvement over scalar)
+  - Real-world frames: >3.5M frames/sec (short), >1M frames/sec (standard)
+  - Sub-microsecond latency: 0.28-2.54 µs per frame
+- **Testing and Benchmarks**:
+  - `simd_benchmark.rs` for comprehensive performance evaluation
+  - `simd_demo.rs` example demonstrating SIMD acceleration
+  - Full test coverage ensuring bit-exact results with scalar implementations
+
+#### LoRa Decoder Enhancements
+- Refactored to `DecoderType` enum for simplified device registration
+- Updated `LoRaDeviceManager` with config-based decoder setup (Dragino, Decentlab, GenericCounter)
+- Enhanced `lora_decoder_demo.rs` with practical configuration examples
+
+#### New Examples and Documentation
+- `dual_path_gateway.rs`: Dual M-Bus/wM-Bus gateway implementation
+- `instrumentation_demo.rs`: Demonstrates new instrumentation features
+- `samples/` directory with real-world payload examples
+- New docs: `DUAL_PATH_INSTRUMENTATION.md`, `TRANSIENT_STATES.md`, updated `README.md`
+- `PERFORMANCE.md` with optimization notes and benchmarks
+
 #### LoRa Enhancements (SX126x Radio Driver)
 - **Channel Activity Detection (CAD)** (`src/wmbus/radio/lora/cad.rs`):
   - Optimal parameters from Semtech AN1200.48 for each SF/BW combination
@@ -81,50 +128,41 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
   - CAD statistics tracking with `CadStats` for monitoring detection rates
   - Duration calculation for accurate timing estimates
   - Exit modes: `CadOnly` and `CadToRx` for flexible operation
-
 - **Default Configurations** (Based on SX126x Dev Kit User Guide):
   - `Default` trait implementation for `LoRaModParams` (SF7, BW500, CR4/5)
   - `Default` trait implementation for `LoRaPacketParams` (8-byte preamble, explicit header, CRC on)
   - Quick-start configurations for rapid prototyping
-
 - **Regional Parameter Defaults** (`LoRaModParamsExt` trait):
   - `eu868_defaults()`: SF9, BW125 optimized for 1% duty cycle compliance
   - `us915_defaults()`: SF7, BW500 for maximum throughput (no duty cycle)
   - `as923_defaults()`: SF8, BW125 for Asia-Pacific deployments
   - Parameter validation to prevent invalid SF/BW combinations
-
 - **RX Boost Mode** (AN1200.37):
   - `set_rx_boosted_gain()` for +6dB sensitivity improvement
   - Auto-enables for SF≥10 in `configure_for_lora_enhanced()`
   - Configurable RegRxGain register (0x08AC) control
-
 - **Regulator Configuration** (AN1200.37):
   - `set_regulator_mode()` for DC-DC/LDO selection
   - Auto-enables DC-DC for TX power >15dBm
   - Temperature drift reduction by 50% with DC-DC mode
-
 - **TCXO Support** (Temperature Compensated Crystal Oscillator):
   - `configure_tcxo()` for external TCXO control via DIO3
   - Configurable voltage (1.6V-3.3V) and startup time
   - ±2ppm frequency stability from -40°C to +85°C
-
 - **Single-Channel Gateway Support** (AN1200.94):
   - `examples/single_channel_gateway.rs` demonstration
   - Fixed frequency/SF operation for private networks
   - Regional configuration examples (EU868, US915, AS923)
   - Duty cycle management for regulatory compliance
-
 - **Enhanced Driver API**:
   - `configure_for_lora_enhanced()` with auto-optimization
   - Helper functions: `get_lora_sensitivity_dbm()`, `get_min_snr_db()`, `requires_ldro()`
   - `SyncWords` struct for PUBLIC/PRIVATE/CUSTOM network types
-
 - **Comprehensive Testing**:
   - 14 new tests in `tests/lora_enhancements_test.rs`
   - CAD parameter validation across all SF/BW combinations
   - Regional configuration testing
   - Parameter validation testing
-
 - **Documentation**:
   - `docs/LORA_PARAMETERS.md` with feature selection guide
   - Migration guide for existing implementations
@@ -147,6 +185,8 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
 - Improved BCD encoding/decoding for better compatibility
 - Enhanced VIF parsing with comprehensive lookup tables
 - Optimized frame parsing using nom parser combinators
+- Updated various tests for new features (baud_rate_adaptation, e2e_scenarios, etc.)
+- Refactored instrumentation converters with split modes
 
 ### Fixed
 - **Critical Hardware Register Mappings**: Fixed SX126x RadioState enum and IRQ bitflags to match datasheet specifications (Rev 2.2)
@@ -157,6 +197,7 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
 - VIF extension parsing for manufacturer-specific codes
 - Mock serial port timing and response handling
 - Test coverage for edge cases in data encoding
+- Minor test assertion updates and error handling improvements
 
 ## [1.0.0] - 2024-01-01
 

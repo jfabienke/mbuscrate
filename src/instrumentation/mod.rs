@@ -32,8 +32,14 @@ pub struct UnifiedInstrumentation {
     pub protocol: ProtocolType,
     pub frame_statistics: FrameStatistics,
 
-    // Meter readings
+    // Meter readings (for backward compatibility - prefer using MeteringReport)
     pub readings: Vec<Reading>,
+
+    // Overall reading quality indicator
+    pub reading_quality: ReadingQuality,
+
+    // Bad/invalid readings for diagnostics (only populated if issues exist)
+    pub bad_readings: Option<Vec<Reading>>,
 
     // Vendor-specific data
     pub vendor_metrics: HashMap<String, f64>,
@@ -128,7 +134,7 @@ pub struct Reading {
 }
 
 /// Reading quality indicator
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ReadingQuality {
     Good,
     Estimated,
@@ -144,6 +150,114 @@ pub enum InstrumentationSource {
     WMBusFrame,
     LoRaPayload,
     VendorExtension(String),
+}
+
+/// Pure metering report (valid readings only)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeteringReport {
+    pub device_id: String,
+    pub manufacturer: String,
+    pub device_type: DeviceType,
+    pub readings: Vec<Reading>,
+    pub timestamp: SystemTime,
+}
+
+impl MeteringReport {
+    /// Create from UnifiedInstrumentation (filter good readings only)
+    pub fn from_unified(inst: &UnifiedInstrumentation) -> Self {
+        let good_readings: Vec<Reading> = inst.readings.iter()
+            .filter(|r| validate_reading(r).is_ok())
+            .cloned()
+            .collect();
+
+        Self {
+            device_id: inst.device_id.clone(),
+            manufacturer: inst.manufacturer.clone(),
+            device_type: inst.device_type.clone(),
+            readings: good_readings,
+            timestamp: inst.timestamp,
+        }
+    }
+
+    /// Serialize to JSON (metering data only)
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Serialize to CSV (for time-series DBs)
+    pub fn to_csv(&self) -> String {
+        let mut csv = String::new();
+        if self.readings.is_empty() {
+            return csv;
+        }
+        csv.push_str("timestamp,device_id,manufacturer,reading_name,value,unit\n");
+        for reading in &self.readings {
+            let ts_secs = self.timestamp.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            csv.push_str(&format!(
+                "{},{},{},{},{},{}\n",
+                ts_secs,
+                self.device_id,
+                self.manufacturer,
+                reading.name,
+                reading.value,
+                reading.unit
+            ));
+        }
+        csv
+    }
+}
+
+/// Validate if reading is "good" metering data (customize per type)
+pub fn validate_reading(reading: &Reading) -> Result<(), &'static str> {
+    if reading.value.is_nan() || reading.value.is_infinite() {
+        return Err("Invalid: NaN or infinite value");
+    }
+
+    // Check based on reading name patterns
+    let name_lower = reading.name.to_lowercase();
+
+    if name_lower.contains("volume") || name_lower.contains("energy") ||
+       name_lower.contains("power") || name_lower.contains("counter") {
+        if reading.value < 0.0 {
+            return Err("Invalid: negative value for counter/volume");
+        }
+    } else if name_lower.contains("temperature") {
+        if reading.value < -50.0 || reading.value > 100.0 {
+            return Err("Out of bounds: temperature (-50..100°C)");
+        }
+    } else if name_lower.contains("humidity") || name_lower.contains("battery") ||
+              name_lower.contains("percentage") {
+        if reading.value < 0.0 || reading.value > 100.0 {
+            return Err("Out of bounds: percentage (0..100)");
+        }
+    } else if name_lower.contains("pressure")
+        && (reading.value < 0.0 || reading.value > 2000.0) {
+            return Err("Out of bounds: pressure (0..2000)");
+        }
+
+    if reading.quality != ReadingQuality::Good {
+        return Err("Poor quality reading");
+    }
+
+    Ok(())
+}
+
+/// Check if value is valid metering data (helper for quick checks)
+pub fn is_valid_metering_value(value: f64, name: &str) -> bool {
+    !value.is_nan() && !value.is_infinite() && {
+        let name_lower = name.to_lowercase();
+        if name_lower.contains("volume") || name_lower.contains("energy") {
+            value >= 0.0
+        } else if name_lower.contains("temperature") {
+            (-50.0..=100.0).contains(&value)
+        } else if name_lower.contains("humidity") {
+            (0.0..=100.0).contains(&value)
+        } else {
+            true
+        }
+    }
 }
 
 // Conversion implementations from specific types
@@ -163,6 +277,8 @@ impl UnifiedInstrumentation {
             protocol,
             frame_statistics: FrameStatistics::default(),
             readings: Vec::new(),
+            reading_quality: ReadingQuality::Good,
+            bad_readings: None,
             vendor_metrics: HashMap::new(),
             vendor_data: None,
             timestamp: SystemTime::now(),
@@ -263,6 +379,20 @@ impl UnifiedInstrumentation {
         Ok(buffer)
     }
 
+    /// Full instrumentation report (health + bad metering data)
+    pub fn to_instrumentation_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Clean instrumentation (omit bad_readings if empty)
+    pub fn to_clean_instrumentation_json(&self) -> Result<String, serde_json::Error> {
+        let mut clean = self.clone();
+        if clean.bad_readings.as_ref().is_some_and(|b| b.is_empty()) {
+            clean.bad_readings = None;
+        }
+        serde_json::to_string_pretty(&clean)
+    }
+
 }
 
 #[cfg(test)]
@@ -323,5 +453,127 @@ mod tests {
         // Test good battery
         inst.set_battery(Some(3.6), Some(85));
         assert!(!inst.battery_status.as_ref().unwrap().low_battery);
+    }
+
+    #[test]
+    fn test_metering_separation_good_data() {
+        let good_reading = Reading {
+            name: "Volume".to_string(),
+            value: 1234.5,
+            unit: "m³".to_string(),
+            timestamp: SystemTime::now(),
+            tariff: None,
+            storage_number: None,
+            quality: ReadingQuality::Good,
+        };
+        let bad_reading = Reading {
+            name: "Temperature".to_string(),
+            value: 150.0,  // Out of bounds
+            unit: "°C".to_string(),
+            timestamp: SystemTime::now(),
+            tariff: None,
+            storage_number: None,
+            quality: ReadingQuality::Good,
+        };
+
+        let mut inst = UnifiedInstrumentation::new(
+            "test".to_string(),
+            "Test".to_string(),
+            ProtocolType::MBusWired,
+        );
+        inst.readings = vec![good_reading.clone()];
+
+        // Metering: Only good
+        let metering = MeteringReport::from_unified(&inst);
+        assert_eq!(metering.readings.len(), 1);
+        assert_eq!(metering.readings[0].name, "Volume");
+
+        // Add bad reading
+        inst.readings.push(bad_reading.clone());
+        let metering2 = MeteringReport::from_unified(&inst);
+        assert_eq!(metering2.readings.len(), 1); // Still only 1 good
+        assert_eq!(metering2.readings[0].name, "Volume");
+
+        // Instrumentation with bad readings
+        inst.bad_readings = Some(vec![bad_reading]);
+        assert!(inst.bad_readings.is_some());
+        assert_eq!(inst.bad_readings.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_validation_bounds() {
+        // Good volume
+        let good = Reading {
+            name: "Volume".to_string(),
+            value: 10.0,
+            unit: "m³".to_string(),
+            timestamp: SystemTime::now(),
+            tariff: None,
+            storage_number: None,
+            quality: ReadingQuality::Good
+        };
+        assert!(validate_reading(&good).is_ok());
+
+        // Bad volume (negative)
+        let bad = Reading {
+            name: "Volume".to_string(),
+            value: -1.0,
+            unit: "m³".to_string(),
+            timestamp: SystemTime::now(),
+            tariff: None,
+            storage_number: None,
+            quality: ReadingQuality::Good
+        };
+        assert!(validate_reading(&bad).is_err());
+
+        // Bad temperature (too high)
+        let temp_bad = Reading {
+            name: "Temperature".to_string(),
+            value: 101.0,
+            unit: "°C".to_string(),
+            timestamp: SystemTime::now(),
+            tariff: None,
+            storage_number: None,
+            quality: ReadingQuality::Good
+        };
+        assert!(validate_reading(&temp_bad).is_err());
+
+        // Bad quality
+        let poor = Reading {
+            name: "Humidity".to_string(),
+            value: 50.0,
+            unit: "%".to_string(),
+            timestamp: SystemTime::now(),
+            tariff: None,
+            storage_number: None,
+            quality: ReadingQuality::Invalid
+        };
+        assert!(validate_reading(&poor).is_err());
+    }
+
+    #[test]
+    fn test_csv_export() {
+        let metering = MeteringReport {
+            device_id: "test".to_string(),
+            manufacturer: "Test".to_string(),
+            device_type: DeviceType::WaterMeter,
+            readings: vec![
+                Reading {
+                    name: "Volume".to_string(),
+                    value: 1234.5,
+                    unit: "m³".to_string(),
+                    timestamp: SystemTime::now(),
+                    tariff: None,
+                    storage_number: None,
+                    quality: ReadingQuality::Good
+                },
+            ],
+            timestamp: SystemTime::now(),
+        };
+        let csv = metering.to_csv();
+        assert!(csv.contains("timestamp,device_id,manufacturer,reading_name,value,unit"));
+        assert!(csv.contains("Volume"));
+        assert!(csv.contains("1234.5"));
+        assert!(csv.contains("m³"));
     }
 }

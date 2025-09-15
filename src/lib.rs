@@ -58,6 +58,9 @@ pub use vendors::{
     manufacturer_id_to_string, parse_manufacturer_id,
 };
 
+// Vendor-specific extensions
+pub use vendors::qundis_hca::QundisHcaExtension;
+
 // Unified instrumentation model
 pub use instrumentation::{
     UnifiedInstrumentation, DeviceType, ProtocolType, RadioMetrics, BatteryStatus,
@@ -145,3 +148,6 @@ pub async fn send_request(
 ) -> Result<Vec<MBusRecord>, MBusError> {
     handle.send_request(address).await
 }
+
+#[cfg(feature = "rtt-logging")]
+pub mod defmt_timestamp;

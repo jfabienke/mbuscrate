@@ -285,23 +285,14 @@ impl CompactFrameCache {
     ///
     /// * Frame bytes for CI=0x76 request
     pub fn build_full_frame_request(signature: u16, device_address: u8) -> Vec<u8> {
-        let mut frame = Vec::new();
-
-        // Start byte for short frame
-        frame.push(0x10);
-
-        // Control field - REQ_UD2 (request user data class 2)
-        frame.push(0x7B);
-
-        // Address field
-        frame.push(device_address);
-
-        // CI field - 0x76 for full frame request
-        frame.push(0x76);
-
-        // Signature (2 bytes, little-endian)
-        frame.push((signature & 0xFF) as u8);
-        frame.push((signature >> 8) as u8);
+        let mut frame = vec![
+            0x10,                            // Start byte for short frame
+            0x7B,                            // Control field - REQ_UD2 (request user data class 2)
+            device_address,                  // Address field
+            0x76,                            // CI field - 0x76 for full frame request
+            (signature & 0xFF) as u8,        // Signature low byte
+            (signature >> 8) as u8,          // Signature high byte
+        ];
 
         // Calculate checksum
         let checksum = frame[1..].iter().fold(0u8, |acc, &b| acc.wrapping_add(b));

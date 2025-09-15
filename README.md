@@ -3,6 +3,17 @@
 **Production-ready Rust implementation of the M-Bus protocol for smart meter communication.**
 Connect to electricity, gas, water, and heat meters with confidence—featuring async I/O, multi-telegram support, and encryption.
 
+## What's New
+
+- **Crypto Enhancements**: Added CMAC, HMAC, and SHA1 support for advanced wM-Bus security, preparing for Mode 13 TLS compatibility. Enable with the `crypto` feature.
+- **Instrumentation Improvements**: New split good/bad readings in converters, `MeteringReport` for validated data, and instrumentation-only mode for diagnostics.
+- **SIMD Optimizations**: SIMD-accelerated parsing and CRC in mbus/wmbus modules, with benchmarks and `simd_demo.rs` example.
+- **LoRa Decoder Refactor**: Enum-based `DecoderType` for easier device registration (Dragino, Decentlab, GenericCounter); updated `lora_decoder_demo.rs`.
+- **New Examples**: `dual_path_gateway.rs` for hybrid M-Bus/wM-Bus, `instrumentation_demo.rs` for reporting, `simd_demo.rs` for performance.
+- **Documentation**: Added `PERFORMANCE.md`, `DUAL_PATH_INSTRUMENTATION.md`, `TRANSIENT_STATES.md`; updated README with optimization notes.
+
+See full details in [CHANGELOG.md](CHANGELOG.md).
+
 ## Why mbus-rs?
 
 - ✅ **95% EN 13757 compliant** - Battle-tested with real meters from Kamstrup, Landis+Gyr, and more
@@ -162,7 +173,6 @@ Full LoRa documentation in [docs/LORA_PARAMETERS.md](docs/LORA_PARAMETERS.md).
 - [Raspberry Pi Setup](docs/RASPBERRY_PI_SETUP.md) - Hardware guide
 - [Examples](docs/EXAMPLES.md) - Code samples and patterns
 - [Troubleshooting](docs/TROUBLESHOOTING.md) - Common issues
-
 
 ## Platform Support
 

@@ -6,6 +6,12 @@ use mbus_rs::error::MBusError;
 pub struct MockSerialPort;
 pub struct TestableDeviceHandle;
 
+impl Default for MockSerialPort {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockSerialPort {
     pub fn new() -> Self {
         MockSerialPort

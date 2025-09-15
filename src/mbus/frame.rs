@@ -243,30 +243,42 @@ pub fn verify_frame(frame: &MBusFrame) -> Result<(), MBusError> {
     Ok(())
 }
 
-/// Calculates the checksum of an M-Bus frame.
+/// Hardware-accelerated M-Bus checksum calculation for raw data
+///
+/// Optimized implementation with SIMD acceleration for high-throughput operations.
+/// This function is designed for gateway applications processing thousands of frames per second.
+///
+/// # Arguments
+/// * `data` - Raw byte slice to calculate checksum for
+///
+/// # Returns
+/// * Single byte checksum (sum modulo 256)
+///
+/// # Performance
+/// * Uses vectorized operations when available (ARM NEON, x86 SIMD)
+/// * Optimized for batch processing in gateway scenarios
+pub fn calculate_mbus_checksum(data: &[u8]) -> u8 {
+    // Use SIMD-accelerated implementation from simd module
+    super::simd::calculate_checksum_optimized(data)
+}
+
+/// Calculates the checksum of an M-Bus frame using hardware-accelerated implementation.
 fn calculate_checksum(frame: &MBusFrame) -> u8 {
-    let mut checksum: u8 = 0;
+    // Use hardware-accelerated implementation for better performance
     match frame.frame_type {
         MBusFrameType::Short => {
-            checksum = checksum.wrapping_add(frame.control);
-            checksum = checksum.wrapping_add(frame.address);
+            calculate_mbus_checksum(&[frame.control, frame.address])
         }
         MBusFrameType::Control => {
-            checksum = checksum.wrapping_add(frame.control);
-            checksum = checksum.wrapping_add(frame.address);
-            checksum = checksum.wrapping_add(frame.control_information);
+            calculate_mbus_checksum(&[frame.control, frame.address, frame.control_information])
         }
         MBusFrameType::Long => {
-            checksum = checksum.wrapping_add(frame.control);
-            checksum = checksum.wrapping_add(frame.address);
-            checksum = checksum.wrapping_add(frame.control_information);
-            for byte in &frame.data {
-                checksum = checksum.wrapping_add(*byte);
-            }
+            let mut data = vec![frame.control, frame.address, frame.control_information];
+            data.extend_from_slice(&frame.data);
+            calculate_mbus_checksum(&data)
         }
-        _ => {}
+        _ => 0,
     }
-    checksum
 }
 
 /// Parses the frame type from the input byte slice.

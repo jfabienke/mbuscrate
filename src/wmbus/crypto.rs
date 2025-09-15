@@ -34,7 +34,11 @@
 
 use crate::util::{hex, logging};
 use crate::vendors;
+use super::crypto_hardware::{AesBackend, get_aes_backend};
+use super::sha_hardware::{calculate_hmac_sha1 as hw_calculate_hmac_sha1};
+use std::sync::Arc;
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Enhanced encryption errors with specific failure types
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -108,7 +112,7 @@ impl EncryptionMode {
 }
 
 /// AES-128 key for wM-Bus encryption
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct AesKey {
     key: [u8; 16],
 }
@@ -177,10 +181,12 @@ pub struct DeviceInfo {
 }
 
 /// Enhanced wM-Bus cryptographic operations
-#[derive(Debug)]
 pub struct WMBusCrypto {
     master_key: AesKey,
+    #[allow(dead_code)]
     error_throttle: logging::LogThrottle,
+    /// Hardware acceleration backend
+    backend: Arc<dyn AesBackend>,
     /// Configuration flags
     add_crc_mode9: bool,
     verify_crc_mode9: bool,
@@ -190,9 +196,13 @@ pub struct WMBusCrypto {
 impl WMBusCrypto {
     /// Create new crypto instance with master key
     pub fn new(master_key: AesKey) -> Self {
+        let backend = get_aes_backend();
+        log::info!("WMBusCrypto initialized with backend: {}", backend.name());
+
         Self {
             master_key,
             error_throttle: logging::LogThrottle::new(1000, 3), // 3 errors per second
+            backend,
             add_crc_mode9: false,                               // Default: no CRC for compatibility
             verify_crc_mode9: false,
             full_tag_compatibility: true, // Default: use 16-byte tags for testing
@@ -550,8 +560,8 @@ impl WMBusCrypto {
         iv[7] = device_info.device_type;
 
         // Fill remaining bytes with pattern based on device ID
-        for i in 8..16 {
-            iv[i] = (device_info.device_id >> ((i - 8) * 4)) as u8;
+        for (i, item) in iv.iter_mut().enumerate().skip(8) {
+            *item = (device_info.device_id >> ((i - 8) * 4)) as u8;
         }
 
         Ok(iv)
@@ -716,88 +726,20 @@ impl WMBusCrypto {
         key: &AesKey,
         block: &[u8; 16],
     ) -> Result<[u8; 16], CryptoError> {
-        #[cfg(feature = "crypto")]
-        {
-            use aes::{
-                cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit},
-                Aes128,
-            };
-
-            let cipher = Aes128::new_from_slice(key.as_bytes()).map_err(|_| {
-                CryptoError::EncryptionFailed {
-                    reason: "Failed to create AES cipher".to_string(),
-                }
-            })?;
-
-            let mut block_copy = GenericArray::clone_from_slice(block);
-            cipher.encrypt_block(&mut block_copy);
-
-            let mut result = [0u8; 16];
-            result.copy_from_slice(&block_copy);
-            Ok(result)
-        }
-
-        #[cfg(not(feature = "crypto"))]
-        {
-            // Fallback implementation for testing without crypto feature
-            if self.error_throttle.allow() {
-                log::warn!(
-                    "Using fallback AES implementation - enable 'crypto' feature for production"
-                );
-            }
-
-            // Return the input block XORed with key for testing
-            let mut result = [0u8; 16];
-            for i in 0..16 {
-                result[i] = block[i] ^ key.as_bytes()[i];
-            }
-            Ok(result)
-        }
+        let mut output = [0u8; 16];
+        self.backend.encrypt_block(block, key.as_bytes(), &mut output);
+        Ok(output)
     }
 
-    /// Decrypt single AES block using real AES implementation
+    /// Decrypt single AES block using hardware-accelerated backend
     fn aes_decrypt_block(
         &mut self,
         key: &AesKey,
         block: &[u8; 16],
     ) -> Result<[u8; 16], CryptoError> {
-        #[cfg(feature = "crypto")]
-        {
-            use aes::{
-                cipher::{generic_array::GenericArray, BlockDecrypt, KeyInit},
-                Aes128,
-            };
-
-            let cipher = Aes128::new_from_slice(key.as_bytes()).map_err(|_| {
-                CryptoError::DecryptionFailed {
-                    reason: "Failed to create AES cipher".to_string(),
-                }
-            })?;
-
-            let mut block_copy = GenericArray::clone_from_slice(block);
-            cipher.decrypt_block(&mut block_copy);
-
-            let mut result = [0u8; 16];
-            result.copy_from_slice(&block_copy);
-            Ok(result)
-        }
-
-        #[cfg(not(feature = "crypto"))]
-        {
-            // Fallback implementation for testing without crypto feature
-            if self.error_throttle.allow() {
-                log::warn!(
-                    "Using fallback AES implementation - enable 'crypto' feature for production"
-                );
-            }
-
-            // Return the input block XORed with key for testing
-            let mut result = [0u8; 16];
-            for i in 0..16 {
-                result[i] = block[i] ^ key.as_bytes()[i];
-            }
-            Ok(result)
-        }
+        let mut output = [0u8; 16];
+        self.backend.decrypt_block(block, key.as_bytes(), &mut output);
+        Ok(output)
     }
 
     /// Increment CTR mode counter
@@ -1144,6 +1086,150 @@ impl WMBusCrypto {
 
             Ok((ciphertext, tag))
         }
+    }
+
+    /// Calculate LoRaWAN Message Integrity Code (MIC) using CMAC-AES128
+    ///
+    /// This function implements the LoRaWAN MIC calculation for both uplink and downlink
+    /// messages according to LoRaWAN 1.0.x and 1.1 specifications.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - 128-bit NwkSKey (1.0.x) or appropriate key for 1.1
+    /// * `msg` - Complete LoRaWAN frame (MHDR | FHDR | FPort | FRMPayload)
+    /// * `direction` - 0 for uplink, 1 for downlink
+    /// * `dev_addr` - 32-bit device address
+    /// * `fcnt` - 32-bit frame counter
+    ///
+    /// # Returns
+    ///
+    /// * 4-byte MIC value
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let mic = crypto.calculate_lorawan_mic(
+    ///     &nwk_s_key,
+    ///     &frame_data,
+    ///     0, // uplink
+    ///     0x12345678,
+    ///     42
+    /// )?;
+    /// ```
+    #[cfg(feature = "crypto")]
+    pub fn calculate_lorawan_mic(
+        &self,
+        key: &[u8; 16],
+        msg: &[u8],
+        direction: u8,
+        dev_addr: u32,
+        fcnt: u32,
+    ) -> Result<[u8; 4], CryptoError> {
+        use cmac::{Cmac, Mac};
+        use aes::Aes128;
+
+        // Build B0 block for MIC calculation
+        let mut b0 = vec![
+            0x49, // Fixed value for MIC calculation
+            0x00, 0x00, 0x00, 0x00, // 4 bytes reserved
+            direction, // Direction: 0=uplink, 1=downlink
+        ];
+
+        // Add DevAddr (little-endian)
+        b0.extend_from_slice(&dev_addr.to_le_bytes());
+
+        // Add FCnt (little-endian)
+        b0.extend_from_slice(&fcnt.to_le_bytes());
+
+        // Add padding byte
+        b0.push(0x00);
+
+        // Add message length
+        b0.push(msg.len() as u8);
+
+        // Create CMAC instance
+        let mut mac = Cmac::<Aes128>::new_from_slice(key)
+            .map_err(|_| CryptoError::InvalidKeyLength {
+                expected: 16,
+                actual: key.len(),
+            })?;
+
+        // Update with B0 block
+        mac.update(&b0);
+
+        // Update with message
+        mac.update(msg);
+
+        // Finalize and get result
+        let result = mac.finalize();
+        let mic_bytes = result.into_bytes();
+
+        // Return first 4 bytes as MIC
+        let mut mic = [0u8; 4];
+        mic.copy_from_slice(&mic_bytes[..4]);
+
+        Ok(mic)
+    }
+
+    /// Verify LoRaWAN MIC
+    ///
+    /// Convenience function to verify a received MIC against calculated value
+    #[cfg(feature = "crypto")]
+    pub fn verify_lorawan_mic(
+        &self,
+        key: &[u8; 16],
+        msg: &[u8],
+        direction: u8,
+        dev_addr: u32,
+        fcnt: u32,
+        received_mic: &[u8; 4],
+    ) -> Result<bool, CryptoError> {
+        let calculated_mic = self.calculate_lorawan_mic(key, msg, direction, dev_addr, fcnt)?;
+        Ok(calculated_mic == *received_mic)
+    }
+
+    /// Calculate HMAC-SHA1 for Qundis 3-step authentication
+    ///
+    /// This function implements HMAC-SHA1 as required by Qundis devices
+    /// for their proprietary authentication protocol.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - HMAC key (typically 16 bytes)
+    /// * `message` - Message to authenticate
+    ///
+    /// # Returns
+    ///
+    /// * 20-byte HMAC-SHA1 digest
+    #[cfg(feature = "crypto")]
+    pub fn calculate_hmac_sha1(&self, key: &[u8], message: &[u8]) -> Vec<u8> {
+        // Use hardware-accelerated HMAC-SHA1 if available
+        let result = hw_calculate_hmac_sha1(key, message);
+        result.to_vec()
+    }
+
+    /// Perform Qundis 3-step authentication
+    ///
+    /// Implements the complete Qundis authentication flow:
+    /// 1. Challenge request
+    /// 2. Response calculation
+    /// 3. Verification
+    #[cfg(feature = "crypto")]
+    pub fn qundis_authenticate(
+        &self,
+        device_key: &[u8; 16],
+        challenge: &[u8; 8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        // Step 1: Prepare authentication message
+        let mut auth_msg = Vec::new();
+        auth_msg.extend_from_slice(challenge);
+        auth_msg.extend_from_slice(&[0x00; 8]); // Padding
+
+        // Step 2: Calculate HMAC-SHA1
+        let hmac_result = self.calculate_hmac_sha1(device_key, &auth_msg);
+
+        // Step 3: Return first 16 bytes as response
+        Ok(hmac_result[..16].to_vec())
     }
 }
 

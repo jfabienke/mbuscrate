@@ -15,7 +15,7 @@ mod tests {
         let expected_ms = (expected_bits as f64 / 32768.0) * 1000.0;
 
         assert!((time_ms - expected_ms).abs() < 0.1);
-        println!("S-mode ToA for 100 bytes: {:.2} ms", time_ms);
+        println!("S-mode ToA for 100 bytes: {time_ms:.2} ms");
     }
 
     #[test]
@@ -29,7 +29,7 @@ mod tests {
         let expected_ms = (expected_bits as f64 / 100000.0) * 1000.0;
 
         assert!((time_ms - expected_ms).abs() < 0.1);
-        println!("T-mode ToA for 100 bytes: {:.2} ms", time_ms);
+        println!("T-mode ToA for 100 bytes: {time_ms:.2} ms");
     }
 
     #[test]
@@ -43,7 +43,7 @@ mod tests {
         let expected_ms = (expected_bits as f64 / 100000.0) * 1000.0;
 
         assert!((time_ms - expected_ms).abs() < 0.1);
-        println!("C-mode ToA for 100 bytes: {:.2} ms", time_ms);
+        println!("C-mode ToA for 100 bytes: {time_ms:.2} ms");
 
         // C-mode should be faster than T-mode for same data
         let t_mode_toa = TimeOnAir::t_mode(100);
@@ -63,9 +63,9 @@ mod tests {
         let c_max = c_mode.max_transmissions_per_hour();
 
         println!("Max transmissions per hour (0.9% duty cycle):");
-        println!("  S-mode: {} transmissions", s_max);
-        println!("  T-mode: {} transmissions", t_max);
-        println!("  C-mode: {} transmissions", c_max);
+        println!("  S-mode: {s_max} transmissions");
+        println!("  T-mode: {t_max} transmissions");
+        println!("  C-mode: {c_max} transmissions");
 
         // C-mode should allow most transmissions (least overhead)
         assert!(c_max > t_max);
@@ -125,9 +125,9 @@ mod tests {
         assert_eq!(total_ms, lbt.min_listen_time_ms as f64 + toa_ms);
 
         println!("C-mode 50-byte frame:");
-        println!("  ToA: {:.2} ms", toa_ms);
+        println!("  ToA: {toa_ms:.2} ms");
         println!("  LBT: {} ms", lbt.min_listen_time_ms);
-        println!("  Total: {:.2} ms", total_ms);
+        println!("  Total: {total_ms:.2} ms");
     }
 
     #[test]
@@ -166,10 +166,10 @@ mod tests {
         let three_six_ms = three_six.calculate_ms();
         let nrz_ms = nrz.calculate_ms();
 
-        println!("Encoding comparison for {}-byte frame:", frame_size);
-        println!("  Manchester (2×): {:.2} ms", manchester_ms);
-        println!("  3-out-of-6 (1.5×): {:.2} ms", three_six_ms);
-        println!("  NRZ (1×): {:.2} ms", nrz_ms);
+        println!("Encoding comparison for {frame_size}-byte frame:");
+        println!("  Manchester (2×): {manchester_ms:.2} ms");
+        println!("  3-out-of-6 (1.5×): {three_six_ms:.2} ms");
+        println!("  NRZ (1×): {nrz_ms:.2} ms");
 
         // Verify encoding overhead ratios
         assert!((manchester_ms / nrz_ms - 2.0).abs() < 0.01); // 2× overhead

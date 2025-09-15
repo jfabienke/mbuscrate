@@ -23,6 +23,12 @@ pub struct MockSerialPort {
     pub read_delay_ms: Arc<Mutex<u64>>,
 }
 
+impl Default for MockSerialPort {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockSerialPort {
     pub fn new() -> Self {
         MockSerialPort {

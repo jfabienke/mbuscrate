@@ -50,6 +50,13 @@ use thiserror::Error;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, timeout, Duration};
 
+/// Type aliases for complex types to improve readability
+type FrameReceiver = Arc<RwLock<Option<mpsc::UnboundedReceiver<(WMBusFrame, i16)>>>>;
+type FrameSender = mpsc::UnboundedSender<(WMBusFrame, i16)>;
+type UnsolicitedCallback = Arc<dyn Fn(&WMBusFrame) + Send + Sync>;
+type WMBusFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(WMBusFrame, i16), WMBusError>> + Send + 'a>>;
+type SendFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>>;
+
 /// wM-Bus handle errors
 #[derive(Error, Debug)]
 pub enum WMBusError {
@@ -255,13 +262,13 @@ pub struct WMBusHandle<H: Hal> {
     /// Receiver task handle
     receiver_handle: Option<tokio::task::JoinHandle<()>>,
     /// Channel for received frames
-    rx_channel: Arc<RwLock<Option<mpsc::UnboundedReceiver<(WMBusFrame, i16)>>>>,
+    rx_channel: FrameReceiver,
     /// Sender for frame reception (internal)
-    tx_sender: Option<mpsc::UnboundedSender<(WMBusFrame, i16)>>,
+    tx_sender: Option<FrameSender>,
     /// Device registry for discovered devices
     devices: Arc<RwLock<HashMap<u32, DeviceInfo>>>,
     /// Callback for unsolicited frames
-    unsolicited_callback: Option<Arc<dyn Fn(&WMBusFrame) + Send + Sync>>,
+    unsolicited_callback: Option<UnsolicitedCallback>,
 }
 
 impl<H: Hal + Send + 'static> WMBusHandle<H> {
@@ -587,15 +594,13 @@ pub trait WMBusHandleWrapper: Send + Sync {
     fn send_frame<'a>(
         &'a self,
         frame: &'a WMBusFrame,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>>;
+    ) -> SendFuture<'a>;
 
     /// Receive a frame with timeout
     fn recv_frame<'a>(
         &'a mut self,
         timeout_ms: Option<u32>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(WMBusFrame, i16), WMBusError>> + Send + 'a>,
-    >;
+    ) -> WMBusFuture<'a>;
 
     /// Start the background receiver
     fn start_receiver<'a>(

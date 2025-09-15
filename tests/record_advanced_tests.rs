@@ -75,7 +75,7 @@ fn test_parse_fixed_record_all_medium_types() {
         ];
 
         let result = parse_fixed_record(&input);
-        assert!(result.is_ok(), "Failed to parse medium 0x{:02X}", medium);
+        assert!(result.is_ok(), "Failed to parse medium 0x{medium:02X}");
         let record = result.unwrap();
         assert!(!record.unit.is_empty());
         assert!(!record.quantity.is_empty());
@@ -241,14 +241,12 @@ fn test_parse_variable_record_extended_variable_length() {
         if test_len == expected_len {
             assert!(
                 result.is_ok(),
-                "Failed for length byte 0x{:02X}",
-                length_byte
+                "Failed for length byte 0x{length_byte:02X}"
             );
             let record = result.unwrap();
             assert_eq!(
                 record.data_len, expected_len,
-                "Wrong length for byte 0x{:02X}",
-                length_byte
+                "Wrong length for byte 0x{length_byte:02X}"
             );
         }
     }
@@ -292,13 +290,12 @@ fn test_parse_variable_record_all_dif_types() {
         }
 
         let result = parse_variable_record(&input);
-        assert!(result.is_ok(), "Failed for DIF 0x{:02X}", dif);
+        assert!(result.is_ok(), "Failed for DIF 0x{dif:02X}");
         let record = result.unwrap();
         assert_eq!(record.drh.dib.dif, dif);
         assert_eq!(
             record.data_len, expected_len,
-            "Wrong data length for DIF 0x{:02X}",
-            dif
+            "Wrong data length for DIF 0x{dif:02X}"
         );
     }
 }
@@ -413,7 +410,7 @@ fn test_parse_fixed_record_combined_counters() {
     if let MBusRecordValue::Numeric(val) = record.value {
         // The value combines counter1 and counter2 (which is 0)
         // So it should be 0.001 + 0 = 0.001
-        assert!((val - 0.001).abs() < 0.0001, "Expected ~0.001, got {}", val);
+        assert!((val - 0.001).abs() < 0.0001, "Expected ~0.001, got {val}");
     } else {
         panic!("Expected numeric value");
     }

@@ -10,6 +10,9 @@ use nom::{
 };
 use std::time::SystemTime;
 
+/// Type alias for complex nom parser result in special VIF chain parsing
+type SpecialVifResult<'a> = Result<(String, f64, String), nom::Err<nom::error::Error<&'a [u8]>>>;
+
 /// Enhanced data record for standards-compliant variable block parsing
 #[derive(Debug, Clone)]
 pub struct EnhancedDataRecord {
@@ -152,7 +155,7 @@ pub fn parse_enhanced_variable_data_record(input: &[u8]) -> IResult<&[u8], Enhan
 fn parse_special_vif_chain<'a>(
     vif_chain: &[u8],
     remaining: &'a [u8],
-) -> Result<(String, f64, String), nom::Err<nom::error::Error<&'a [u8]>>> {
+) -> SpecialVifResult<'a> {
     if vif_chain.is_empty() {
         return Ok(("".to_string(), 1.0, "".to_string()));
     }
@@ -412,7 +415,10 @@ fn extract_storage_number_from_dife_chain(dif_chain: &[u8]) -> u16 {
 
         // DIFE bits [3:0] contribute to storage number
         let nibble = (dife & MBUS_DATA_RECORD_DIFE_MASK_STORAGE_NO) as u16;
-        storage_number |= nibble << (4 * (i - 1)); // Each DIFE contributes 4 bits
+        // Prevent overflow: storage number is 16-bit, so max 4 nibbles (16 bits / 4 bits per nibble)
+        if (i - 1) < 4 {
+            storage_number |= nibble << (4 * (i - 1)); // Each DIFE contributes 4 bits
+        }
     }
 
     storage_number
@@ -456,6 +462,26 @@ fn mbus_data_record_tariff(vib: &[VifInfo]) -> i32 {
     tariff
 }
 
+fn mbus_data_record_device(vib: &[VifInfo]) -> i32 {
+    let mut device = 0;
+    for info in vib {
+        if (((info.vif as u8) & MBUS_DATA_RECORD_DIFE_MASK_DEVICE) >> 6) != 0 {
+            device |= (((info.vif as u8) & MBUS_DATA_RECORD_DIFE_MASK_DEVICE) >> 6) as i32;
+        }
+    }
+    device
+}
+
+fn mbus_data_record_function(dif: u8) -> &'static str {
+    match dif & MBUS_DATA_RECORD_DIF_MASK_FUNCTION {
+        0x00 => "Instantaneous value",
+        0x10 => "Maximum value",
+        0x20 => "Minimum value",
+        0x30 => "Value during error state",
+        _ => "Unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,11 +506,10 @@ mod tests {
         assert!(record.is_numeric);
 
         if let MBusRecordValue::Numeric(value) = record.value {
-            println!("Actual value: {}, Expected: 305419896", value);
+            println!("Actual value: {value}, Expected: 305419896");
             assert!(
                 (value - 305419896.0).abs() < 1e-6,
-                "Expected 305419896, got {}",
-                value
+                "Expected 305419896, got {value}"
             );
         } else {
             panic!("Expected numeric value");
@@ -510,11 +535,10 @@ mod tests {
         assert_eq!(record.storage_number, 0); // From DIFE bits [3:0] = 0
 
         if let MBusRecordValue::Numeric(value) = record.value {
-            println!("Multi-tariff actual value: {}, Expected: 4660", value);
+            println!("Multi-tariff actual value: {value}, Expected: 4660");
             assert!(
                 (value - 4660.0).abs() < 1e-6,
-                "Expected 4660, got {}",
-                value
+                "Expected 4660, got {value}"
             );
         } else {
             panic!("Expected numeric value");
@@ -529,8 +553,8 @@ mod tests {
         let data = vec![0x01, 0x20, 0x42]; // DIF=0x01, VIF=0x20, value=66
         let (_, record) = parse_enhanced_variable_data_record(&data).unwrap();
         if let MBusRecordValue::Numeric(value) = record.value {
-            println!("8-bit actual value: {}, Expected: 66", value);
-            assert_eq!(value, 66.0, "Expected 66, got {}", value);
+            println!("8-bit actual value: {value}, Expected: 66");
+            assert_eq!(value, 66.0, "Expected 66, got {value}");
         }
 
         // 16-bit value: 0x1234 as LE bytes: 0x34, 0x12
@@ -657,25 +681,5 @@ mod tests {
             assert_eq!(chain.len(), 11); // Limited to 1 VIF + 10 VIFEs
             assert_eq!(remaining.len(), 2); // Last 2 bytes not consumed
         }
-    }
-}
-
-fn mbus_data_record_device(vib: &[VifInfo]) -> i32 {
-    let mut device = 0;
-    for info in vib {
-        if (((info.vif as u8) & MBUS_DATA_RECORD_DIFE_MASK_DEVICE) >> 6) != 0 {
-            device |= (((info.vif as u8) & MBUS_DATA_RECORD_DIFE_MASK_DEVICE) >> 6) as i32;
-        }
-    }
-    device
-}
-
-fn mbus_data_record_function(dif: u8) -> &'static str {
-    match dif & MBUS_DATA_RECORD_DIF_MASK_FUNCTION {
-        0x00 => "Instantaneous value",
-        0x10 => "Maximum value",
-        0x20 => "Minimum value",
-        0x30 => "Value during error state",
-        _ => "Unknown",
     }
 }

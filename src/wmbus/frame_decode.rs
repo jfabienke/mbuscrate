@@ -580,9 +580,10 @@ pub fn calculate_wmbus_crc_raw(data: &[u8]) -> u16 {
     crc // Return raw CRC without complement
 }
 
-/// Calculate CRC-16 with complement (standard wM-Bus)
+/// Calculate CRC-16 with complement (standard wM-Bus) using SIMD acceleration
 pub fn calculate_wmbus_crc_enhanced(data: &[u8]) -> u16 {
-    !calculate_wmbus_crc_raw(data) // Apply complement per EN 13757-4
+    // Use SIMD-accelerated implementation from simd_crc module
+    super::simd_crc::calculate_wmbus_crc_optimized(data)
 }
 
 /// Multi-block frame assembly support per EN 13757-4

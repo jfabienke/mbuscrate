@@ -7,6 +7,7 @@
 pub mod block;
 pub mod compact_cache;
 pub mod crypto;
+pub mod crypto_hardware;
 pub mod encryption;
 pub mod frame;
 pub mod frame_decode;
@@ -14,6 +15,8 @@ pub mod handle;
 pub mod mode_switching;
 pub mod network;
 pub mod radio;
+pub mod sha_hardware;
+pub mod simd_crc;
 
 pub use radio::{
     driver::Sx126xDriver,

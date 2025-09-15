@@ -4,6 +4,8 @@
 //! to the M-Bus protocol, allowing external crates to override standard behavior
 //! at specific extension points defined in EN 13757.
 
+pub mod qundis_hca;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -316,6 +318,20 @@ impl VendorRegistry {
         let inner = self.inner.lock().unwrap();
         inner.keys().cloned().collect()
     }
+
+    /// Create a new registry with default vendor extensions registered
+    pub fn with_defaults() -> Result<Self, MBusError> {
+        let registry = Self::new();
+
+        // Register QUNDIS HCA extension
+        let qundis_extension = Arc::new(crate::vendors::qundis_hca::QundisHcaExtension::new());
+        registry.register("QDS", qundis_extension)?;
+
+        // Future vendor extensions can be added here
+        // e.g., registry.register("KAM", kamstrup_extension)?;
+
+        Ok(registry)
+    }
 }
 
 /// Helper function to convert manufacturer ID to string
@@ -444,6 +460,7 @@ mod tests {
     use super::*;
 
     struct MockVendorExtension {
+        #[allow(dead_code)]
         manufacturer: String,
     }
 
@@ -495,14 +512,14 @@ mod tests {
     #[test]
     fn test_manufacturer_id_conversion() {
         // Test known manufacturer codes
-        assert_eq!(manufacturer_id_to_string(0x2D2C), "KAM"); // Kamstrup
+        assert_eq!(manufacturer_id_to_string(0x2C2D), "KAM"); // Kamstrup
 
         // Test edge cases
         let id = ((26 << 10) | (26 << 5) | 26) as u16; // ZZZ
         assert_eq!(manufacturer_id_to_string(id), "ZZZ");
 
         // Test round-trip conversion
-        assert_eq!(parse_manufacturer_id("KAM"), 0x2D2C);
+        assert_eq!(parse_manufacturer_id("KAM"), 0x2C2D);
         assert_eq!(manufacturer_id_to_string(parse_manufacturer_id("ABC")), "ABC");
     }
 

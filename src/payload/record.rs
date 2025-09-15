@@ -528,6 +528,23 @@ pub fn parse_variable_record_with_vendor(
             }
         }
 
+        // Check for QUNDIS-specific VIF 0x04 date handling
+        if mfr_id == "QDS" && record.drh.vib.vif == 0x04 {
+            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(reg, mfr_id, record.drh.vib.vif, &record.data[..record.data_len])? {
+                record.unit = unit;
+                record.quantity = qty;
+                record.value = match var {
+                    vendors::VendorVariable::Numeric(n) => {
+                        // Apply exponent
+                        let scaled = n * 10_f64.powi(exp as i32);
+                        MBusRecordValue::Numeric(scaled)
+                    },
+                    vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
+                    _ => MBusRecordValue::String("Vendor specific".to_string()),
+                };
+            }
+        }
+
         // Check for status bits in data (if present)
         if record.data_len > 0 {
             // Status byte is often at the end of fixed data structures

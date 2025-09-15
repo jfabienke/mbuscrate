@@ -1,4 +1,193 @@
-//! Tests for LoRa enhancements based on SX126x application notes
+//! Comprehensive tests for RTT + defmt logging with LoRa enhancements
+//!
+//! This test suite validates the complete RTT logging infrastructure,
+//! including hardware initialization, structured logging, and Pi platform detection.
+
+use mbus_rs::logging::{
+    init_enhanced_logging,
+    is_rtt_available,
+    get_rtt_stats,
+    structured,
+    encoders::{IrqEvent, LoRaEvent, CryptoEvent, LoRaEventType, CryptoOp, CryptoBackend},
+};
+use std::time::Instant;
+use tokio::time::{sleep, Duration};
+
+#[cfg(test)]
+mod rtt_logging_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_rtt_initialization() {
+        // Test RTT logging initialization
+        let result = init_enhanced_logging();
+        assert!(result.is_ok(), "RTT logging initialization should succeed");
+
+        // Check RTT availability
+        let rtt_available = is_rtt_available();
+        println!("RTT available: {}", rtt_available);
+
+        // Get RTT stats if available
+        #[cfg(feature = "rtt-logging")]
+        {
+            if rtt_available {
+                let stats = get_rtt_stats();
+                println!("RTT Stats: Platform: {}, Channels: {}, SWO: {} Hz",
+                         stats.platform, stats.channels_active, stats.swo_baud);
+
+                // Verify platform detection works correctly
+                assert!(!stats.platform.is_empty());
+                assert!(stats.channels_active > 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_structured_irq_logging() {
+        // Initialize logging first
+        let _ = init_enhanced_logging();
+
+        #[cfg(feature = "rtt-logging")]
+        {
+            // Test IRQ event logging
+            let irq_event = IrqEvent {
+                mask: 0x01,
+                latency_ns: 12500,
+                pin: 26,
+                timestamp_us: 1234567890,
+            };
+
+            // This should not panic and should compile correctly
+            structured::log_irq_event(irq_event.mask, irq_event.latency_ns, irq_event.pin);
+
+            // Test multiple IRQ events
+            for i in 0..10 {
+                structured::log_irq_event(
+                    1 << (i % 8),
+                    10000 + i * 1000,
+                    26 + (i % 4) as u8,
+                );
+                sleep(Duration::from_millis(1)).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_structured_lora_logging() {
+        let _ = init_enhanced_logging();
+
+        #[cfg(feature = "rtt-logging")]
+        {
+            // Test LoRa event types
+            let test_cases = vec![
+                (LoRaEventType::TxStart, -80, 12.5, 868950000, 7, 64),
+                (LoRaEventType::RxComplete, -85, 10.2, 868300000, 8, 32),
+                (LoRaEventType::RxTimeout, 0, 0.0, 868100000, 9, 0),
+                (LoRaEventType::ChannelHop, -75, 15.1, 869525000, 7, 128),
+            ];
+
+            for (event_type, rssi, snr, freq, sf, payload_len) in test_cases {
+                structured::log_lora_event(event_type, rssi, snr, freq, sf, payload_len);
+                sleep(Duration::from_millis(2)).await;
+            }
+
+            // Test rapid LoRa events (simulating real usage)
+            let start = Instant::now();
+            for i in 0..100 {
+                structured::log_lora_event(
+                    LoRaEventType::TxStart,
+                    -80 - (i % 20) as i16,
+                    10.0 + (i % 10) as f32,
+                    868950000 + (i % 3) * 200000,
+                    7 + (i % 3) as u8,
+                    32 + (i % 32) as u16,
+                );
+            }
+            let duration = start.elapsed();
+
+            println!("100 LoRa events logged in {:?} ({:.2} events/ms)",
+                     duration, 100.0 / duration.as_millis() as f64);
+
+            // Verify high throughput (should be much faster than printf)
+            assert!(duration.as_millis() < 100, "RTT logging should be very fast");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_structured_crypto_logging() {
+        let _ = init_enhanced_logging();
+
+        #[cfg(feature = "rtt-logging")]
+        {
+            // Test crypto operations
+            let crypto_tests = vec![
+                (CryptoOp::Encrypt, CryptoBackend::Hardware, 256, 15),
+                (CryptoOp::Decrypt, CryptoBackend::Software, 128, 8),
+                (CryptoOp::Hash, CryptoBackend::Hardware, 64, 32),
+                (CryptoOp::Hmac, CryptoBackend::Software, 512, 20),
+            ];
+
+            for (op, backend, data_len, duration_ms) in crypto_tests {
+                structured::log_crypto_event(op, backend, data_len, duration_ms);
+                sleep(Duration::from_millis(1)).await;
+            }
+
+            // Test performance of crypto logging
+            let start = Instant::now();
+            for i in 0..1000 {
+                structured::log_crypto_event(
+                    CryptoOp::Encrypt,
+                    if i % 2 == 0 { CryptoBackend::Hardware } else { CryptoBackend::Software },
+                    128 + (i % 128),
+                    (5 + (i % 20)) as u64,
+                );
+            }
+            let duration = start.elapsed();
+
+            println!("1000 crypto events logged in {:?} ({:.2} events/ms)",
+                     duration, 1000.0 / duration.as_millis() as f64);
+        }
+    }
+
+    #[test]
+    fn test_cross_platform_compatibility() {
+        // This test should pass on all platforms
+        let result = init_enhanced_logging();
+        assert!(result.is_ok(), "Logging initialization should work on all platforms");
+
+        // RTT availability is platform-dependent
+        let rtt_available = is_rtt_available();
+
+        // On Pi 4/5 with proper setup, RTT should be available
+        // On other platforms, it should gracefully fall back
+        println!("Cross-platform test: RTT available = {}", rtt_available);
+
+        // Basic structured logging should work regardless
+        #[cfg(feature = "rtt-logging")]
+        {
+            structured::log_irq_event(0x01, 1000, 26);
+            structured::log_lora_event(LoRaEventType::TxStart, -80, 10.0, 868950000, 7, 32);
+            structured::log_crypto_event(CryptoOp::Encrypt, CryptoBackend::Software, 128, 5);
+        }
+    }
+
+    #[test]
+    fn test_feature_flag_compatibility() {
+        // Test that the code compiles and works when rtt-logging feature is disabled
+        let result = init_enhanced_logging();
+        assert!(result.is_ok());
+
+        // When RTT feature is disabled, these should still compile but be no-ops
+        #[cfg(not(feature = "rtt-logging"))]
+        {
+            let rtt_available = is_rtt_available();
+            assert!(!rtt_available, "RTT should not be available when feature is disabled");
+        }
+
+        // Traditional logging should always work
+        log::info!("Feature flag compatibility test passed");
+    }
+}
 
 #[cfg(test)]
 mod tests {

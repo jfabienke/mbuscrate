@@ -24,8 +24,7 @@ async fn test_mixed_device_addition() {
     let result = manager.add_wmbus_handle_mock("test_wmbus_device").await;
     assert!(
         result.is_ok(),
-        "Failed to add mock wM-Bus device: {:?}",
-        result
+        "Failed to add mock wM-Bus device: {result:?}"
     );
 
     // Note: We can't test actual serial M-Bus devices without hardware,
@@ -52,7 +51,7 @@ async fn test_mixed_device_addition() {
             // This is the expected error type
         }
         Err(other) => {
-            panic!("Unexpected error type: {:?}", other);
+            panic!("Unexpected error type: {other:?}");
         }
         Ok(_) => {
             panic!("Expected error but got success");
@@ -71,8 +70,7 @@ async fn test_device_scanning() {
     let scan_result = manager.scan_devices().await;
     assert!(
         scan_result.is_ok(),
-        "Device scanning failed: {:?}",
-        scan_result
+        "Device scanning failed: {scan_result:?}"
     );
 
     let devices = scan_result.unwrap();
@@ -192,7 +190,7 @@ async fn test_device_manager_disconnect() {
 
     // Test disconnection - should not panic or error
     let result = manager.disconnect_all().await;
-    assert!(result.is_ok(), "Disconnect failed: {:?}", result);
+    assert!(result.is_ok(), "Disconnect failed: {result:?}");
 }
 
 #[tokio::test]
@@ -201,17 +199,16 @@ async fn test_multiple_wmbus_devices() {
 
     // Add multiple wM-Bus devices
     for i in 0..5 {
-        let device_id = format!("test_device_{}", i);
+        let device_id = format!("test_device_{i}");
         let result = manager.add_wmbus_handle_mock(&device_id).await;
-        assert!(result.is_ok(), "Failed to add device {}: {:?}", i, result);
+        assert!(result.is_ok(), "Failed to add device {i}: {result:?}");
     }
 
     // Scan all devices
     let scan_result = manager.scan_devices().await;
     assert!(
         scan_result.is_ok(),
-        "Multi-device scan failed: {:?}",
-        scan_result
+        "Multi-device scan failed: {scan_result:?}"
     );
 }
 
@@ -229,7 +226,7 @@ async fn test_error_types_compatibility() {
             // Expected conversion
         }
         other => {
-            panic!("Unexpected error type after conversion: {:?}", other);
+            panic!("Unexpected error type after conversion: {other:?}");
         }
     }
 }

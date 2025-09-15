@@ -39,7 +39,8 @@
 
 use crate::util::{logging, IoBuffer};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -284,7 +285,7 @@ impl EnhancedGpio {
 
             // Debouncing check
             if let Some(debounce_time) = debounce_us {
-                if let Ok(mut times) = last_times.lock() {
+                if let Ok(mut times) = last_times.try_lock() {
                     if let Some(last_time) = times.get(&pin_num) {
                         if now.duration_since(*last_time).as_micros() < debounce_time as u128 {
                             return; // Skip this event due to debouncing
@@ -294,7 +295,7 @@ impl EnhancedGpio {
                 }
             }
 
-            let delta_time = if let Ok(times) = last_times.lock() {
+            let delta_time = if let Ok(times) = last_times.try_lock() {
                 times.get(&pin_num).map(|last| now.duration_since(*last))
             } else {
                 None
@@ -338,18 +339,17 @@ impl EnhancedGpio {
 
     /// Wait for the next GPIO event
     pub async fn wait_for_event(&mut self) -> Result<GpioEvent, EnhancedGpioError> {
-        if let Ok(mut rx) = self.event_rx.lock() {
-            if let Some(event) = rx.recv().await {
-                self.update_stats(&event);
-                Ok(event)
-            } else {
-                Err(EnhancedGpioError::OperationFailed {
-                    reason: "Event channel closed".to_string(),
-                })
-            }
+        let event = {
+            let mut rx = self.event_rx.lock().await;
+            rx.recv().await
+        };
+
+        if let Some(event) = event {
+            self.update_stats(&event);
+            Ok(event)
         } else {
             Err(EnhancedGpioError::OperationFailed {
-                reason: "Event receiver lock failed".to_string(),
+                reason: "Event channel closed".to_string(),
             })
         }
     }
@@ -414,7 +414,7 @@ impl EnhancedGpio {
     }
 
     /// Remove interrupt monitoring for a pin
-    pub fn remove_interrupt(&mut self, pin: u8) -> Result<(), EnhancedGpioError> {
+    pub async fn remove_interrupt(&mut self, pin: u8) -> Result<(), EnhancedGpioError> {
         #[cfg(feature = "raspberry-pi")]
         {
             if let Some(mut gpio_pin) = self.gpio_pins.remove(&pin) {
@@ -428,7 +428,8 @@ impl EnhancedGpio {
 
         self.pin_configs.remove(&pin);
 
-        if let Ok(mut times) = self.last_event_times.lock() {
+        {
+            let mut times = self.last_event_times.lock().await;
             times.remove(&pin);
         }
 
@@ -437,30 +438,20 @@ impl EnhancedGpio {
     }
 
     /// Get current GPIO statistics
-    pub fn get_stats(&self) -> Result<GpioStats, EnhancedGpioError> {
-        self.stats
-            .lock()
-            .map(|stats| *stats)
-            .map_err(|_| EnhancedGpioError::OperationFailed {
-                reason: "Stats lock failed".to_string(),
-            })
+    pub async fn get_stats(&self) -> GpioStats {
+        let stats = self.stats.lock().await;
+        *stats
     }
 
     /// Reset GPIO statistics
-    pub fn reset_stats(&mut self) -> Result<(), EnhancedGpioError> {
-        if let Ok(mut stats) = self.stats.lock() {
-            *stats = GpioStats::default();
-            Ok(())
-        } else {
-            Err(EnhancedGpioError::OperationFailed {
-                reason: "Stats lock failed".to_string(),
-            })
-        }
+    pub async fn reset_stats(&mut self) {
+        let mut stats = self.stats.lock().await;
+        *stats = GpioStats::default();
     }
 
     /// Update statistics with new event
     fn update_stats(&self, event: &GpioEvent) {
-        if let Ok(mut stats) = self.stats.lock() {
+        if let Ok(mut stats) = self.stats.try_lock() {
             stats.total_events += 1;
 
             match event.priority {
@@ -610,7 +601,7 @@ mod tests {
         };
 
         assert_eq!(event.pin, 24);
-        assert_eq!(event.level, true);
+        assert!(event.level);
         assert_eq!(event.edge, EdgeType::Rising);
         assert_eq!(event.priority, GpioEventType::HighPriority);
     }

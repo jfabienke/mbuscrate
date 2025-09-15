@@ -2,9 +2,8 @@
 
 use mbus_rs::{
     VendorExtension, VendorRegistry, VendorDataRecord, VendorVariable, VendorDeviceInfo,
-    MBusError, MBusFrame, MBusRecord, MBusRecordValue,
-    UnifiedInstrumentation, DeviceType, ProtocolType,
-    from_mbus_frame, from_wmbus_frame, from_vendor_device_info,
+    MBusError, MBusFrame, MBusRecord, MBusRecordValue, DeviceType, ProtocolType,
+    from_mbus_frame, from_vendor_device_info,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,7 +50,7 @@ impl VendorExtension for KamstrupExtension {
         &self,
         manufacturer_id: &str,
         vif: u8,
-        data: &[u8],
+        _data: &[u8],
     ) -> Result<Option<(String, i8, String, VendorVariable)>, MBusError> {
         if manufacturer_id != "KAM" || vif != 0xFF {
             return Ok(None);
@@ -73,7 +72,7 @@ impl VendorExtension for KamstrupExtension {
         ci: u8,
         payload: &[u8],
     ) -> Result<Option<VendorDataRecord>, MBusError> {
-        if manufacturer_id != "KAM" || ci < 0xA0 || ci > 0xB7 {
+        if manufacturer_id != "KAM" || !(0xA0..=0xB7).contains(&ci) {
             return Ok(None);
         }
 
@@ -83,7 +82,7 @@ impl VendorExtension for KamstrupExtension {
             vif: ci,
             unit: "Command Response".to_string(),
             value: VendorVariable::Binary(payload.to_vec()),
-            quantity: format!("Kamstrup Command 0x{:02X}", ci),
+            quantity: format!("Kamstrup Command 0x{ci:02X}"),
         };
         Ok(Some(record))
     }
@@ -140,7 +139,7 @@ impl VendorExtension for KamstrupExtension {
 
         basic_info.additional_info.insert(
             "kamstrup_series".to_string(),
-            "MULTICAL".to_string(),
+            serde_json::Value::String("MULTICAL".to_string()),
         );
 
         Ok(Some(basic_info))
@@ -273,7 +272,7 @@ fn test_kamstrup_device_enrichment() {
     let extension = registry.get("KAM").unwrap();
 
     let basic_info = VendorDeviceInfo {
-        manufacturer_id: 0x2D2C, // KAM
+        manufacturer_id: 0x2C2D, // KAM
         device_id: 0x12345678,
         version: 0x15, // Version 1.5
         device_type: 0x07, // Water meter
@@ -291,7 +290,7 @@ fn test_kamstrup_device_enrichment() {
     assert_eq!(enriched.firmware_version, Some("v1.5".to_string()));
     assert_eq!(
         enriched.additional_info.get("kamstrup_series"),
-        Some(&"MULTICAL".to_string())
+        Some(&serde_json::Value::String("MULTICAL".to_string()))
     );
 }
 
@@ -303,7 +302,7 @@ fn test_kamstrup_key_provisioning() {
     let extension = registry.get("KAM").unwrap();
 
     let device_info = VendorDeviceInfo {
-        manufacturer_id: 0x2D2C,
+        manufacturer_id: 0x2C2D,
         device_id: 0x12345678,
         version: 0x01,
         device_type: 0x07,
@@ -325,7 +324,7 @@ fn test_kamstrup_key_provisioning() {
 #[test]
 fn test_unified_instrumentation_from_vendor() {
     let device_info = VendorDeviceInfo {
-        manufacturer_id: 0x2D2C,
+        manufacturer_id: 0x2C2D,
         device_id: 0x87654321,
         version: 0x10,
         device_type: 0x04, // Heat meter

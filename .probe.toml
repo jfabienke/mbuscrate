@@ -1,0 +1,67 @@
+# probe-rs configuration for RTT + defmt logging on Raspberry Pi
+# This configuration enables live log streaming from Pi 4/5 via SWD/SWO
+
+[general]
+chip = "BCM2711"  # Raspberry Pi 4/5 SoC
+log_level = "INFO"
+log_file = "probe-rs.log"
+
+[rtt]
+enabled = true
+# RTT control block search range - Pi bootloader places it in specific region
+search_range = { start = 0x00000000, end = 0x40000000 }
+# High timeout for Pi's ARM cores
+timeout = 3000
+
+[rtt.channels]
+# Channel 0: Standard text output (fallback)
+up.0 = { mode = "NoBlockSkip", format = "String" }
+# Channel 1: defmt binary logging (high performance)
+up.1 = { mode = "NoBlockSkip", format = "Defmt" }
+# Channel 2: IRQ events (structured binary)
+up.2 = { mode = "NoBlockSkip", format = "BinaryLE" }
+
+# Downlink channels for commands (optional)
+down.0 = { mode = "NoBlockSkip", format = "String" }
+
+[flashing]
+enabled = false  # RTT logging only, no flashing
+
+[swo]
+enabled = true
+# Standard SWO frequency for Pi ARM cores
+frequency = 1_000_000  # 1 MHz
+# Pi ARM CoreSight ITM settings
+stimulus_port = 0
+manchester_encoding = false
+
+[gdb]
+enabled = false  # RTT mode only
+
+[target]
+# Raspberry Pi specific settings
+memory_map = [
+    { range = "0x00000000..0x40000000", access = "RW", name = "RAM" },
+    { range = "0xFE000000..0xFF000000", access = "RW", name = "Peripherals" },
+]
+
+# ARM Cortex-A72 specific settings for Pi 4/5
+core_type = "armv8"
+endianness = "little"
+
+[probe]
+# Raspberry Pi SWD connection settings
+protocol = "Swd"
+speed = 4_000_000  # 4 MHz SWD clock
+connect_under_reset = false
+
+# GPIO pin connections for SWD on Pi 4/5:
+# GPIO 22 (pin 15) -> SWDIO
+# GPIO 27 (pin 13) -> SWDCLK
+# GPIO 24 (pin 18) -> SWO (Serial Wire Output)
+# GND (pin 6/9/14/20/25/30/34/39) -> GND
+
+[debug]
+# Enable verbose debugging for RTT setup
+rtt_scan_memory = true
+print_defmt = true

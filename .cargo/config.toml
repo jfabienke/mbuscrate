@@ -3,6 +3,13 @@
 [target.aarch64-unknown-linux-gnu]
 # Raspberry Pi 4 (64-bit) / Raspberry Pi 5
 linker = "aarch64-linux-musl-gcc"
+# Enable crypto extensions for Pi 5 (Cortex-A76)
+# For Pi 4 (Cortex-A72), remove +aes,+sha2,+crypto
+rustflags = [
+    "-C", "target-cpu=cortex-a76",
+    "-C", "target-features=+aes,+sha2,+neon,+crc,+crypto",
+    "-C", "opt-level=3",
+]
 
 [target.armv7-unknown-linux-gnueabihf]  
 # Raspberry Pi 4 (32-bit) / Raspberry Pi 3/2/Zero

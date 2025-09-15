@@ -24,6 +24,7 @@ use mbus_rs::wmbus::radio::lora::{
 };
 
 /// Single-channel gateway configuration
+#[allow(dead_code)]
 struct GatewayConfig {
     /// Fixed frequency in Hz
     frequency_hz: u32,

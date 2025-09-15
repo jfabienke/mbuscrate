@@ -1630,7 +1630,7 @@ impl<H: Hal> Sx126xDriver<H> {
     /// driver.configure_tcxo(3300, 1000)?;
     /// ```
     pub fn configure_tcxo(&mut self, voltage_mv: u16, startup_time_us: u16) -> Result<(), DriverError> {
-        if voltage_mv < 1600 || voltage_mv > 3600 {
+        if !(1600..=3600).contains(&voltage_mv) {
             return Err(DriverError::InvalidParams);
         }
 
@@ -1653,8 +1653,7 @@ impl<H: Hal> Sx126xDriver<H> {
         self.hal.write_command(0x97, &buf)?;
 
         log::info!(
-            "TCXO configured: {}mV supply, {}µs startup",
-            voltage_mv, startup_time_us
+            "TCXO configured: {voltage_mv}mV supply, {startup_time_us}µs startup"
         );
         Ok(())
     }
@@ -1746,7 +1745,7 @@ impl<H: Hal> Sx126xDriver<H> {
             // Auto-enable DC-DC for high power
             if tx_power_dbm > 15 {
                 self.set_regulator_mode(true)?;
-                log::debug!("Auto-enabled DC-DC regulator for {}dBm TX power", tx_power_dbm);
+                log::debug!("Auto-enabled DC-DC regulator for {tx_power_dbm}dBm TX power");
             }
         }
 

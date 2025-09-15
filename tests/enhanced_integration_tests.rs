@@ -248,15 +248,13 @@ fn test_enhanced_frame_decoder_with_golden_frames() {
 
     let success_rate = (successful_decodes as f64 / total_frames as f64) * 100.0;
     println!(
-        "Enhanced decoder success rate: {:.1}% ({}/{})",
-        success_rate, successful_decodes, total_frames
+        "Enhanced decoder success rate: {success_rate:.1}% ({successful_decodes}/{total_frames})"
     );
 
     // We should achieve at least 70% success rate with golden frames
     assert!(
         success_rate >= 50.0,
-        "Enhanced decoder success rate too low: {:.1}%",
-        success_rate
+        "Enhanced decoder success rate too low: {success_rate:.1}%"
     );
 }
 
@@ -324,7 +322,7 @@ fn test_enhanced_crc_calculation() {
 
                         // Try alternative CRC calculation for debugging
                         let alt_crc = calculate_wmbus_crc_enhanced(&frame_data);
-                        println!("  Alternative (full frame): {:04X}", alt_crc);
+                        println!("  Alternative (full frame): {alt_crc:04X}");
                     }
                 }
             }
@@ -334,16 +332,14 @@ fn test_enhanced_crc_calculation() {
     if total_tests > 0 {
         let crc_success_rate = (crc_matches as f64 / total_tests as f64) * 100.0;
         println!(
-            "CRC validation success rate: {:.1}% ({}/{})",
-            crc_success_rate, crc_matches, total_tests
+            "CRC validation success rate: {crc_success_rate:.1}% ({crc_matches}/{total_tests})"
         );
 
         // We expect some CRC mismatches due to different implementations
         // But should achieve reasonable success rate
         assert!(
             crc_success_rate >= 50.0,
-            "CRC success rate too low: {:.1}%",
-            crc_success_rate
+            "CRC success rate too low: {crc_success_rate:.1}%"
         );
     } else {
         println!("No frames with expected CRC values found");
@@ -369,8 +365,7 @@ fn test_bit_reversal_with_wmbus_sync() {
     assert_eq!(norm_sync_b, 0x3D, "Type B sync normalization failed");
 
     println!(
-        "✓ Sync byte normalization: 0x{:02X}→0x{:02X}, 0x{:02X}→0x{:02X}",
-        raw_sync_a, norm_sync_a, raw_sync_b, norm_sync_b
+        "✓ Sync byte normalization: 0x{raw_sync_a:02X}→0x{norm_sync_a:02X}, 0x{raw_sync_b:02X}→0x{norm_sync_b:02X}"
     );
 
     // Test with golden frame data
@@ -443,12 +438,12 @@ fn test_crypto_with_simulated_encrypted_frame() {
                     // In production with real AES, this would be a proper round-trip test
                 }
                 Err(e) => {
-                    println!("⚠ CTR decryption failed: {:?}", e);
+                    println!("⚠ CTR decryption failed: {e:?}");
                 }
             }
         }
         Err(e) => {
-            println!("⚠ CTR encryption failed: {:?}", e);
+            println!("⚠ CTR encryption failed: {e:?}");
         }
     }
 
@@ -486,10 +481,10 @@ fn test_end_to_end_pipeline() {
         match io_buffer.write(&frame_data) {
             Ok(bytes_written) => {
                 assert_eq!(bytes_written, frame_data.len());
-                println!("  ✓ IoBuffer write: {} bytes", bytes_written);
+                println!("  ✓ IoBuffer write: {bytes_written} bytes");
             }
             Err(e) => {
-                println!("  ✗ IoBuffer write failed: {:?}", e);
+                println!("  ✗ IoBuffer write failed: {e:?}");
                 continue;
             }
         }
@@ -501,7 +496,7 @@ fn test_end_to_end_pipeline() {
                 println!("  ✓ Frame decoder input: {} bytes", buffered_data.len());
             }
             Err(e) => {
-                println!("  ✗ Frame decoder input failed: {:?}", e);
+                println!("  ✗ Frame decoder input failed: {e:?}");
                 continue;
             }
         }
@@ -519,7 +514,7 @@ fn test_end_to_end_pipeline() {
                         pipeline_successes += 1;
                     }
                     Err(e) => {
-                        println!("  ✗ M-Bus frame decode failed: {:?}", e);
+                        println!("  ✗ M-Bus frame decode failed: {e:?}");
                     }
                 }
             }
@@ -542,7 +537,7 @@ fn test_end_to_end_pipeline() {
                         println!("  ⚠ wM-Bus frame incomplete");
                     }
                     Err(e) => {
-                        println!("  ✗ wM-Bus frame decode failed: {:?}", e);
+                        println!("  ✗ wM-Bus frame decode failed: {e:?}");
                     }
                 }
             }
@@ -559,8 +554,7 @@ fn test_end_to_end_pipeline() {
 
     assert!(
         pipeline_success_rate >= 60.0,
-        "Pipeline success rate too low: {:.1}%",
-        pipeline_success_rate
+        "Pipeline success rate too low: {pipeline_success_rate:.1}%"
     );
 }
 
@@ -626,18 +620,16 @@ fn test_frame_processing_performance() {
 
     println!("\nPerformance results:");
     println!(
-        "  Frames processed: {}/{}",
-        successful_decodes, test_iterations
+        "  Frames processed: {successful_decodes}/{test_iterations}"
     );
-    println!("  Time elapsed: {:?}", elapsed);
-    println!("  Frames/second: {:.1}", frames_per_second);
-    println!("  Bytes/second: {:.0}", bytes_per_second);
+    println!("  Time elapsed: {elapsed:?}");
+    println!("  Frames/second: {frames_per_second:.1}");
+    println!("  Bytes/second: {bytes_per_second:.0}");
 
     // Ensure reasonable performance (at least 1000 frames/second)
     assert!(
         frames_per_second >= 1000.0,
-        "Frame processing too slow: {:.1} frames/second",
-        frames_per_second
+        "Frame processing too slow: {frames_per_second:.1} frames/second"
     );
 }
 
@@ -660,7 +652,7 @@ fn test_error_handling_with_malformed_frames() {
     ];
 
     for (name, hex_data) in malformed_frames {
-        println!("Testing malformed frame: {}", name);
+        println!("Testing malformed frame: {name}");
 
         if !hex_data.is_empty() {
             let frame_data = hex_to_bytes(hex_data);
@@ -668,13 +660,13 @@ fn test_error_handling_with_malformed_frames() {
 
             match decoder.try_decode_frame() {
                 Ok(Some(_)) => {
-                    println!("  ⚠ Unexpected successful decode for {}", name);
+                    println!("  ⚠ Unexpected successful decode for {name}");
                 }
                 Ok(None) => {
-                    println!("  ✓ Correctly identified incomplete frame: {}", name);
+                    println!("  ✓ Correctly identified incomplete frame: {name}");
                 }
                 Err(e) => {
-                    println!("  ✓ Correctly rejected malformed frame: {} - {:?}", name, e);
+                    println!("  ✓ Correctly rejected malformed frame: {name} - {e:?}");
                 }
             }
         }
@@ -724,9 +716,9 @@ fn test_decoder_statistics() {
 
     let stats = decoder.stats();
     println!("Processing statistics:");
-    println!("  Total frames processed: {}", processed_frames);
-    println!("  M-Bus frames: {}", mbus_frames);
-    println!("  wM-Bus frames: {}", wmbus_frames);
+    println!("  Total frames processed: {processed_frames}");
+    println!("  M-Bus frames: {mbus_frames}");
+    println!("  wM-Bus frames: {wmbus_frames}");
     println!("  wM-Bus decoder stats:");
     println!("    Frames received: {}", stats.frames_received);
     println!("    Frames decoded: {}", stats.frames_decoded);
@@ -759,10 +751,10 @@ fn test_integration_test_completeness() {
     }
 
     println!("Frame type coverage:");
-    println!("  Type A: {}", type_a_count);
-    println!("  Type B: {}", type_b_count);
-    println!("  Long: {}", long_frame_count);
-    println!("  Short: {}", short_frame_count);
+    println!("  Type A: {type_a_count}");
+    println!("  Type B: {type_b_count}");
+    println!("  Long: {long_frame_count}");
+    println!("  Short: {short_frame_count}");
     println!("  Total: {}", GOLDEN_FRAMES.len());
 
     assert!(

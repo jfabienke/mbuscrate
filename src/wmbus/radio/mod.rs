@@ -4,6 +4,10 @@ pub mod irq;
 pub mod modulation;
 pub mod radio_driver;
 
+// PIO IRQ debouncing for Raspberry Pi 5
+#[cfg(feature = "pio-irq")]
+pub mod pio_irq;
+
 // LoRa support
 pub mod lora;
 

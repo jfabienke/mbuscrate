@@ -5,11 +5,8 @@
 //! - Decode payloads from various meter types
 //! - Handle unknown devices with fallback decoders
 
-use mbuscrate::wmbus::radio::lora::decoders::{
-    CompactFrameDecoder, DecentlabDecoder, DraginoDecoder, GenericCounterDecoder,
-};
-use mbuscrate::wmbus::radio::lora::{
-    DraginoModel, ElvacoModel, GenericCounterConfig, LoRaDeviceManager, LoRaPayloadDecoder,
+use mbus_rs::wmbus::radio::lora::decoder::{
+    DecentlabConfig, DecoderType, DraginoModel, GenericCounterConfig, LoRaDeviceManager,
 };
 
 fn main() {
@@ -19,20 +16,28 @@ fn main() {
     // Register specific decoders for known devices
 
     // Water meter using generic counter format
-    let water_meter_decoder = Box::new(GenericCounterDecoder::water_meter(10.0)); // 10 pulses/L
-    manager.register_device("00112233".to_string(), water_meter_decoder);
+    let water_meter_config = GenericCounterConfig {
+        big_endian: false,
+        counter_size: 4,
+        unit: "L".to_string(),
+        scale_factor: 1.0 / 10.0, // 10 pulses per liter
+        has_timestamp: false,
+        has_battery: true,
+    };
+    manager.register_device("00112233".to_string(), DecoderType::GenericCounter(water_meter_config));
 
     // Dragino SW3L flow sensor
-    let dragino_decoder = Box::new(DraginoDecoder::new(DraginoModel::SW3L));
-    manager.register_device("AABBCCDD".to_string(), dragino_decoder);
+    manager.register_device("AABBCCDD".to_string(), DecoderType::Dragino(DraginoModel::SW3L));
 
     // Decentlab pressure sensor
-    let decentlab_decoder = Box::new(DecentlabDecoder::dl_pr26());
-    manager.register_device("12345678".to_string(), decentlab_decoder);
+    let decentlab_config = DecentlabConfig {
+        protocol_version: 2,
+        channels: vec![], // Will be auto-detected
+    };
+    manager.register_device("12345678".to_string(), DecoderType::Decentlab(decentlab_config));
 
     // EN 13757-3 Compact frame decoder as default
-    let compact_decoder = Box::new(CompactFrameDecoder::default());
-    manager.set_default_decoder(compact_decoder);
+    manager.set_default_decoder(DecoderType::En13757Compact);
 
     // Example 1: Decode water meter data
     println!("=== Water Meter Example ===");
@@ -115,7 +120,7 @@ fn main() {
     let raw_payload = vec![0x01, 0x02, 0x03, 0x04, 0x05];
 
     // Create a manager with only raw binary decoder
-    let mut raw_manager = LoRaDeviceManager::new();
+    let raw_manager = LoRaDeviceManager::new();
 
     match raw_manager.decode_payload("ANY", &raw_payload, 1) {
         Ok(data) => {
