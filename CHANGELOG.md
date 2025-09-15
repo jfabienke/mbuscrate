@@ -74,6 +74,41 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
 
 ### Added
 
+#### Vendor Extension System and Manufacturer Database
+- **Comprehensive Vendor Extension Framework** (`src/vendors/`):
+  - Pluggable vendor extension system via `VendorExtension` trait
+  - `VendorRegistry` for managing multiple vendor extensions
+  - Dynamic dispatch for vendor-specific parsing and CRC tolerance
+  - Support for manufacturer-specific VIF routing (e.g., VIF 0x04 for QUNDIS)
+  - `VendorDataRecord` and `VendorVariable` for vendor-specific data structures
+
+- **QUNDIS HCA Vendor Extension** (`src/vendors/qundis_hca.rs`):
+  - Proprietary MbusValueDateG date decoding (VIF 0x04) fixing 10-year offset bug
+  - Non-contiguous bit field parsing: `((raw & 0xF000) >> 9) | ((raw & 0x00E0) >> 5) + 2000`
+  - Automatic detection via UserData72 header pattern
+  - CRC tolerance for known QUNDIS block 3 issues
+  - Complete test coverage for date edge cases
+
+- **M-Bus Manufacturer Database** (`src/vendors/manufacturer.rs`):
+  - EN 13757-3 compliant FLAG Association manufacturer ID encoding
+  - Formula: `ID = (L₁-64) × 32² + (L₂-64) × 32 + (L₃-64)` where L₁,L₂,L₃ are ASCII codes
+  - 30+ manufacturers with categorization (HCA, Water, Heat/Energy, Multi-utility, Gas)
+  - Valid ID range: 0x0421 (AAA) to 0x6B5A (ZZZ)
+  - MSB handling for hard/soft address distinction (bit 15)
+  - Comprehensive lookup functions:
+    - `manufacturer_to_id()`: Convert 3-letter code to 16-bit ID
+    - `id_to_manufacturer()`: Reverse conversion with unknown handling
+    - `get_manufacturer_info()`: Detailed manufacturer metadata
+    - `has_quirks()`: Check for vendor-specific M-Bus protocol quirks
+    - `all_manufacturers()`: Iterator over entire database
+  - Automatic vendor extension registration for manufacturers with quirks
+
+- **Documentation**:
+  - `docs/MANUFACTURER_DATABASE.md`: Complete manufacturer reference with 30+ entries
+  - `docs/ENHANCEMENTS.md`: Production-grade enhancement documentation
+  - Verification examples and encoding calculations
+  - Integration guides for vendor extensions
+
 #### Crypto Security Enhancements
 - CMAC, HMAC, and SHA1 support for advanced wM-Bus encryption (preparing for Mode 13 TLS)
 - Expanded `crypto` feature flag to include new cryptographic primitives
@@ -182,10 +217,12 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
 - **Platform Support Matrix**: Extended from serial-only to multi-platform radio support
 - **Device Manager**: Enhanced MBusDeviceManager to handle both M-Bus and wM-Bus connections
 - **Documentation Updates**: All documentation files updated to reflect wireless capabilities
+- **Manufacturer Database**: Migrated from simple lookup to comprehensive database with metadata
+- **Vendor Support**: Enhanced to automatically detect and register vendor extensions
 - Improved BCD encoding/decoding for better compatibility
-- Enhanced VIF parsing with comprehensive lookup tables
+- Enhanced VIF parsing with comprehensive lookup tables and vendor-specific routing
 - Optimized frame parsing using nom parser combinators
-- Updated various tests for new features (baud_rate_adaptation, e2e_scenarios, etc.)
+- Updated various tests for new features (baud_rate_adaptation, e2e_scenarios, manufacturer_tests, etc.)
 - Refactored instrumentation converters with split modes
 
 ### Fixed
@@ -194,7 +231,13 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
   - `IrqMaskBit` bitflags corrected to match interrupt register layout (RxDone=bit0, TxDone=bit1 per Table 13-29)
   - Eliminates latent bugs that would cause "stuck" RX states and invalid state guards on Pi hardware
   - All mock tests updated and 13 integration tests passing with corrected values
-- VIF extension parsing for manufacturer-specific codes
+- **QUNDIS Date Decoding**: Fixed 10-year offset bug in proprietary MbusValueDateG format
+  - Corrected non-contiguous bit field extraction for accurate year calculation
+  - Dates now correctly decode from 2000-2127 range instead of 1990-2117
+- **Manufacturer ID Encoding**: Fixed FLAG Association algorithm to match EN 13757-3 standard
+  - Corrected formula from bit-shifting to proper base-32 calculation
+  - All manufacturer IDs recalculated (e.g., QDS: 0x5153→0x4493, ZEN: 0x5A45→0x68AE)
+- VIF extension parsing for manufacturer-specific codes with vendor routing
 - Mock serial port timing and response handling
 - Test coverage for edge cases in data encoding
 - Minor test assertion updates and error handling improvements

@@ -4,6 +4,7 @@
 //! to the M-Bus protocol, allowing external crates to override standard behavior
 //! at specific extension points defined in EN 13757.
 
+pub mod manufacturer;
 pub mod qundis_hca;
 
 use std::collections::HashMap;
@@ -332,30 +333,49 @@ impl VendorRegistry {
 
         Ok(registry)
     }
+
+    /// Create a registry with automatic vendor detection
+    ///
+    /// This method scans the manufacturer database and automatically
+    /// registers vendor extensions for all manufacturers with known quirks.
+    pub fn with_manufacturer_detection() -> Result<Self, MBusError> {
+        let registry = Self::new();
+
+        // Auto-register all manufacturers with quirks
+        for (&id, info) in crate::vendors::manufacturer::all_manufacturers() {
+            if info.has_quirks {
+                match info.code {
+                    "QDS" => {
+                        let extension = Arc::new(crate::vendors::qundis_hca::QundisHcaExtension::new());
+                        registry.register(info.code, extension)?;
+                    },
+                    // Add other vendors with quirks here as they're implemented
+                    _ => {
+                        // Log that this manufacturer has quirks but no extension yet
+                        log::debug!("Manufacturer {} has quirks but no extension implemented", info.code);
+                    }
+                }
+            }
+        }
+
+        Ok(registry)
+    }
 }
 
 /// Helper function to convert manufacturer ID to string
+///
+/// This function provides backward compatibility while using the
+/// comprehensive manufacturer database for better accuracy.
 pub fn manufacturer_id_to_string(id: u16) -> String {
-    // Convert 3-letter manufacturer code from u16
-    let c1 = ((id >> 10) & 0x1F) as u8 + b'A' - 1;
-    let c2 = ((id >> 5) & 0x1F) as u8 + b'A' - 1;
-    let c3 = (id & 0x1F) as u8 + b'A' - 1;
-
-    String::from_utf8(vec![c1, c2, c3]).unwrap_or_else(|_| format!("{id:04X}"))
+    crate::vendors::manufacturer::id_to_manufacturer(id)
 }
 
 /// Helper function to parse manufacturer string to ID
+///
+/// This function provides backward compatibility while using the
+/// standard FLAG Association algorithm for proper M-Bus compliance.
 pub fn parse_manufacturer_id(manufacturer: &str) -> u16 {
-    if manufacturer.len() != 3 {
-        return 0;
-    }
-
-    let bytes = manufacturer.as_bytes();
-    let c1 = (bytes[0].saturating_sub(b'A').saturating_add(1) & 0x1F) as u16;
-    let c2 = (bytes[1].saturating_sub(b'A').saturating_add(1) & 0x1F) as u16;
-    let c3 = (bytes[2].saturating_sub(b'A').saturating_add(1) & 0x1F) as u16;
-
-    (c1 << 10) | (c2 << 5) | c3
+    crate::vendors::manufacturer::manufacturer_to_id(manufacturer).unwrap_or(0)
 }
 
 /// Dispatch helper for DIF manufacturer block hook

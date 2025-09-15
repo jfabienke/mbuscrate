@@ -58,6 +58,14 @@ pub use vendors::{
     manufacturer_id_to_string, parse_manufacturer_id,
 };
 
+// Manufacturer database
+pub use vendors::manufacturer::{
+    ManufacturerInfo, get_manufacturer_info, get_manufacturer_name,
+    has_quirks, all_manufacturers, is_valid_id,
+    manufacturer_to_id, id_to_manufacturer,
+    is_soft_address, set_soft_address,
+};
+
 // Vendor-specific extensions
 pub use vendors::qundis_hca::QundisHcaExtension;
 

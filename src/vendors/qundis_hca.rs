@@ -37,7 +37,7 @@
 
 use crate::error::MBusError;
 use crate::vendors::{VendorExtension, VendorVariable, VendorDeviceInfo};
-use chrono::{DateTime, Utc, NaiveDate, Datelike};
+use chrono::{DateTime, Utc, NaiveDate};
 use log::{debug, warn};
 use std::collections::HashMap;
 
