@@ -6,13 +6,11 @@
 //!
 //! Based on LoRaWAN ADR algorithms with enhancements from field experience.
 
-use crate::wmbus::radio::modulation::{
-    CodingRate, LoRaBandwidth, LoRaModParams, SpreadingFactor,
-};
+use crate::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, LoRaModParams, SpreadingFactor};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use log::{debug, info, warn};
 
 /// ADR configuration parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,33 +50,33 @@ pub struct AdrConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RssiThresholds {
     /// RSSI above this → SF7 (best signal)
-    pub sf7_threshold: i16,  // Typically -80 dBm
+    pub sf7_threshold: i16, // Typically -80 dBm
 
     /// RSSI above this → SF8
-    pub sf8_threshold: i16,  // Typically -85 dBm
+    pub sf8_threshold: i16, // Typically -85 dBm
 
     /// RSSI above this → SF9
-    pub sf9_threshold: i16,  // Typically -90 dBm
+    pub sf9_threshold: i16, // Typically -90 dBm
 
     /// RSSI above this → SF10
     pub sf10_threshold: i16, // Typically -95 dBm
 
     /// RSSI above this → SF11
     pub sf11_threshold: i16, // Typically -100 dBm
-    // RSSI below sf11_threshold → SF12 (worst signal)
+                             // RSSI below sf11_threshold → SF12 (worst signal)
 }
 
 /// SNR thresholds for spreading factor selection
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnrThresholds {
     /// SNR above this → can use SF7
-    pub sf7_min_snr: f32,  // Typically 5 dB
+    pub sf7_min_snr: f32, // Typically 5 dB
 
     /// SNR above this → can use SF8
-    pub sf8_min_snr: f32,  // Typically 2.5 dB
+    pub sf8_min_snr: f32, // Typically 2.5 dB
 
     /// SNR above this → can use SF9
-    pub sf9_min_snr: f32,  // Typically 0 dB
+    pub sf9_min_snr: f32, // Typically 0 dB
 
     /// SNR above this → can use SF10
     pub sf10_min_snr: f32, // Typically -2.5 dB
@@ -96,8 +94,8 @@ impl Default for AdrConfig {
             enabled: true,
             min_sf: SpreadingFactor::SF7,
             max_sf: SpreadingFactor::SF12,
-            min_tx_power: 2,   // 2 dBm minimum
-            max_tx_power: 14,  // 14 dBm for EU868
+            min_tx_power: 2,  // 2 dBm minimum
+            max_tx_power: 14, // 14 dBm for EU868
             averaging_window: 20,
             evaluation_interval: Duration::from_secs(30),
             rssi_thresholds: RssiThresholds {
@@ -246,7 +244,10 @@ impl AdrController {
     pub fn record_loss(&mut self) {
         self.consecutive_losses += 1;
 
-        warn!("ADR: Packet loss recorded (consecutive: {})", self.consecutive_losses);
+        warn!(
+            "ADR: Packet loss recorded (consecutive: {})",
+            self.consecutive_losses
+        );
 
         // Force evaluation if too many losses
         if self.consecutive_losses >= 3 {
@@ -318,11 +319,7 @@ impl AdrController {
         if reason != AdrReason::Stable {
             info!(
                 "ADR: Changing SF{} → SF{}, Power: {} dBm (RSSI: {} dBm, SNR: {} dB)",
-                self.current_sf as u8,
-                target_sf as u8,
-                target_power,
-                avg_rssi,
-                avg_snr
+                self.current_sf as u8, target_sf as u8, target_power, avg_rssi, avg_snr
             );
 
             self.current_sf = target_sf;
@@ -362,7 +359,7 @@ impl AdrController {
 
         self.current_sf = new_sf;
         self.current_tx_power = new_power;
-        self.consecutive_losses = 0;  // Reset counter
+        self.consecutive_losses = 0; // Reset counter
 
         AdrDecision {
             spreading_factor: new_sf,
@@ -475,8 +472,6 @@ impl AdrController {
         let target_margin = 10;
         let power_adjustment = target_margin - link_margin;
 
-        
-
         (self.current_tx_power + power_adjustment as i8)
             .max(self.config.min_tx_power)
             .min(self.config.max_tx_power)
@@ -495,7 +490,8 @@ impl AdrController {
         );
 
         self.current_sf = sf;
-        self.current_tx_power = tx_power.max(self.config.min_tx_power)
+        self.current_tx_power = tx_power
+            .max(self.config.min_tx_power)
             .min(self.config.max_tx_power);
 
         // Clear history to start fresh with new parameters
@@ -507,8 +503,8 @@ impl AdrController {
     pub fn to_mod_params(&self) -> LoRaModParams {
         LoRaModParams {
             sf: self.current_sf,
-            bw: LoRaBandwidth::BW125,  // Fixed for now
-            cr: CodingRate::CR4_5,     // Fixed for now
+            bw: LoRaBandwidth::BW125, // Fixed for now
+            cr: CodingRate::CR4_5,    // Fixed for now
             low_data_rate_optimize: matches!(
                 self.current_sf,
                 SpreadingFactor::SF11 | SpreadingFactor::SF12
@@ -530,7 +526,7 @@ mod tests {
 
         // Record good signal packets
         for _ in 0..10 {
-            adr.record_packet(-75, 10.0);  // Strong signal
+            adr.record_packet(-75, 10.0); // Strong signal
         }
 
         // Force evaluation
@@ -563,7 +559,12 @@ mod tests {
         adr.record_loss(); // This triggers force_evaluation() which applies the decision
 
         // Check that SF was increased due to packet loss
-        assert!(adr.current_sf > initial_sf, "SF should have increased from {:?} to {:?}", initial_sf, adr.current_sf);
+        assert!(
+            adr.current_sf > initial_sf,
+            "SF should have increased from {:?} to {:?}",
+            initial_sf,
+            adr.current_sf
+        );
 
         // The internal state should now show the adjustment was applied
         println!("SF changed from {:?} to {:?}", initial_sf, adr.current_sf);
@@ -581,7 +582,7 @@ mod tests {
 
         // Record signal just slightly better than SF7 threshold
         for _ in 0..10 {
-            adr.record_packet(-79, 8.0);  // Just above -80 dBm threshold
+            adr.record_packet(-79, 8.0); // Just above -80 dBm threshold
         }
 
         let decision = adr.force_evaluation();

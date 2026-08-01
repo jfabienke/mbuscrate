@@ -9,12 +9,14 @@
 //! Monitor with probe-rs:
 //!   probe-rs rtt --chip BCM2711 --defmt
 
-use mbus_rs::logging::{init_enhanced_logging, is_rtt_available, get_rtt_stats};
+use mbus_rs::logging::{get_rtt_stats, init_enhanced_logging, is_rtt_available};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
+// `init_enhanced_logging` returns Box<dyn Error + Send + Sync>, so main's error type
+// must match it rather than the narrower Box<dyn Error>.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("=== RTT + defmt Logging Demo ===");
 
     // Initialize enhanced logging with RTT support
@@ -28,8 +30,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         if rtt_available {
             let stats = get_rtt_stats();
-            println!("RTT Stats: Platform: {}, Channels: {}, SWO: {} Hz",
-                     stats.platform, stats.channels_active, stats.swo_baud);
+            println!(
+                "RTT Stats: Platform: {}, Channels: {}, SWO: {} Hz",
+                stats.platform, stats.channels_active, stats.swo_baud
+            );
         }
 
         println!("Starting structured logging demo...");
@@ -59,14 +63,17 @@ async fn demo_irq_logging() {
 
     // Simulate SX1262 IRQ events
     let irq_events = vec![
-        (0x01, 2500, 26),   // TX_DONE on GPIO 26
-        (0x02, 3200, 26),   // RX_DONE on GPIO 26
-        (0x04, 50000, 26),  // RX_TIMEOUT on GPIO 26
-        (0x08, 15000, 26),  // CAD_DONE on GPIO 26
+        (0x01, 2500, 26),  // TX_DONE on GPIO 26
+        (0x02, 3200, 26),  // RX_DONE on GPIO 26
+        (0x04, 50000, 26), // RX_TIMEOUT on GPIO 26
+        (0x08, 15000, 26), // CAD_DONE on GPIO 26
     ];
 
     for (mask, latency_ns, pin) in irq_events {
-        println!("IRQ: mask=0x{:02X}, latency={}ns, pin={}", mask, latency_ns, pin);
+        println!(
+            "IRQ: mask=0x{:02X}, latency={}ns, pin={}",
+            mask, latency_ns, pin
+        );
         structured::log_irq_event(mask, latency_ns, pin);
         sleep(Duration::from_millis(100)).await;
     }
@@ -74,7 +81,7 @@ async fn demo_irq_logging() {
 
 #[cfg(feature = "rtt-logging")]
 async fn demo_lora_logging() {
-    use mbus_rs::logging::{structured, encoders::LoRaEventType};
+    use mbus_rs::logging::{encoders::LoRaEventType, structured};
 
     println!("\n--- LoRa Event Logging Demo ---");
 
@@ -94,7 +101,10 @@ async fn demo_lora_logging() {
 
 #[cfg(feature = "rtt-logging")]
 async fn demo_crypto_logging() {
-    use mbus_rs::logging::{structured, encoders::{CryptoOp, CryptoBackend}};
+    use mbus_rs::logging::{
+        encoders::{CryptoBackend, CryptoOp},
+        structured,
+    };
 
     println!("\n--- Crypto Operation Logging Demo ---");
 
@@ -114,7 +124,7 @@ async fn demo_crypto_logging() {
 
 #[cfg(feature = "rtt-logging")]
 async fn demo_performance_test() {
-    use mbus_rs::logging::{structured, encoders::LoRaEventType};
+    use mbus_rs::logging::{encoders::LoRaEventType, structured};
 
     println!("\n--- Performance Test: 1000 Events ---");
 
@@ -132,8 +142,11 @@ async fn demo_performance_test() {
     }
 
     let duration = start.elapsed();
-    println!("1000 events logged in {:?} ({:.2} events/ms)",
-             duration, 1000.0 / duration.as_millis() as f64);
+    println!(
+        "1000 events logged in {:?} ({:.2} events/ms)",
+        duration,
+        1000.0 / duration.as_millis() as f64
+    );
 
     if is_rtt_available() {
         println!("RTT provides extremely high throughput with minimal overhead!");

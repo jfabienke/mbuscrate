@@ -318,8 +318,7 @@ fn test_mbus_data_record_decode_insufficient_data() {
 
     // This might fail or return partial data depending on implementation
     let result = mbus_data_record_decode(&input);
-    if result.is_ok() {
-        let (_, record) = result.unwrap();
+    if let Ok((_, record)) = result {
         if let MBusRecordValue::Numeric(val) = record.value {
             // Should handle partial data gracefully
             assert!(val >= 0.0);

@@ -8,26 +8,35 @@
 //!
 //! Each block contains:
 //! - 14 bytes of data
-//! - 2 bytes of CRC-16 (init value 0xFFFF)
+//! - 2 bytes of CRC-16/EN-13757, big-endian (see [`crate::wmbus::crc`])
+//!
+//! Note: this is the uniform 16-byte OMS transport-block model (14 data + 2 CRC). The
+//! EN 13757-4 *link-layer* Type A framing that meters transmit — a 10-byte block 0 then
+//! 16-byte data blocks — is decoded by [`crate::wmbus::mode_c::decode_mode_c`], which is
+//! the canonical on-wire path. Both now read the CRC big-endian.
 //!
 //! ## Usage
 //!
 //! ```rust
-//! use wmbus::block::{verify_blocks, extract_block_data};
+//! use mbus_rs::wmbus::block::{verify_blocks, extract_block_data};
 //!
-//! let payload = [...]; // Multi-block payload
+//! // Two 16-byte blocks (14 data bytes + 2 CRC bytes each)
+//! let payload = vec![0u8; 32];
 //! match verify_blocks(&payload, false) {
 //!     Ok(blocks) => {
+//!         assert_eq!(blocks.len(), 2);
 //!         let data = extract_block_data(&blocks);
 //!         // Process concatenated data
+//!         assert_eq!(data.len(), 28); // 2 blocks x 14 data bytes
 //!     }
-//!     Err(e) => println!("Block validation failed: {}", e),
+//!     Err(e) => println!("Block validation failed: {e}"),
 //! }
 //! ```
 
 use crate::error::MBusError;
-use crate::vendors::{CrcErrorType, CrcErrorContext, VendorRegistry, dispatch_crc_tolerance};
 use crate::instrumentation::stats::{update_device_error, ErrorType};
+use crate::vendors::{dispatch_crc_tolerance, CrcErrorContext, CrcErrorType, VendorRegistry};
+use crate::wmbus::crc::read_crc_be;
 use log::{debug, warn};
 
 /// Size of a complete block (data + CRC)
@@ -36,11 +45,6 @@ pub const BLOCK_SIZE: usize = 16;
 pub const BLOCK_DATA_SIZE: usize = 14;
 /// Size of CRC field in each block
 pub const BLOCK_CRC_SIZE: usize = 2;
-
-/// CRC-16 polynomial for block validation (OMS specific)
-const BLOCK_CRC_POLY: u16 = 0x3D65;
-/// Initial value for block CRC calculation
-const BLOCK_CRC_INIT: u16 = 0xFFFF;
 
 /// Block validation result
 #[derive(Debug, Clone)]
@@ -59,26 +63,17 @@ pub struct BlockInfo {
     pub crc_valid: bool,
 }
 
-/// Calculate CRC-16 for a block using OMS polynomial
+/// Calculate the CRC-16 for a wM-Bus block.
 ///
-/// Uses polynomial 0x3D65 with initial value 0xFFFF as specified
-/// in OMS 7.2.1 for block-level integrity checking.
+/// Block CRCs use the same CRC-16/EN-13757 as frame CRCs (poly 0x3D65, init 0x0000,
+/// xorout 0xFFFF); see [`crate::wmbus::crc`]. The previous implementation here used
+/// init 0xFFFF with no final xor, which is a different, non-standard CRC and did not
+/// match what meters transmit (nor the epulse reference).
+///
+/// The stored block CRC is read big-endian via [`crate::wmbus::crc::read_crc_be`],
+/// matching the wire order used by [`crate::wmbus::mode_c::decode_mode_c`].
 pub fn calculate_block_crc(data: &[u8]) -> u16 {
-    let mut crc = BLOCK_CRC_INIT;
-
-    for &byte in data {
-        crc ^= (byte as u16) << 8;
-        for _ in 0..8 {
-            if crc & 0x8000 != 0 {
-                crc = (crc << 1) ^ BLOCK_CRC_POLY;
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
-
-    // Note: Block CRC is NOT complemented (unlike frame CRC)
-    crc
+    crate::wmbus::crc::calculate_wmbus_crc(data)
 }
 
 /// Verify multi-block payload integrity
@@ -99,8 +94,10 @@ pub fn calculate_block_crc(data: &[u8]) -> u16 {
 /// # Example
 ///
 /// ```rust
-/// let payload = vec![0; 32]; // 2 blocks
-/// let blocks = verify_blocks(&payload, false)?;
+/// use mbus_rs::wmbus::block::verify_blocks;
+///
+/// let payload = vec![0u8; 32]; // 2 blocks
+/// let blocks = verify_blocks(&payload, false).unwrap();
 /// assert_eq!(blocks.len(), 2);
 /// ```
 pub fn verify_blocks(payload: &[u8], encrypted: bool) -> Result<Vec<BlockInfo>, MBusError> {
@@ -109,7 +106,7 @@ pub fn verify_blocks(payload: &[u8], encrypted: bool) -> Result<Vec<BlockInfo>, 
     }
 
     // Check if payload is properly block-aligned
-    if payload.len() % BLOCK_SIZE != 0 {
+    if !payload.len().is_multiple_of(BLOCK_SIZE) {
         warn!(
             "Payload length {} is not a multiple of block size {}",
             payload.len(),
@@ -148,7 +145,7 @@ pub fn verify_blocks(payload: &[u8], encrypted: bool) -> Result<Vec<BlockInfo>, 
 
         // Extract data and CRC portions
         let data = &block_data[0..BLOCK_DATA_SIZE];
-        let crc_received = u16::from_le_bytes([block_data[14], block_data[15]]);
+        let crc_received = read_crc_be(&block_data[14..16]);
 
         // Calculate expected CRC
         let crc_calculated = calculate_block_crc(data);
@@ -237,7 +234,7 @@ pub fn validate_block_with_tolerance(
     }
 
     let data = &block_data[0..BLOCK_DATA_SIZE];
-    let crc_received = u16::from_le_bytes([block_data[14], block_data[15]]);
+    let crc_received = read_crc_be(&block_data[14..16]);
     let crc_calculated = calculate_block_crc(data);
 
     if crc_received == crc_calculated {
@@ -269,17 +266,18 @@ pub fn validate_block_with_tolerance(
 ///
 /// Type A frames have intermediate blocks of 16 bytes each,
 /// with the final block potentially being shorter.
-pub fn process_type_a_blocks(
-    payload: &[u8],
-    encrypted: bool,
-) -> Result<Vec<u8>, MBusError> {
+pub fn process_type_a_blocks(payload: &[u8], encrypted: bool) -> Result<Vec<u8>, MBusError> {
     let blocks = verify_blocks(payload, encrypted)?;
 
     // Check if all blocks are valid (for non-encrypted)
     if !encrypted {
         let invalid_count = blocks.iter().filter(|b| !b.crc_valid).count();
         if invalid_count > 0 {
-            warn!("{} of {} blocks have invalid CRC", invalid_count, blocks.len());
+            warn!(
+                "{} of {} blocks have invalid CRC",
+                invalid_count,
+                blocks.len()
+            );
             // Continue processing even with some invalid blocks
             // (higher layers can decide how to handle)
         }
@@ -331,7 +329,7 @@ pub fn verify_blocks_with_vendor(
 
         // Extract data and CRC portions
         let data = &block_data[0..BLOCK_DATA_SIZE];
-        let crc_received = u16::from_le_bytes([block_data[14], block_data[15]]);
+        let crc_received = read_crc_be(&block_data[14..16]);
         let crc_calculated = calculate_block_crc(data);
         let mut crc_valid = crc_received == crc_calculated;
 
@@ -349,7 +347,10 @@ pub fn verify_blocks_with_vendor(
 
                 match dispatch_crc_tolerance(reg, mfr, None, &CrcErrorType::Block, &context) {
                     Ok(Some(true)) => {
-                        debug!("Vendor tolerance applied for block {} CRC error", blocks.len());
+                        debug!(
+                            "Vendor tolerance applied for block {} CRC error",
+                            blocks.len()
+                        );
                         crc_valid = true; // Tolerate the error
                     }
                     _ => {
@@ -396,8 +397,9 @@ mod tests {
     #[test]
     fn test_block_crc_calculation() {
         // Test vector with known CRC
-        let data = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-                        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E];
+        let data = vec![
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+        ];
         let crc = calculate_block_crc(&data);
 
         // Verify CRC is calculated (exact value depends on polynomial)
@@ -410,8 +412,7 @@ mod tests {
         // Create a valid block
         let mut block = vec![0x01; BLOCK_DATA_SIZE];
         let crc = calculate_block_crc(&block);
-        block.push((crc & 0xFF) as u8);
-        block.push((crc >> 8) as u8);
+        block.extend_from_slice(&crc.to_be_bytes()); // big-endian, as transmitted
 
         let blocks = verify_blocks(&block, false).unwrap();
         assert_eq!(blocks.len(), 1);
@@ -425,8 +426,7 @@ mod tests {
         for i in 0..3 {
             let mut block_data = vec![i as u8; BLOCK_DATA_SIZE];
             let crc = calculate_block_crc(&block_data);
-            block_data.push((crc & 0xFF) as u8);
-            block_data.push((crc >> 8) as u8);
+            block_data.extend_from_slice(&crc.to_be_bytes()); // big-endian, as transmitted
             payload.extend_from_slice(&block_data);
         }
 
@@ -442,8 +442,7 @@ mod tests {
         for i in 0..2 {
             let mut block_data = vec![i; BLOCK_DATA_SIZE];
             let crc = calculate_block_crc(&block_data);
-            block_data.push((crc & 0xFF) as u8);
-            block_data.push((crc >> 8) as u8);
+            block_data.extend_from_slice(&crc.to_be_bytes()); // big-endian, as transmitted
             payload.extend_from_slice(&block_data);
         }
 

@@ -3,9 +3,10 @@
 //! This benchmark suite compares software vs hardware AES implementations
 //! across different encryption modes (ECB, CBC, CTR, GCM).
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use mbus_rs::wmbus::crypto::{WMBusCrypto, AesKey, EncryptionMode, DeviceInfo};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use mbus_rs::wmbus::crypto::{AesKey, DeviceInfo, EncryptionMode, WMBusCrypto};
 use mbus_rs::wmbus::crypto_hardware::{get_aes_backend, init_crypto_backend};
+use std::hint::black_box;
 use std::time::Duration;
 
 /// Test data sizes
@@ -35,10 +36,14 @@ fn bench_aes_ecb(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     let backend = get_aes_backend();
-    let key = [0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
-               0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c];
-    let input = [0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d,
-                 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07, 0x34];
+    let key = [
+        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f,
+        0x3c,
+    ];
+    let input = [
+        0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07,
+        0x34,
+    ];
 
     group.throughput(Throughput::Bytes(16));
 
@@ -95,19 +100,15 @@ fn bench_frame_crypto(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(size as u64));
 
         // Benchmark encryption
-        group.bench_with_input(
-            BenchmarkId::new("encrypt", size),
-            &frame,
-            |b, frame| {
-                b.iter(|| {
-                    crypto.encrypt_frame(
-                        black_box(frame),
-                        black_box(&device_info),
-                        black_box(EncryptionMode::Mode5Ctr),
-                    )
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("encrypt", size), &frame, |b, frame| {
+            b.iter(|| {
+                crypto.encrypt_frame(
+                    black_box(frame),
+                    black_box(&device_info),
+                    black_box(EncryptionMode::Mode5Ctr),
+                )
+            })
+        });
 
         // Prepare encrypted frame for decryption benchmark
         let encrypted = crypto
@@ -119,9 +120,7 @@ fn bench_frame_crypto(c: &mut Criterion) {
             BenchmarkId::new("decrypt", size),
             &encrypted,
             |b, encrypted| {
-                b.iter(|| {
-                    crypto.decrypt_frame(black_box(encrypted), black_box(&device_info))
-                })
+                b.iter(|| crypto.decrypt_frame(black_box(encrypted), black_box(&device_info)))
             },
         );
     }
@@ -157,7 +156,7 @@ fn bench_encryption_modes(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(256));
 
     for (name, mode) in &modes {
-        group.bench_function(name, |b| {
+        group.bench_function(*name, |b| {
             b.iter(|| {
                 crypto.encrypt_frame(black_box(&frame), black_box(&device_info), black_box(*mode))
             })
@@ -214,7 +213,10 @@ fn bench_power_efficiency(c: &mut Criterion) {
 
     let backend = get_aes_backend();
     println!("Backend: {}", backend.name());
-    println!("Hardware accelerated: {}", backend.is_hardware_accelerated());
+    println!(
+        "Hardware accelerated: {}",
+        backend.is_hardware_accelerated()
+    );
 
     // Large sustained workload
     let data_size = 1024 * 1024; // 1 MB

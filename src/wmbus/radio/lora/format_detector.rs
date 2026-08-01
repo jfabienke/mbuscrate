@@ -3,7 +3,7 @@
 //! This module provides intelligent detection of payload formats based on
 //! signatures, patterns, and statistical analysis.
 
-use crate::wmbus::radio::lora::decoder::{DraginoModel, ElvacoModel, DecoderType};
+use crate::wmbus::radio::lora::decoder::{DecoderType, DraginoModel, ElvacoModel};
 
 /// Type alias for format detection function
 type DetectionFunction = Box<dyn Fn(&[u8], u8) -> Option<DetectionResult> + Send + Sync>;
@@ -611,7 +611,7 @@ impl FormatDetector {
         }
 
         // Sort by confidence (highest first)
-        results.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+        results.sort_by_key(|r| std::cmp::Reverse(r.confidence));
 
         results
     }

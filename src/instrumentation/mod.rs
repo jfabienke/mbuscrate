@@ -7,7 +7,7 @@
 pub mod converters;
 pub mod stats;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::SystemTime;
 
@@ -165,7 +165,9 @@ pub struct MeteringReport {
 impl MeteringReport {
     /// Create from UnifiedInstrumentation (filter good readings only)
     pub fn from_unified(inst: &UnifiedInstrumentation) -> Self {
-        let good_readings: Vec<Reading> = inst.readings.iter()
+        let good_readings: Vec<Reading> = inst
+            .readings
+            .iter()
             .filter(|r| validate_reading(r).is_ok())
             .cloned()
             .collect();
@@ -192,7 +194,9 @@ impl MeteringReport {
         }
         csv.push_str("timestamp,device_id,manufacturer,reading_name,value,unit\n");
         for reading in &self.readings {
-            let ts_secs = self.timestamp.duration_since(SystemTime::UNIX_EPOCH)
+            let ts_secs = self
+                .timestamp
+                .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
             csv.push_str(&format!(
@@ -218,8 +222,11 @@ pub fn validate_reading(reading: &Reading) -> Result<(), &'static str> {
     // Check based on reading name patterns
     let name_lower = reading.name.to_lowercase();
 
-    if name_lower.contains("volume") || name_lower.contains("energy") ||
-       name_lower.contains("power") || name_lower.contains("counter") {
+    if name_lower.contains("volume")
+        || name_lower.contains("energy")
+        || name_lower.contains("power")
+        || name_lower.contains("counter")
+    {
         if reading.value < 0.0 {
             return Err("Invalid: negative value for counter/volume");
         }
@@ -227,15 +234,16 @@ pub fn validate_reading(reading: &Reading) -> Result<(), &'static str> {
         if reading.value < -50.0 || reading.value > 100.0 {
             return Err("Out of bounds: temperature (-50..100°C)");
         }
-    } else if name_lower.contains("humidity") || name_lower.contains("battery") ||
-              name_lower.contains("percentage") {
+    } else if name_lower.contains("humidity")
+        || name_lower.contains("battery")
+        || name_lower.contains("percentage")
+    {
         if reading.value < 0.0 || reading.value > 100.0 {
             return Err("Out of bounds: percentage (0..100)");
         }
-    } else if name_lower.contains("pressure")
-        && (reading.value < 0.0 || reading.value > 2000.0) {
-            return Err("Out of bounds: pressure (0..2000)");
-        }
+    } else if name_lower.contains("pressure") && (reading.value < 0.0 || reading.value > 2000.0) {
+        return Err("Out of bounds: pressure (0..2000)");
+    }
 
     if reading.quality != ReadingQuality::Good {
         return Err("Poor quality reading");
@@ -342,7 +350,7 @@ impl UnifiedInstrumentation {
             0x0D => DeviceType::CoolingMeter,
             0x0E => DeviceType::Other("Heat/Cooling".to_string()),
             0x0F => DeviceType::Other("Bus/System".to_string()),
-            0x15 => DeviceType::WaterMeter, // Cold water
+            0x15 => DeviceType::WaterMeter,    // Cold water
             0x16 => DeviceType::HotWaterMeter, // Hot water
             0x17 => DeviceType::Other("Dual Water".to_string()),
             0x18 => DeviceType::PressureSensor,
@@ -392,7 +400,6 @@ impl UnifiedInstrumentation {
         }
         serde_json::to_string_pretty(&clean)
     }
-
 }
 
 #[cfg(test)]
@@ -436,11 +443,8 @@ mod tests {
 
     #[test]
     fn test_battery_low_detection() {
-        let mut inst = UnifiedInstrumentation::new(
-            "test".to_string(),
-            "TST".to_string(),
-            ProtocolType::LoRa,
-        );
+        let mut inst =
+            UnifiedInstrumentation::new("test".to_string(), "TST".to_string(), ProtocolType::LoRa);
 
         // Test low percentage
         inst.set_battery(Some(3.0), Some(15));
@@ -468,7 +472,7 @@ mod tests {
         };
         let bad_reading = Reading {
             name: "Temperature".to_string(),
-            value: 150.0,  // Out of bounds
+            value: 150.0, // Out of bounds
             unit: "°C".to_string(),
             timestamp: SystemTime::now(),
             tariff: None,
@@ -510,7 +514,7 @@ mod tests {
             timestamp: SystemTime::now(),
             tariff: None,
             storage_number: None,
-            quality: ReadingQuality::Good
+            quality: ReadingQuality::Good,
         };
         assert!(validate_reading(&good).is_ok());
 
@@ -522,7 +526,7 @@ mod tests {
             timestamp: SystemTime::now(),
             tariff: None,
             storage_number: None,
-            quality: ReadingQuality::Good
+            quality: ReadingQuality::Good,
         };
         assert!(validate_reading(&bad).is_err());
 
@@ -534,7 +538,7 @@ mod tests {
             timestamp: SystemTime::now(),
             tariff: None,
             storage_number: None,
-            quality: ReadingQuality::Good
+            quality: ReadingQuality::Good,
         };
         assert!(validate_reading(&temp_bad).is_err());
 
@@ -546,7 +550,7 @@ mod tests {
             timestamp: SystemTime::now(),
             tariff: None,
             storage_number: None,
-            quality: ReadingQuality::Invalid
+            quality: ReadingQuality::Invalid,
         };
         assert!(validate_reading(&poor).is_err());
     }
@@ -557,17 +561,15 @@ mod tests {
             device_id: "test".to_string(),
             manufacturer: "Test".to_string(),
             device_type: DeviceType::WaterMeter,
-            readings: vec![
-                Reading {
-                    name: "Volume".to_string(),
-                    value: 1234.5,
-                    unit: "m³".to_string(),
-                    timestamp: SystemTime::now(),
-                    tariff: None,
-                    storage_number: None,
-                    quality: ReadingQuality::Good
-                },
-            ],
+            readings: vec![Reading {
+                name: "Volume".to_string(),
+                value: 1234.5,
+                unit: "m³".to_string(),
+                timestamp: SystemTime::now(),
+                tariff: None,
+                storage_number: None,
+                quality: ReadingQuality::Good,
+            }],
             timestamp: SystemTime::now(),
         };
         let csv = metering.to_csv();

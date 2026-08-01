@@ -8,7 +8,7 @@ use nom::{
     bytes::complete::take,
     combinator::map,
     number::complete::{be_u16, be_u32, be_u64, be_u8},
-    IResult,
+    IResult, Parser,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -148,10 +148,10 @@ pub fn encode_bcd(mut input: u32) -> Vec<u8> {
 /// Decodes an integer value from the input data.
 pub fn decode_int(input: &[u8], size: usize) -> IResult<&[u8], i32> {
     match size {
-        1 => map(be_u8, |v| v as i32)(input),
-        2 => map(be_u16, |v| v as i32)(input),
-        4 => map(be_u32, |v| v as i32)(input),
-        8 => map(be_u64, |v| v as i32)(input),
+        1 => map(be_u8, |v| v as i32).parse(input),
+        2 => map(be_u16, |v| v as i32).parse(input),
+        4 => map(be_u32, |v| v as i32).parse(input),
+        8 => map(be_u64, |v| v as i32).parse(input),
         _ => Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Tag,
@@ -168,8 +168,9 @@ pub fn decode_long_long(input: &[u8], size: usize) -> IResult<&[u8], i64> {
                 v = (v << 8) | (*b as u64);
             }
             v as i64
-        })(input),
-        8 => map(be_u64, |v| v as i64)(input),
+        })
+        .parse(input),
+        8 => map(be_u64, |v| v as i64).parse(input),
         _ => Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Tag,
@@ -184,7 +185,8 @@ pub fn decode_bcd_hex(input: &[u8]) -> IResult<&[u8], u32> {
             value |= (byte as u32) << (i * 8);
         }
         value
-    })(input)
+    })
+    .parse(input)
 }
 
 /// Decodes an integer value from the input data.
@@ -238,7 +240,8 @@ pub fn decode_float(input: &[u8]) -> IResult<&[u8], f32> {
         value |= (bytes[2] as u32) << 8;
         value |= bytes[3] as u32;
         f32::from_bits(value)
-    })(input)
+    })
+    .parse(input)
 }
 
 /// Decodes a time value from the input data.
@@ -290,7 +293,8 @@ pub fn decode_time(input: &[u8], size: usize) -> IResult<&[u8], SystemTime> {
         }
 
         time
-    })(input)
+    })
+    .parse(input)
 }
 
 /// Encodes the manufacturer ID according to the manufacturer's 3-byte ASCII code.

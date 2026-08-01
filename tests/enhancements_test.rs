@@ -6,10 +6,12 @@
 //! 3. Vendor CRC tolerance
 //! 4. Per-device error statistics
 
-use mbus_rs::wmbus::frame::{parse_wmbus_frame, is_encrypted_frame};
-use mbus_rs::wmbus::block::{verify_blocks, calculate_block_crc, BLOCK_DATA_SIZE};
-use mbus_rs::vendors::{VendorExtension, VendorRegistry, CrcErrorType, CrcErrorContext};
-use mbus_rs::instrumentation::stats::{ErrorType, update_device_error, get_device_stats, clear_all_stats};
+use mbus_rs::instrumentation::stats::{
+    clear_all_stats, get_device_stats, update_device_error, ErrorType,
+};
+use mbus_rs::vendors::{CrcErrorContext, CrcErrorType, VendorExtension, VendorRegistry};
+use mbus_rs::wmbus::block::{calculate_block_crc, verify_blocks, BLOCK_DATA_SIZE};
+use mbus_rs::wmbus::frame::{is_encrypted_frame, parse_wmbus_frame};
 use mbus_rs::MBusError;
 use std::sync::Arc;
 
@@ -52,15 +54,13 @@ fn test_multi_block_validation() {
     let block1_data = vec![0x01; BLOCK_DATA_SIZE];
     let block1_crc = calculate_block_crc(&block1_data);
     payload.extend_from_slice(&block1_data);
-    payload.push((block1_crc & 0xFF) as u8);
-    payload.push((block1_crc >> 8) as u8);
+    payload.extend_from_slice(&block1_crc.to_be_bytes()); // big-endian, as transmitted
 
     // Block 2
     let block2_data = vec![0x02; BLOCK_DATA_SIZE];
     let block2_crc = calculate_block_crc(&block2_data);
     payload.extend_from_slice(&block2_data);
-    payload.push((block2_crc & 0xFF) as u8);
-    payload.push((block2_crc >> 8) as u8);
+    payload.extend_from_slice(&block2_crc.to_be_bytes()); // big-endian, as transmitted
 
     // Verify blocks
     let blocks = verify_blocks(&payload, false).unwrap();
@@ -68,8 +68,8 @@ fn test_multi_block_validation() {
     assert!(blocks[0].crc_valid);
     assert!(blocks[1].crc_valid);
 
-    // Test with corrupted CRC
-    payload[15] = 0xFF; // Corrupt block 1 CRC
+    // Test with corrupted CRC (deterministic bit-flip of block 1's low CRC byte)
+    payload[15] ^= 0xFF; // Corrupt block 1 CRC
     let blocks = verify_blocks(&payload, false).unwrap();
     assert!(!blocks[0].crc_valid);
     assert!(blocks[1].crc_valid);
@@ -91,7 +91,8 @@ fn test_vendor_crc_tolerance() {
             // Tolerate block 3 (index 2) CRC errors for "TEST" manufacturer
             if manufacturer_id == "TEST"
                 && matches!(error_type, CrcErrorType::Block)
-                && error_context.block_index == Some(2) {
+                && error_context.block_index == Some(2)
+            {
                 Ok(Some(true)) // Tolerate this error
             } else {
                 Ok(None) // Use default validation
@@ -100,7 +101,9 @@ fn test_vendor_crc_tolerance() {
     }
 
     let registry = VendorRegistry::new();
-    registry.register("TEST", Arc::new(TestVendorExtension)).unwrap();
+    registry
+        .register("TEST", Arc::new(TestVendorExtension))
+        .unwrap();
 
     // Create error context for block 3
     let context = CrcErrorContext {
@@ -119,7 +122,8 @@ fn test_vendor_crc_tolerance() {
         None,
         &CrcErrorType::Block,
         &context,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(result, Some(true));
 
     // Should not tolerate block 2 error
@@ -133,7 +137,8 @@ fn test_vendor_crc_tolerance() {
         None,
         &CrcErrorType::Block,
         &context2,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(result, None);
 }
 
@@ -172,8 +177,7 @@ fn test_frame_with_stats_integration() {
         0x07, // Device type
         0x72, // CI field
         // Payload
-        0x01, 0x02, 0x03, 0x04,
-        0xFF, 0xFF, // Bad CRC
+        0x01, 0x02, 0x03, 0x04, 0xFF, 0xFF, // Bad CRC
     ];
 
     // Parse should fail and track error

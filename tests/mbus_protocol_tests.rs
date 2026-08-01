@@ -197,8 +197,8 @@ async fn test_record_parser_parse_records_variable() {
     let result = parser.parse_records(&frame);
     assert!(result.is_ok());
     let _records = result.unwrap();
-    // Since parse may fail or return empty due to mock, check for no panic
-    assert!(true);
+    // Reaching this point without a panic is the assertion; parse may legitimately
+    // return empty for the mock transport.
 }
 
 #[tokio::test]

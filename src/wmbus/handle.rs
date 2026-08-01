@@ -16,18 +16,16 @@
 //!
 //! ```rust,no_run
 //! use mbus_rs::wmbus::handle::WMBusHandle;
-//! use mbus_rs::wmbus::radio::hal::RaspberryPiHalBuilder;
+//! // On a Pi, build a `RaspberryPiHal` instead (requires the `raspberry-pi` feature).
+//! use mbus_rs::wmbus::radio::hal::MockHal;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Initialize with HAL for your platform
-//!     let hal = RaspberryPiHalBuilder::new()
-//!         .spi_device("/dev/spidev0.0")
-//!         .configure_pins(/* GPIO configuration */)
-//!         .build()?;
-//!     
-//!     // Create wM-Bus handle
-//!     let mut wmbus = WMBusHandle::new(hal).await?;
+//!     let hal = MockHal::new();
+//!
+//!     // Create wM-Bus handle (None => default configuration)
+//!     let mut wmbus = WMBusHandle::new(hal, None).await?;
 //!     
 //!     // Start receiving frames
 //!     wmbus.start_receiver().await?;
@@ -41,9 +39,11 @@
 //! ```
 
 use crate::wmbus::frame::{ParseError, WMBusFrame};
-use crate::wmbus::radio::driver::{DriverError, LbtConfig, Sx126xDriver, RadioStats, DeviceErrors, RadioStatusReport};
-use crate::wmbus::radio::irq::IrqStatus;
+use crate::wmbus::radio::driver::{
+    DeviceErrors, DriverError, LbtConfig, RadioStats, RadioStatusReport, Sx126xDriver,
+};
 use crate::wmbus::radio::hal::Hal;
+use crate::wmbus::radio::irq::IrqStatus;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
@@ -54,8 +54,11 @@ use tokio::time::{sleep, timeout, Duration};
 type FrameReceiver = Arc<RwLock<Option<mpsc::UnboundedReceiver<(WMBusFrame, i16)>>>>;
 type FrameSender = mpsc::UnboundedSender<(WMBusFrame, i16)>;
 type UnsolicitedCallback = Arc<dyn Fn(&WMBusFrame) + Send + Sync>;
-type WMBusFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(WMBusFrame, i16), WMBusError>> + Send + 'a>>;
-type SendFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>>;
+type WMBusFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(WMBusFrame, i16), WMBusError>> + Send + 'a>,
+>;
+type SendFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WMBusError>> + Send + 'a>>;
 
 /// wM-Bus handle errors
 #[derive(Error, Debug)]
@@ -591,16 +594,10 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
 /// with different hardware platforms without being generic over the HAL type.
 pub trait WMBusHandleWrapper: Send + Sync {
     /// Send a wM-Bus frame
-    fn send_frame<'a>(
-        &'a self,
-        frame: &'a WMBusFrame,
-    ) -> SendFuture<'a>;
+    fn send_frame<'a>(&'a self, frame: &'a WMBusFrame) -> SendFuture<'a>;
 
     /// Receive a frame with timeout
-    fn recv_frame<'a>(
-        &'a mut self,
-        timeout_ms: Option<u32>,
-    ) -> WMBusFuture<'a>;
+    fn recv_frame<'a>(&'a mut self, timeout_ms: Option<u32>) -> WMBusFuture<'a>;
 
     /// Start the background receiver
     fn start_receiver<'a>(
@@ -731,61 +728,9 @@ impl WMBusHandleFactory {
     /// }
     /// ```
     pub async fn create_mock() -> Result<Box<dyn WMBusHandleWrapper>, WMBusError> {
-        use crate::wmbus::radio::hal::Hal;
+        use crate::wmbus::radio::hal::MockHal;
 
-        // Mock HAL for testing - always available for development and testing
-        #[derive(Debug)]
-        struct MockHal;
-
-        impl Hal for MockHal {
-            fn write_command(
-                &mut self,
-                _opcode: u8,
-                _data: &[u8],
-            ) -> Result<(), crate::wmbus::radio::hal::HalError> {
-                Ok(())
-            }
-
-            fn read_command(
-                &mut self,
-                _opcode: u8,
-                buffer: &mut [u8],
-            ) -> Result<(), crate::wmbus::radio::hal::HalError> {
-                buffer.fill(0);
-                Ok(())
-            }
-
-            fn write_register(
-                &mut self,
-                _address: u16,
-                _data: &[u8],
-            ) -> Result<(), crate::wmbus::radio::hal::HalError> {
-                Ok(())
-            }
-
-            fn read_register(
-                &mut self,
-                _address: u16,
-                buffer: &mut [u8],
-            ) -> Result<(), crate::wmbus::radio::hal::HalError> {
-                buffer.fill(0);
-                Ok(())
-            }
-
-            fn gpio_read(&mut self, _pin: u8) -> Result<bool, crate::wmbus::radio::hal::HalError> {
-                Ok(false)
-            }
-
-            fn gpio_write(
-                &mut self,
-                _pin: u8,
-                _state: bool,
-            ) -> Result<(), crate::wmbus::radio::hal::HalError> {
-                Ok(())
-            }
-        }
-
-        let hal = MockHal;
+        let hal = MockHal::new();
         let config = WMBusConfig::default();
         let handle = WMBusHandle::new(hal, Some(config)).await?;
         Ok(Box::new(handle))

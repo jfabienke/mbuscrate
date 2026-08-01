@@ -30,18 +30,20 @@
 //! }
 //! ```
 
-use crate::wmbus::radio::pio_irq::{get_pio_irq_backend, PioIrqBackend, DIO1_RX_DONE, DIO0_TX_DONE};
 use crate::wmbus::radio::irq::{IrqMask, IrqMaskBit, IrqStatus};
+use crate::wmbus::radio::pio_irq::{
+    get_pio_irq_backend, PioIrqBackend, DIO0_TX_DONE, DIO1_RX_DONE,
+};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use log::{info, debug, warn, error};
 use thiserror::Error;
 
 // RTT + defmt logging imports
 #[cfg(feature = "rtt-logging")]
-use crate::logging::{structured, encoders};
+use crate::logging::{encoders, structured};
 #[cfg(feature = "rtt-logging")]
-use tracing::{info as t_info, debug as t_debug, warn as t_warn, error as t_error};
+use tracing::{debug as t_debug, error as t_error, info as t_info, warn as t_warn};
 
 /// SX1262 driver errors
 #[derive(Error, Debug)]
@@ -122,8 +124,8 @@ impl Default for LoRaConfig {
             preamble_length: 8,        // 8 symbol preamble
             header_type: true,         // Explicit header
             payload_length: 255,       // Maximum payload
-            crc_on: true,             // Enable CRC
-            invert_iq: false,         // Normal IQ
+            crc_on: true,              // Enable CRC
+            invert_iq: false,          // Normal IQ
         }
     }
 }
@@ -156,7 +158,10 @@ impl Sx1262Driver {
 
     /// Initialize SX1262 hardware
     fn initialize(&mut self) -> Result<()> {
-        info!("Initializing SX1262 with {} IRQ backend", self.irq_backend.name());
+        info!(
+            "Initializing SX1262 with {} IRQ backend",
+            self.irq_backend.name()
+        );
 
         // Reset and configure SX1262 (simplified for demo)
         self.set_standby()?;
@@ -174,14 +179,17 @@ impl Sx1262Driver {
         self.config.bandwidth_hz = bandwidth_hz;
 
         // Optimize for wM-Bus characteristics
-        self.config.spreading_factor = 7;  // Good range/speed for meters
-        self.config.coding_rate = 1;       // 4/5 for error correction
-        self.config.sync_word = 0x34;      // wM-Bus specific sync word
-        self.config.preamble_length = 12;  // Longer preamble for sync
+        self.config.spreading_factor = 7; // Good range/speed for meters
+        self.config.coding_rate = 1; // 4/5 for error correction
+        self.config.sync_word = 0x34; // wM-Bus specific sync word
+        self.config.preamble_length = 12; // Longer preamble for sync
 
         self.configure_lora(&self.config.clone())?;
-        info!("SX1262 configured for wM-Bus: {:.3} MHz, {} Hz BW",
-              frequency_hz as f32 / 1e6, bandwidth_hz);
+        info!(
+            "SX1262 configured for wM-Bus: {:.3} MHz, {} Hz BW",
+            frequency_hz as f32 / 1e6,
+            bandwidth_hz
+        );
         Ok(())
     }
 
@@ -228,15 +236,21 @@ impl Sx1262Driver {
             if config.invert_iq { 0x01 } else { 0x00 },
         ])?;
 
-        debug!("LoRa configuration applied: SF{}, BW{} Hz, CR{}/5",
-               config.spreading_factor, config.bandwidth_hz, config.coding_rate + 4);
+        debug!(
+            "LoRa configuration applied: SF{}, BW{} Hz, CR{}/5",
+            config.spreading_factor,
+            config.bandwidth_hz,
+            config.coding_rate + 4
+        );
         Ok(())
     }
 
     /// Setup DIO interrupt configuration
     fn setup_interrupts(&self) -> Result<()> {
         // Configure IRQ mapping: DIO1 for RX_DONE, DIO0 for TX_DONE
-        let irq_mask = (IrqMaskBit::RxDone as u16) | (IrqMaskBit::TxDone as u16) | (IrqMaskBit::Timeout as u16);
+        let irq_mask = (IrqMaskBit::RxDone as u16)
+            | (IrqMaskBit::TxDone as u16)
+            | (IrqMaskBit::Timeout as u16);
         let dio1_mask = IrqMaskBit::RxDone as u16 | IrqMaskBit::Timeout as u16;
         let dio2_mask = IrqMaskBit::TxDone as u16;
 
@@ -248,7 +262,8 @@ impl Sx1262Driver {
             dio1_mask as u8,
             (dio2_mask >> 8) as u8,
             dio2_mask as u8,
-            0x00, 0x00, // DIO3 unused
+            0x00,
+            0x00, // DIO3 unused
         ])?;
 
         debug!("SX1262 IRQ routing configured: DIO1=RX, DIO0=TX");
@@ -285,7 +300,10 @@ impl Sx1262Driver {
             let irq_status = self.get_irq_status()?;
             if irq_status.rx_done() {
                 #[cfg(feature = "rtt-logging")]
-                t_debug!("RX packet ready: PIO IRQ + register confirmed, latency={}ns", debounce_latency);
+                t_debug!(
+                    "RX packet ready: PIO IRQ + register confirmed, latency={}ns",
+                    debounce_latency
+                );
 
                 #[cfg(not(feature = "rtt-logging"))]
                 debug!("Packet ready detected via PIO + register confirmation");
@@ -339,12 +357,18 @@ impl Sx1262Driver {
         );
 
         #[cfg(feature = "rtt-logging")]
-        t_info!("RX complete: {} bytes, RSSI={}dBm, SNR={:.1}dB",
-                payload_length, self.last_rssi, self.last_snr);
+        t_info!(
+            "RX complete: {} bytes, RSSI={}dBm, SNR={:.1}dB",
+            payload_length,
+            self.last_rssi,
+            self.last_snr
+        );
 
         #[cfg(not(feature = "rtt-logging"))]
-        debug!("Packet read: {} bytes, RSSI: {} dBm, SNR: {} dB",
-               payload_length, self.last_rssi, self.last_snr);
+        debug!(
+            "Packet read: {} bytes, RSSI: {} dBm, SNR: {} dB",
+            payload_length, self.last_rssi, self.last_snr
+        );
 
         Ok(packet[2..].to_vec()) // Skip command bytes
     }
@@ -370,7 +394,7 @@ impl Sx1262Driver {
         #[cfg(feature = "rtt-logging")]
         structured::log_lora_event(
             encoders::LoRaEventType::TxStart,
-            0, // RSSI not applicable for TX
+            0,   // RSSI not applicable for TX
             0.0, // SNR not applicable for TX
             self.frequency_hz,
             self.config.spreading_factor,
@@ -378,8 +402,12 @@ impl Sx1262Driver {
         );
 
         #[cfg(feature = "rtt-logging")]
-        t_info!("TX started: {} bytes, SF={}, freq={}Hz",
-                payload.len(), self.config.spreading_factor, self.frequency_hz);
+        t_info!(
+            "TX started: {} bytes, SF={}, freq={}Hz",
+            payload.len(),
+            self.config.spreading_factor,
+            self.frequency_hz
+        );
 
         #[cfg(not(feature = "rtt-logging"))]
         debug!("Packet transmission started: {} bytes", payload.len());
@@ -413,7 +441,7 @@ impl Sx1262Driver {
                     #[cfg(feature = "rtt-logging")]
                     structured::log_lora_event(
                         encoders::LoRaEventType::TxComplete,
-                        0, // RSSI not applicable for TX
+                        0,   // RSSI not applicable for TX
                         0.0, // SNR not applicable for TX
                         self.frequency_hz,
                         self.config.spreading_factor,
@@ -421,7 +449,10 @@ impl Sx1262Driver {
                     );
 
                     #[cfg(feature = "rtt-logging")]
-                    t_debug!("TX completed: PIO IRQ detected, latency={}ns", debounce_latency);
+                    t_debug!(
+                        "TX completed: PIO IRQ detected, latency={}ns",
+                        debounce_latency
+                    );
 
                     #[cfg(not(feature = "rtt-logging"))]
                     debug!("TX completed via PIO IRQ detection");
@@ -447,11 +478,7 @@ impl Sx1262Driver {
 
     /// Clear specific IRQ flags
     fn clear_irq_status(&self, mask: u16) -> Result<()> {
-        self.spi_command(&[
-            commands::CLEAR_IRQ_STATUS,
-            (mask >> 8) as u8,
-            mask as u8,
-        ])?;
+        self.spi_command(&[commands::CLEAR_IRQ_STATUS, (mask >> 8) as u8, mask as u8])?;
         Ok(())
     }
 
@@ -462,7 +489,7 @@ impl Sx1262Driver {
 
         // Parse packet status (simplified)
         self.last_rssi = -((response[1] as i16) / 2); // RSSI approximation
-        self.last_snr = (response[2] as i8) / 4;      // SNR approximation
+        self.last_snr = (response[2] as i8) / 4; // SNR approximation
 
         Ok(())
     }

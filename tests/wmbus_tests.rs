@@ -15,15 +15,7 @@ async fn test_wmbus_decrypt_unimplemented() {
     assert!(matches!(result, Err(MBusError::Other(_))));
 }
 
-#[tokio::test]
-async fn test_wmbus_protocol_decode_unimplemented() {
-    // Since wmbus_protocol.rs is empty, add placeholder test for future
-    // Mock frame and expect error or implement stub
-    assert!(true);
-}
-
-#[tokio::test]
-async fn test_wmbus_protocol_encode_unimplemented() {
-    // Mock frame and expect error or implement stub
-    assert!(true);
-}
+// NOTE: two placeholder tests for `wmbus_protocol` were removed here. They asserted
+// nothing (`assert!(true)`) and referenced src/wmbus/wmbus_protocol.rs, which is a
+// zero-byte file declared in no module and therefore never compiled. Reinstate real
+// tests alongside an actual implementation.

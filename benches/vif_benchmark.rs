@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use mbus_rs::payload::vif::{parse_vib, parse_vif};
 use mbus_rs::payload::vif_maps::{lookup_primary_vif, lookup_vife_fb, lookup_vife_fd};
+use std::hint::black_box;
 use std::time::Duration;
 
 // Performance target: VIF operations must complete in <0.1ms
@@ -146,7 +147,7 @@ fn verify_performance_targets(c: &mut Criterion) {
     group.bench_function("vif_parse_under_100us", |b| {
         b.iter(|| {
             let result = parse_vib(black_box(&typical_vib));
-            black_box(result);
+            let _ = black_box(result);
         });
     });
 

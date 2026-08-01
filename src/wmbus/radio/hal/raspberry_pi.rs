@@ -49,8 +49,8 @@
 //! ## Usage Example
 //!
 //! ```rust,no_run
-//! use crate::wmbus::radio::hal::raspberry_pi::{RaspberryPiHal, GpioPins};
-//! use crate::wmbus::radio::driver::Sx126xDriver;
+//! use mbus_rs::wmbus::radio::hal::raspberry_pi::{RaspberryPiHal, GpioPins};
+//! use mbus_rs::wmbus::radio::driver::Sx126xDriver;
 //!
 //! // Define GPIO pin assignments
 //! let gpio_pins = GpioPins {
@@ -107,7 +107,7 @@ pub enum RpiHalError {
 /// # Examples
 ///
 /// ```rust
-/// use crate::wmbus::radio::hal::raspberry_pi::GpioPins;
+/// use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
 ///
 /// // Minimal configuration (required pins only)
 /// let pins = GpioPins {
@@ -204,7 +204,7 @@ impl RaspberryPiHal {
     /// # Examples
     ///
     /// ```rust,no_run
-    /// use crate::wmbus::radio::hal::raspberry_pi::{RaspberryPiHal, GpioPins};
+    /// use mbus_rs::wmbus::radio::hal::raspberry_pi::{RaspberryPiHal, GpioPins};
     ///
     /// // Use default pin configuration
     /// let hal = RaspberryPiHal::new(0, &GpioPins::default())?;
@@ -239,9 +239,10 @@ impl RaspberryPiHal {
             }
         };
 
-        // Initialize SPI with SX126x-compatible settings
-        let spi =
-            Spi::new(bus, slave_select, 8_000_000, Mode::Mode0)?.bit_order(BitOrder::MsbFirst);
+        // Initialize SPI with SX126x-compatible settings.
+        // rppal 0.22: bit order is set on the constructed Spi, not via a builder method.
+        let mut spi = Spi::new(bus, slave_select, 8_000_000, Mode::Mode0)?;
+        spi.set_bit_order(BitOrder::MsbFirst)?;
 
         let bus_info = format!(
             "SPI{} ({})",
@@ -420,12 +421,18 @@ impl RaspberryPiHal {
         // DIO2 pin configuration is handled automatically by the radio when
         // SetDIO2AsRfSwitchCtrl is called in the driver. Here we just log the intent.
         if self.dio2_pin.is_some() {
-            log::info!("DIO2 (GPIO {}) configured for RF switch control", self.pin_config.dio2.unwrap_or(0));
+            log::info!(
+                "DIO2 (GPIO {}) configured for RF switch control",
+                self.pin_config.dio2.unwrap_or(0)
+            );
             Ok(())
         } else {
-            Err(RpiHalError::InvalidConfig("DIO2 pin not configured".to_string()))
+            Err(RpiHalError::InvalidConfig(
+                "DIO2 pin not configured".to_string(),
+            ))
         }
     }
+}
 
 impl Hal for RaspberryPiHal {
     fn write_command(&mut self, opcode: u8, data: &[u8]) -> Result<(), HalError> {
@@ -559,7 +566,7 @@ impl Hal for RaspberryPiHal {
 /// # Examples
 ///
 /// ```rust,no_run
-/// use crate::wmbus::radio::hal::raspberry_pi::RaspberryPiHalBuilder;
+/// use mbus_rs::wmbus::radio::hal::raspberry_pi::RaspberryPiHalBuilder;
 ///
 /// let hal = RaspberryPiHalBuilder::new()
 ///     .spi_bus(0)
@@ -601,6 +608,12 @@ impl RaspberryPiHalBuilder {
     /// Set the SPI clock speed in Hz (max 16 MHz for SX126x)
     pub fn spi_speed(mut self, speed: u32) -> Self {
         self.spi_speed = speed.min(16_000_000); // Clamp to SX126x maximum
+        self
+    }
+
+    /// Set all GPIO pins at once from a [`GpioPins`].
+    pub fn gpio_pins(mut self, pins: GpioPins) -> Self {
+        self.gpio_pins = pins;
         self
     }
 
@@ -742,8 +755,8 @@ pub fn new_rfm69_spi(
     pins: &Rfm69GpioPins,
 ) -> Result<(Spi, Option<OutputPin>, Option<InputPin>), RpiHalError> {
     // Initialize SPI with RFM69-specific settings (1 MHz, Mode 0)
-    let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, RFM69_SPI_SPEED, Mode::Mode0)?
-        .bit_order(BitOrder::MsbFirst);
+    let mut spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, RFM69_SPI_SPEED, Mode::Mode0)?;
+    spi.set_bit_order(BitOrder::MsbFirst)?;
 
     log::info!(
         "RFM69 SPI initialized: {} Hz, Mode 0, MSB first",

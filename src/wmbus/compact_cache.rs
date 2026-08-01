@@ -15,9 +15,19 @@
 //! ## Usage
 //!
 //! ```rust
-//! use mbus_rs::wmbus::compact_cache::CompactFrameCache;
+//! use mbus_rs::wmbus::compact_cache::{CompactFrameCache, CachedDeviceInfo};
+//! # use std::time::Instant;
 //!
 //! let mut cache = CompactFrameCache::new(256);
+//! # let device_info = CachedDeviceInfo {
+//! #     manufacturer_id: 0x2C2D,
+//! #     device_address: 0x12345678,
+//! #     version: 0x01,
+//! #     device_type: 0x07,
+//! #     last_seen: Instant::now(),
+//! #     last_seen_unix: 0,
+//! #     access_count: 0,
+//! # };
 //!
 //! // Store device info with signature
 //! cache.insert(0xABCD, device_info);
@@ -25,6 +35,7 @@
 //! // Retrieve device info by signature
 //! if let Some(info) = cache.get(0xABCD) {
 //!     // Use cached device information
+//!     assert_eq!(info.device_address, 0x12345678);
 //! }
 //! ```
 
@@ -286,12 +297,12 @@ impl CompactFrameCache {
     /// * Frame bytes for CI=0x76 request
     pub fn build_full_frame_request(signature: u16, device_address: u8) -> Vec<u8> {
         let mut frame = vec![
-            0x10,                            // Start byte for short frame
-            0x7B,                            // Control field - REQ_UD2 (request user data class 2)
-            device_address,                  // Address field
-            0x76,                            // CI field - 0x76 for full frame request
-            (signature & 0xFF) as u8,        // Signature low byte
-            (signature >> 8) as u8,          // Signature high byte
+            0x10,                     // Start byte for short frame
+            0x7B,                     // Control field - REQ_UD2 (request user data class 2)
+            device_address,           // Address field
+            0x76,                     // CI field - 0x76 for full frame request
+            (signature & 0xFF) as u8, // Signature low byte
+            (signature >> 8) as u8,   // Signature high byte
         ];
 
         // Calculate checksum

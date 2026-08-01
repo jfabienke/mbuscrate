@@ -1,10 +1,9 @@
 //! Comprehensive tests for the M-Bus manufacturer database and conversion system
 
 use mbus_rs::{
-    VendorRegistry,
-    manufacturer_to_id, id_to_manufacturer, get_manufacturer_info,
-    get_manufacturer_name, has_quirks, all_manufacturers, is_valid_id,
-    manufacturer_id_to_string, parse_manufacturer_id,
+    all_manufacturers, get_manufacturer_info, get_manufacturer_name, has_quirks,
+    id_to_manufacturer, is_valid_id, manufacturer_id_to_string, manufacturer_to_id,
+    parse_manufacturer_id, VendorRegistry,
 };
 
 #[test]
@@ -56,9 +55,8 @@ fn test_invalid_inputs() {
 #[test]
 fn test_round_trip_conversion() {
     let test_codes = [
-        "QDS", "ZEN", "KAM", "LUG", "ENG", "ELV", "LSE", "MET",
-        "SON", "ITW", "EFE", "ELS", "RKE", "SIE", "ABB", "SEN",
-        "AAA", "ZZZ", "ABC", "XYZ", "MNO", "PQR"
+        "QDS", "ZEN", "KAM", "LUG", "ENG", "ELV", "LSE", "MET", "SON", "ITW", "EFE", "ELS", "RKE",
+        "SIE", "ABB", "SEN", "AAA", "ZZZ", "ABC", "XYZ", "MNO", "PQR",
     ];
 
     for code in &test_codes {
@@ -117,13 +115,11 @@ fn test_all_manufacturers_iterator() {
     assert!(count >= 10); // Should have at least 10 manufacturers
 
     // Test that QUNDIS is in the database
-    let qundis_found = all_manufacturers()
-        .any(|(_, info)| info.code == "QDS");
+    let qundis_found = all_manufacturers().any(|(_, info)| info.code == "QDS");
     assert!(qundis_found);
 
     // Test that at least one manufacturer has quirks
-    let has_quirky_manufacturer = all_manufacturers()
-        .any(|(_, info)| info.has_quirks);
+    let has_quirky_manufacturer = all_manufacturers().any(|(_, info)| info.has_quirks);
     assert!(has_quirky_manufacturer);
 }
 
@@ -221,7 +217,8 @@ fn test_real_world_scenarios() {
     assert!(!has_quirks(unknown_id)); // Unknown should have no quirks
 
     // Scenario 3: Logging/debugging scenarios
-    for (&id, info) in all_manufacturers().take(5) { // Test first 5
+    for (&id, info) in all_manufacturers().take(5) {
+        // Test first 5
         let code = id_to_manufacturer(id);
         assert_eq!(code, info.code);
 
@@ -233,7 +230,7 @@ fn test_real_world_scenarios() {
             id,
             if info.has_quirks { " [QUIRKS]" } else { "" }
         );
-        assert!(log_message.contains(&info.name));
+        assert!(log_message.contains(info.name));
     }
 }
 
@@ -256,7 +253,11 @@ fn test_performance_considerations() {
     let duration = start.elapsed();
 
     // Should complete very quickly (well under 1ms for 1000 operations)
-    assert!(duration.as_millis() < 10, "Manufacturer operations too slow: {:?}", duration);
+    assert!(
+        duration.as_millis() < 10,
+        "Manufacturer operations too slow: {:?}",
+        duration
+    );
 }
 
 #[test]

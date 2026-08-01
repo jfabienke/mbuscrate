@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use mbus_rs::mbus::frame::calculate_mbus_checksum;
 use mbus_rs::wmbus::frame_decode::calculate_wmbus_crc_enhanced;
+use std::hint::black_box;
 
 fn bench_unaligned_buffers(c: &mut Criterion) {
     let mut group = c.benchmark_group("unaligned_buffers");
@@ -34,9 +35,9 @@ fn bench_partial_frames(c: &mut Criterion) {
 
     // Test partial frame sizes (not aligned to SIMD vector width)
     let sizes = [
-        13, 17, 19, 23, 29, 31,  // Prime numbers (worst case)
-        33, 65, 127, 129, 255,   // Off-by-one from powers of 2
-        15, 63, 511, 1023,       // One less than SIMD boundaries
+        13, 17, 19, 23, 29, 31, // Prime numbers (worst case)
+        33, 65, 127, 129, 255, // Off-by-one from powers of 2
+        15, 63, 511, 1023, // One less than SIMD boundaries
     ];
 
     for size in sizes.iter() {
@@ -44,17 +45,13 @@ fn bench_partial_frames(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(*size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("checksum", size),
-            &data,
-            |b, data| b.iter(|| calculate_mbus_checksum(black_box(data))),
-        );
+        group.bench_with_input(BenchmarkId::new("checksum", size), &data, |b, data| {
+            b.iter(|| calculate_mbus_checksum(black_box(data)))
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("crc", size),
-            &data,
-            |b, data| b.iter(|| calculate_wmbus_crc_enhanced(black_box(data))),
-        );
+        group.bench_with_input(BenchmarkId::new("crc", size), &data, |b, data| {
+            b.iter(|| calculate_wmbus_crc_enhanced(black_box(data)))
+        });
     }
 
     group.finish();
@@ -67,33 +64,39 @@ fn bench_worst_case_patterns(c: &mut Criterion) {
     let patterns = [
         ("all_zeros", vec![0x00u8; 1024]),
         ("all_ones", vec![0xFFu8; 1024]),
-        ("alternating", (0..1024).map(|i| if i % 2 == 0 { 0x00 } else { 0xFF }).collect()),
-        ("incrementing", (0..1024).map(|i| (i & 0xFF) as u8).collect()),
+        (
+            "alternating",
+            (0..1024)
+                .map(|i| if i % 2 == 0 { 0x00 } else { 0xFF })
+                .collect(),
+        ),
+        (
+            "incrementing",
+            (0..1024).map(|i| (i & 0xFF) as u8).collect(),
+        ),
         ("random", {
             use std::collections::hash_map::RandomState;
             use std::hash::{BuildHasher, Hasher};
             let mut rng = RandomState::new().build_hasher();
-            (0..1024).map(|i| {
-                rng.write_usize(i);
-                (rng.finish() & 0xFF) as u8
-            }).collect()
+            (0..1024)
+                .map(|i| {
+                    rng.write_usize(i);
+                    (rng.finish() & 0xFF) as u8
+                })
+                .collect()
         }),
     ];
 
     for (name, data) in patterns.iter() {
         group.throughput(Throughput::Bytes(1024));
 
-        group.bench_with_input(
-            BenchmarkId::new("checksum", name),
-            data,
-            |b, data| b.iter(|| calculate_mbus_checksum(black_box(data))),
-        );
+        group.bench_with_input(BenchmarkId::new("checksum", name), data, |b, data| {
+            b.iter(|| calculate_mbus_checksum(black_box(data)))
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("crc", name),
-            data,
-            |b, data| b.iter(|| calculate_wmbus_crc_enhanced(black_box(data))),
-        );
+        group.bench_with_input(BenchmarkId::new("crc", name), data, |b, data| {
+            b.iter(|| calculate_wmbus_crc_enhanced(black_box(data)))
+        });
     }
 
     group.finish();
@@ -118,21 +121,17 @@ fn bench_cache_effects(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(*size as u64));
 
         // Cold cache benchmark (allocate new data each iteration)
-        group.bench_with_input(
-            BenchmarkId::new("checksum_cold", size),
-            size,
-            |b, &size| b.iter(|| {
+        group.bench_with_input(BenchmarkId::new("checksum_cold", size), size, |b, &size| {
+            b.iter(|| {
                 let data = vec![0x42u8; size];
                 calculate_mbus_checksum(black_box(&data))
-            }),
-        );
+            })
+        });
 
         // Warm cache benchmark (reuse same data)
-        group.bench_with_input(
-            BenchmarkId::new("checksum_warm", size),
-            &data,
-            |b, data| b.iter(|| calculate_mbus_checksum(black_box(data))),
-        );
+        group.bench_with_input(BenchmarkId::new("checksum_warm", size), &data, |b, data| {
+            b.iter(|| calculate_mbus_checksum(black_box(data)))
+        });
     }
 
     group.finish();
@@ -143,9 +142,9 @@ fn bench_real_world_edge_cases(c: &mut Criterion) {
 
     // Real-world edge cases from meter data
     let cases = [
-        ("min_frame", vec![0x10, 0x5B, 0x00]),  // Minimum valid frame
-        ("corrupted_header", vec![0xFF; 19]),    // Corrupted sync
-        ("max_ci_field", vec![0x68; 255]),       // Maximum CI field
+        ("min_frame", vec![0x10, 0x5B, 0x00]), // Minimum valid frame
+        ("corrupted_header", vec![0xFF; 19]),  // Corrupted sync
+        ("max_ci_field", vec![0x68; 255]),     // Maximum CI field
         ("fragmented", {
             // Simulate fragmented reception
             let mut v = vec![0x68; 8];
@@ -156,15 +155,13 @@ fn bench_real_world_edge_cases(c: &mut Criterion) {
     ];
 
     for (name, data) in cases.iter() {
-        group.bench_with_input(
-            BenchmarkId::new("validation", name),
-            data,
-            |b, data| b.iter(|| {
+        group.bench_with_input(BenchmarkId::new("validation", name), data, |b, data| {
+            b.iter(|| {
                 let checksum = calculate_mbus_checksum(black_box(data));
                 let crc = calculate_wmbus_crc_enhanced(black_box(data));
                 (checksum, crc)
-            }),
-        );
+            })
+        });
     }
 
     group.finish();

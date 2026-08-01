@@ -24,10 +24,10 @@ pub mod smart_decoder;
 #[cfg(feature = "pio-irq")]
 pub mod sx1262;
 
-pub use adr::{AdrController, AdrConfig, AdrDecision, AdrReason, SignalMetrics};
+pub use adr::{AdrConfig, AdrController, AdrDecision, AdrReason, SignalMetrics};
 pub use cad::{CadExitMode, CadStats, LoRaCadParams};
-pub use channel_hopping::{ChannelHopper, Channel, HoppingStrategy, ChannelStats};
-pub use class_bc::{ClassBCController, DeviceClass, BeaconConfig, MulticastSession, ClassBCStatus};
+pub use channel_hopping::{Channel, ChannelHopper, ChannelStats, HoppingStrategy};
+pub use class_bc::{BeaconConfig, ClassBCController, ClassBCStatus, DeviceClass, MulticastSession};
 pub use decoder::{
     BatteryStatus, DecentlabConfig, DecoderType, DeviceStatus, DraginoModel, ElvacoModel,
     GenericCounterConfig, LoRaDecodeError, LoRaDeviceManager, LoRaPayloadDecoder, MeteringData,
@@ -36,17 +36,17 @@ pub use decoder::{
 pub use decoder_nom::NomDecoderAdapter;
 pub use duty_cycle::{DutyCycleManager, PowerMode, PowerStats};
 pub use format_detector::{Confidence, DetectionResult, FormatDetector};
-pub use irq_queue::{IrqEventQueue, IrqEvent, IrqStats, irq_processor_task};
-pub use lbm::{LbmCore, MeshMessage, QoS, NodeInfo, MeshStats};
+pub use irq_queue::{irq_processor_task, IrqEvent, IrqEventQueue, IrqStats};
+pub use lbm::{LbmCore, MeshMessage, MeshStats, NodeInfo, QoS};
 pub use packet::{
     build_trigger_frame, calc_cumulative_delta, decode_lora_packet, parse_abp_data, parse_otaa_join,
 };
 pub use params::{
     CodingRate, LoRaBandwidth, LoRaModParams, LoRaModParamsExt, LoRaPacketParams, SpreadingFactor,
 };
-pub use single_channel::{SingleChannelConfig, DutyCycleLimiter};
+pub use single_channel::{DutyCycleLimiter, SingleChannelConfig};
 pub use smart_decoder::{DeviceStats, SmartDecoder};
 
 // Export SX1262 driver when PIO IRQ feature is enabled
 #[cfg(feature = "pio-irq")]
-pub use sx1262::{Sx1262Driver, Sx1262Error, LoRaConfig};
+pub use sx1262::{LoRaConfig, Sx1262Driver, Sx1262Error};

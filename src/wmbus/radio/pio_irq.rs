@@ -34,11 +34,11 @@
 //! }
 //! ```
 
-use std::sync::{Arc, Once};
-use std::cell::Cell;
+use log::{debug, error, info, warn};
 use once_cell::sync::OnceCell;
+use std::cell::Cell;
 use std::io::Result as IoResult;
-use log::{info, debug, warn, error};
+use std::sync::{Arc, Once};
 
 #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
 use std::fs::OpenOptions;
@@ -51,10 +51,10 @@ use std::ptr;
 
 /// DIO pin assignments for SX1262 HAT
 pub const DIO_PINS: [u8; 4] = [25, 26, 27, 28]; // GPIO25-28
-pub const DIO0_TX_DONE: u8 = 0x01;  // Bit 0: DIO0 (GPIO25)
-pub const DIO1_RX_DONE: u8 = 0x02;  // Bit 1: DIO1 (GPIO26)
-pub const DIO2_MASK: u8 = 0x04;     // Bit 2: DIO2 (GPIO27)
-pub const DIO3_MASK: u8 = 0x08;     // Bit 3: DIO3 (GPIO28)
+pub const DIO0_TX_DONE: u8 = 0x01; // Bit 0: DIO0 (GPIO25)
+pub const DIO1_RX_DONE: u8 = 0x02; // Bit 1: DIO1 (GPIO26)
+pub const DIO2_MASK: u8 = 0x04; // Bit 2: DIO2 (GPIO27)
+pub const DIO3_MASK: u8 = 0x08; // Bit 3: DIO3 (GPIO28)
 
 /// Maximum debounce window in microseconds
 pub const MAX_DEBOUNCE_US: u32 = 100;
@@ -105,9 +105,14 @@ pub fn get_pio_irq_backend() -> Arc<dyn PioIrqBackend> {
     INIT.call_once(|| {
         let backend = select_pio_irq_backend();
         info!("PIO IRQ backend initialized: {}", backend.name());
-        PIO_IRQ_BACKEND.set(backend).unwrap_or_else(|_| panic!("PIO IRQ backend already initialized"));
+        PIO_IRQ_BACKEND
+            .set(backend)
+            .unwrap_or_else(|_| panic!("PIO IRQ backend already initialized"));
     });
-    PIO_IRQ_BACKEND.get().expect("PIO IRQ backend not initialized").clone()
+    PIO_IRQ_BACKEND
+        .get()
+        .expect("PIO IRQ backend not initialized")
+        .clone()
 }
 
 /// Select the best available PIO IRQ backend
@@ -177,25 +182,25 @@ fn select_pio_irq_backend() -> Arc<dyn PioIrqBackend> {
 /// ```
 const PIO_DEBOUNCE_PROGRAM: [u32; 32] = [
     // Compiled PIOASM instructions (32-word program)
-    0x20A0,      // wait 1 pin 0 (wait for rising edge)
-    0x4004,      // in pins, 4 (sample DIO pins)
-    0xA027,      // mov y, isr (save to Y register)
-    0xE01F,      // set x, 31 (debounce cycles - runtime configurable)
-    0x0044,      // jmp x-- debounce_continue
-    0x0006,      // jmp validate_edge
-    0xA042,      // nop (timing)
-    0x0004,      // jmp debounce_loop
-    0x4004,      // in pins, 4 (sample again)
-    0xA026,      // mov x, isr
-    0xA047,      // mov isr, y
-    0x00AB,      // jmp x!=y edge_detected
-    0x0000,      // jmp main_loop
-    0x8020,      // push (push to FIFO)
-    0x20A0,      // wait 0 pin 0 (wait falling edge)
-    0x0000,      // end/wrap
+    0x20A0, // wait 1 pin 0 (wait for rising edge)
+    0x4004, // in pins, 4 (sample DIO pins)
+    0xA027, // mov y, isr (save to Y register)
+    0xE01F, // set x, 31 (debounce cycles - runtime configurable)
+    0x0044, // jmp x-- debounce_continue
+    0x0006, // jmp validate_edge
+    0xA042, // nop (timing)
+    0x0004, // jmp debounce_loop
+    0x4004, // in pins, 4 (sample again)
+    0xA026, // mov x, isr
+    0xA047, // mov isr, y
+    0x00AB, // jmp x!=y edge_detected
+    0x0000, // jmp main_loop
+    0x8020, // push (push to FIFO)
+    0x20A0, // wait 0 pin 0 (wait falling edge)
+    0x0000, // end/wrap
     // Padding to 32 words
-    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x0000, 0x0000, 0x0000,
 ];
 
 /// Hardware PIO backend for Raspberry Pi 5
@@ -236,7 +241,7 @@ impl PioIrqHardwareBackend {
         let mut backend = Self {
             pio_fd,
             pio_base,
-            sm_id: 2, // Use State Machine 2
+            sm_id: 2,                       // Use State Machine 2
             debounce_cycles: Cell::new(10), // Default 10 cycles
         };
 
@@ -262,15 +267,15 @@ impl PioIrqHardwareBackend {
             }
 
             // Configure State Machine 2
-            let sm_config_addr = self.pio_base.offset(0x0C8 + (self.sm_id * 0x18) as isize) as *mut u32; // SM_CONFIG
-            let config =
-                (0 << 29) |  // CLKDIV_RESTART = 0
+            let sm_config_addr =
+                self.pio_base.offset(0x0C8 + (self.sm_id * 0x18) as isize) as *mut u32; // SM_CONFIG
+            let config = (0 << 29) |  // CLKDIV_RESTART = 0
                 (0 << 16) |  // CLKDIV = 1.0 (bits 16-31)
                 (1 << 15) |  // EXEC_STALLED = 1 (start stalled)
                 (0 << 14) |  // SIDE_EN = 0
                 (0 << 12) |  // SIDE_PINDIR = 0 (2 bits)
                 (25 << 5) |  // JMP_PIN = 25 (GPIO25 = DIO0)
-                (25 << 0);   // IN_BASE = 25 (GPIO25-28 for input)
+                (25 << 0); // IN_BASE = 25 (GPIO25-28 for input)
             *sm_config_addr = config;
 
             // Set pin directions (input for DIO pins)
@@ -305,13 +310,16 @@ impl PioIrqHardwareBackend {
 
         // Update X register in running program (runtime configuration)
         unsafe {
-            let scratch_x_addr = self.pio_base.offset(0x0D0 + (self.sm_id * 0x18) as isize) as *mut u32; // SM_SCRATCH_X
+            let scratch_x_addr =
+                self.pio_base.offset(0x0D0 + (self.sm_id * 0x18) as isize) as *mut u32; // SM_SCRATCH_X
             *scratch_x_addr = new_cycles;
         }
 
-        debug!("PIO debounce cycles set to {} (~{:.2}μs)",
-               new_cycles,
-               new_cycles as f32 / PIO_CLOCK_HZ as f32 * 1e6);
+        debug!(
+            "PIO debounce cycles set to {} (~{:.2}μs)",
+            new_cycles,
+            new_cycles as f32 / PIO_CLOCK_HZ as f32 * 1e6
+        );
     }
 
     /// Reset PIO State Machine for runtime reconfiguration
@@ -339,7 +347,10 @@ impl PioIrqHardwareBackend {
             *ctrl_addr |= (1 << self.sm_id);
         }
 
-        debug!("PIO SM{} reset completed - ready for reconfiguration", self.sm_id);
+        debug!(
+            "PIO SM{} reset completed - ready for reconfiguration",
+            self.sm_id
+        );
         Ok(())
     }
 
@@ -353,7 +364,8 @@ impl PioIrqHardwareBackend {
 
             if rx_empty == 0 {
                 // FIFO has data, read it
-                let rxfifo_addr = self.pio_base.offset(0x020 + (self.sm_id * 4) as isize) as *const u32; // RX_FIFO
+                let rxfifo_addr =
+                    self.pio_base.offset(0x020 + (self.sm_id * 4) as isize) as *const u32; // RX_FIFO
                 let data = *rxfifo_addr;
                 Some((data & 0x0F) as u8) // Lower 4 bits = DIO0-3 mask
             } else {
@@ -366,7 +378,8 @@ impl PioIrqHardwareBackend {
     fn clear_fifo(&self) {
         unsafe {
             // Read all data from FIFO until empty
-            for _ in 0..8 { // FIFO depth is 8 words
+            for _ in 0..8 {
+                // FIFO depth is 8 words
                 let fstat_addr = self.pio_base.offset(0x004) as *const u32;
                 let fstat = *fstat_addr;
                 let rx_empty = (fstat >> (self.sm_id + 8)) & 1;
@@ -375,7 +388,8 @@ impl PioIrqHardwareBackend {
                     break; // FIFO is empty
                 }
 
-                let rxfifo_addr = self.pio_base.offset(0x020 + (self.sm_id * 4) as isize) as *const u32;
+                let rxfifo_addr =
+                    self.pio_base.offset(0x020 + (self.sm_id * 4) as isize) as *const u32;
                 let _ = *rxfifo_addr; // Discard data
             }
         }
@@ -421,7 +435,10 @@ impl PioIrqBackend for PioIrqHardwareBackend {
         if let Some(events) = self.read_fifo() {
             let filtered = events & dio_mask;
             if filtered != 0 {
-                debug!("PIO debounced IRQ: requested=0x{:02X}, detected=0x{:02X}", dio_mask, filtered);
+                debug!(
+                    "PIO debounced IRQ: requested=0x{:02X}, detected=0x{:02X}",
+                    dio_mask, filtered
+                );
             }
             filtered
         } else {

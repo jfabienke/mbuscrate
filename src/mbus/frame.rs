@@ -266,9 +266,7 @@ pub fn calculate_mbus_checksum(data: &[u8]) -> u8 {
 fn calculate_checksum(frame: &MBusFrame) -> u8 {
     // Use hardware-accelerated implementation for better performance
     match frame.frame_type {
-        MBusFrameType::Short => {
-            calculate_mbus_checksum(&[frame.control, frame.address])
-        }
+        MBusFrameType::Short => calculate_mbus_checksum(&[frame.control, frame.address]),
         MBusFrameType::Control => {
             calculate_mbus_checksum(&[frame.control, frame.address, frame.control_information])
         }

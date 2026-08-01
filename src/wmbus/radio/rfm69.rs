@@ -53,6 +53,29 @@ use rppal::{
     spi::{BitOrder, Bus, Mode, SlaveSelect, Spi},
 };
 
+/// Parse a `/dev/spidevB.C` path into its rppal (Bus, SlaveSelect).
+/// e.g. `/dev/spidev0.1` → (Spi0, Ss1). Falls back to (Spi0, Ss0) on any parse failure.
+#[cfg(feature = "rfm69")]
+fn parse_spidev(path: &str) -> (Bus, SlaveSelect) {
+    let tail = path.rsplit_once("spidev").map(|(_, t)| t).unwrap_or("");
+    let (b, c) = tail.split_once('.').unwrap_or(("0", "0"));
+    let bus = match b.trim().parse::<u8>().unwrap_or(0) {
+        1 => Bus::Spi1,
+        2 => Bus::Spi2,
+        3 => Bus::Spi3,
+        4 => Bus::Spi4,
+        5 => Bus::Spi5,
+        6 => Bus::Spi6,
+        _ => Bus::Spi0,
+    };
+    let ss = match c.trim().parse::<u8>().unwrap_or(0) {
+        1 => SlaveSelect::Ss1,
+        2 => SlaveSelect::Ss2,
+        _ => SlaveSelect::Ss0,
+    };
+    (bus, ss)
+}
+
 /// Configuration for RFM69 driver
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rfm69Config {
@@ -152,6 +175,10 @@ pub struct Rfm69Driver {
     /// Error logging throttle
     error_throttle: Arc<Mutex<LogThrottle>>,
 
+    /// Completed frames handed from the interrupt task to `get_received_packet`.
+    /// Without this the interrupt task assembled packets and dropped them.
+    received: Arc<Mutex<std::collections::VecDeque<(Vec<u8>, i16)>>>,
+
     /// Interrupt processing task handle
     #[cfg(feature = "rfm69")]
     interrupt_task: Option<tokio::task::JoinHandle<()>>,
@@ -185,6 +212,7 @@ impl Rfm69Driver {
                 packet_buffer: Arc::new(Mutex::new(PacketBuffer::new())),
                 stats: Arc::new(Mutex::new(PacketStats::default())),
                 error_throttle: Arc::new(Mutex::new(LogThrottle::new(60_000, 5))), // 5 errors per minute
+                received: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 interrupt_task: None,
                 shutdown_tx: None,
             })
@@ -309,6 +337,11 @@ impl Rfm69Driver {
         self.write_register(REG_RXBW, 0xE0).await?;
         self.write_register(REG_AFCBW, 0xE0).await?;
 
+        // Auto-AFC at each RX restart (AfcAutoOn). Meters have a frequency offset;
+        // without this the receiver sits slightly off and misses the sync word.
+        // The deployed metermon sets AFCFEI=0x10.
+        self.write_register(REG_AFCFEI, 0x10).await?;
+
         // Configure test register for optimal performance
         self.write_register(REG_TESTDAGC, 0x30).await?;
 
@@ -316,19 +349,59 @@ impl Rfm69Driver {
         self.write_register(REG_PACKETCONFIG1, 0).await?;
         self.write_register(REG_PAYLOADLENGTH, 0).await?;
 
-        // Set FIFO threshold for early interrupt
-        let threshold = self.config.fifo_threshold.unwrap_or(3);
+        // FIFO threshold = 10 (matches the deployed gateway). FifoLevel fires after
+        // this many bytes accumulate post-sync.
+        let threshold = self.config.fifo_threshold.unwrap_or(0x0A).max(0x0A);
         self.write_register(REG_FIFOTHRESH, threshold).await?;
 
         // Configure preamble (4 bytes)
         self.write_register(REG_PREAMBLEMSB, 0).await?;
         self.write_register(REG_PREAMBLELSB, 4).await?;
 
-        // Disable hardware sync word detection for dual S/C mode support
-        self.write_register(REG_SYNCCONFIG, 0x00).await?;
+        // Enable hardware sync detection with the wM-Bus sync word 54 3D 54.
+        // This is what actually triggers the FIFO to fill (fill-on-sync). The prior
+        // "sync disabled" (0x00) never fired, so the FIFO stayed empty — the deployed
+        // metermon uses exactly this config (SYNCCONFIG=0x90, SYNCVALUE1..3=54 3D 54).
+        // SYNCCONFIG 0x90 = SyncOn(0x80) | SyncSize=3 bytes ((3-1)<<3 = 0x10).
+        self.write_register(REG_SYNCCONFIG, 0x90).await?;
+        self.write_register(REG_SYNCVALUE1, 0x54).await?;
+        self.write_register(REG_SYNCVALUE2, 0x3D).await?;
+        self.write_register(REG_SYNCVALUE3, 0x54).await?;
 
         // Configure DIO mapping for FIFO level interrupt on DIO1
         self.write_register(REG_DIOMAPPING1, 0).await?;
+        // Match the deployed gateway's DIOMAPPING2 (ClkOut config).
+        self.write_register(REG_DIOMAPPING2, 0x05).await?;
+
+        // DIAGNOSTIC: dump the post-config register state to compare against the
+        // known-working epulse config (which fills the FIFO on this same radio).
+        for (name, reg) in [
+            ("OPMODE", REG_OPMODE),
+            ("DATAMODUL", REG_DATAMODUL),
+            ("BITRATEMSB", REG_BITRATEMSB),
+            ("BITRATELSB", REG_BITRATELSB),
+            ("FDEVMSB", REG_FDEVMSB),
+            ("FDEVLSB", REG_FDEVLSB),
+            ("FRFMSB", REG_FRFMSB),
+            ("FRFMID", REG_FRFMID),
+            ("FRFLSB", REG_FRFLSB),
+            ("LNA", REG_LNA),
+            ("RXBW", REG_RXBW),
+            ("AFCBW", REG_AFCBW),
+            ("DIOMAPPING1", REG_DIOMAPPING1),
+            ("RSSITHRESH", REG_RSSITHRESH),
+            ("PREAMBLEMSB", REG_PREAMBLEMSB),
+            ("PREAMBLELSB", REG_PREAMBLELSB),
+            ("SYNCCONFIG", REG_SYNCCONFIG),
+            ("PACKETCONFIG1", REG_PACKETCONFIG1),
+            ("PAYLOADLENGTH", REG_PAYLOADLENGTH),
+            ("FIFOTHRESH", REG_FIFOTHRESH),
+            ("PACKETCONFIG2", REG_PACKETCONFIG2),
+            ("TESTDAGC", REG_TESTDAGC),
+        ] {
+            let v = self.read_register(reg).await.unwrap_or(0xEE);
+            info!("REGDUMP {name}(0x{reg:02X}) = 0x{v:02X}");
+        }
 
         info!("wM-Bus configuration completed");
         Ok(())
@@ -391,7 +464,7 @@ impl Rfm69Driver {
     /// Set radio operating mode
     async fn set_mode(&mut self, mode: Rfm69Mode) -> Result<(), Rfm69Error> {
         if self.current_mode == mode {
-            return Ok(); // Already in requested mode
+            return Ok(()); // Already in requested mode
         }
 
         let opmode = match mode {
@@ -453,9 +526,10 @@ impl Rfm69Driver {
                     self.config.interrupt_pin.unwrap_or(DEFAULT_INTERRUPT_PIN)
                 );
 
-                // Configure interrupt pin for rising edge
+                // Configure interrupt pin for rising edge.
+                // rppal 0.22 added a debounce parameter to set_interrupt.
                 interrupt_pin
-                    .set_interrupt(Trigger::RisingEdge)
+                    .set_interrupt(Trigger::RisingEdge, None)
                     .map_err(|e| Rfm69Error::Gpio(format!("Failed to set interrupt: {}", e)))?;
 
                 // Clone references for the async task
@@ -463,6 +537,7 @@ impl Rfm69Driver {
                 let packet_buffer = self.packet_buffer.clone();
                 let stats = self.stats.clone();
                 let error_throttle = self.error_throttle.clone();
+                let received = self.received.clone();
 
                 // Create shutdown channel
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -474,6 +549,7 @@ impl Rfm69Driver {
                         packet_buffer,
                         stats,
                         error_throttle,
+                        received,
                         shutdown_rx,
                     )
                     .await;
@@ -497,23 +573,58 @@ impl Rfm69Driver {
         packet_buffer: Arc<Mutex<PacketBuffer>>,
         stats: Arc<Mutex<PacketStats>>,
         error_throttle: Arc<Mutex<LogThrottle>>,
+        received: Arc<Mutex<std::collections::VecDeque<(Vec<u8>, i16)>>>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
         info!("Interrupt handler task started");
 
+        let mut tick: u64 = 0;
+        // Track the STRONGEST signal seen per window: RSSI reg is 2×(-dBm), so the
+        // smallest register value = strongest signal. Sampling every loop (~1kHz)
+        // catches the few-ms transmission bursts a 1Hz sample would miss.
+        let mut peak_rssi_reg: u8 = 0xFF;
         loop {
             // Check for shutdown signal
             if shutdown_rx.try_recv().is_ok() {
                 info!("Shutdown signal received");
                 break;
             }
+
+            // Sample RSSI every iteration for peak tracking.
+            if let Ok(r) = Self::read_register_static(&spi, REG_RSSIVALUE).await {
+                if r < peak_rssi_reg {
+                    peak_rssi_reg = r;
+                }
+            }
+
+            // Periodic radio-status diagnostic (~once/sec at the 1ms idle poll).
+            tick += 1;
+            if tick % 1000 == 0 {
+                let op = Self::read_register_static(&spi, REG_OPMODE)
+                    .await
+                    .unwrap_or(0xFF);
+                let f1 = Self::read_register_static(&spi, REG_IRQFLAGS1)
+                    .await
+                    .unwrap_or(0);
+                let f2 = Self::read_register_static(&spi, REG_IRQFLAGS2)
+                    .await
+                    .unwrap_or(0);
+                let buflen = packet_buffer.lock().unwrap().len();
+                info!(
+                    "RFM69 status: opmode=0x{op:02X} irq1=0x{f1:02X} irq2=0x{f2:02X} peak_rssi=-{}dBm buf={buflen}",
+                    peak_rssi_reg / 2
+                );
+                peak_rssi_reg = 0xFF; // reset window
+            }
+
             // Check for FIFO level interrupt
             match Self::read_register_static(&spi, REG_IRQFLAGS2).await {
                 Ok(flags2) => {
                     // Handle FIFO level interrupt
                     if flags2 & RF_IRQFLAGS2_FIFOLEVEL != 0 {
                         if let Err(e) =
-                            Self::handle_fifo_interrupt(&spi, &packet_buffer, &stats).await
+                            Self::handle_fifo_interrupt(&spi, &packet_buffer, &stats, &received)
+                                .await
                         {
                             // Throttled error logging
                             if error_throttle.lock().unwrap().allow() {
@@ -567,39 +678,103 @@ impl Rfm69Driver {
         info!("Interrupt handler task shutting down");
     }
 
-    /// Handle FIFO level interrupt
+    /// Handle a FIFO-level interrupt: read one sync-triggered burst as a whole
+    /// packet, deliver it, and re-arm the receiver — matching epulse's ReceivePacket
+    /// + Interrupt model. HW sync (SYNCCONFIG=0x90) fires the FIFO fill per frame, so
+    /// each burst is one frame; accumulating across bursts in a persistent buffer
+    /// (the previous approach) misaligned and flooded "invalid header".
     #[cfg(feature = "rfm69")]
     async fn handle_fifo_interrupt(
         spi: &Arc<Mutex<Spi>>,
-        packet_buffer: &Arc<Mutex<PacketBuffer>>,
+        _packet_buffer: &Arc<Mutex<PacketBuffer>>,
         stats: &Arc<Mutex<PacketStats>>,
+        received: &Arc<Mutex<std::collections::VecDeque<(Vec<u8>, i16)>>>,
     ) -> Result<(), Rfm69Error> {
-        // Read data from FIFO while available
-        while Self::fifo_not_empty(spi).await? {
-            let byte = Self::read_register_static(spi, REG_FIFO).await?;
+        // Signal is present now (sync just matched) — sample RSSI for this frame.
+        let rssi_dbm: i16 = match Self::read_register_static(spi, REG_RSSIVALUE).await {
+            Ok(r) => -((r as i16) / 2),
+            Err(_) => -100,
+        };
 
-            {
-                let mut buffer = packet_buffer.lock().unwrap();
-                buffer.push_byte(byte);
+        // Fresh buffer for this burst. rppal's SPI (MsbFirst) already delivers the
+        // FIFO bytes in normal wM-Bus order, so no rev8 is applied here (empirically
+        // verified: captured frames normalize to the correct meter IDs as-is).
+        let mut buf: Vec<u8> = Vec::with_capacity(64);
+        let mut size: i32 = -1;
+        let mut idle = 0u32;
 
-                // Try to determine packet size
-                if let Ok(Some(_size)) = buffer.determine_packet_size() {
-                    // Check if packet is complete
-                    if buffer.is_complete() {
-                        match buffer.extract_packet() {
-                            Ok(packet) => {
-                                debug!("Complete packet received: {} bytes", packet.len());
-                                // TODO: Forward packet to wM-Bus layer
-                            }
-                            Err(e) => {
-                                buffer.update_stats(PacketEvent::InvalidHeader);
-                                error!("Failed to extract packet: {}", e);
-                            }
-                        }
-                    }
+        loop {
+            // Determine the expected size once we have the 2-byte header.
+            if size == -1 && buf.len() >= 2 {
+                size = packet_size(&buf);
+                if size <= 0 {
+                    break; // 0 = not wM-Bus, -2 = invalid header → abandon this burst
                 }
             }
+            if size > 0 && buf.len() >= size as usize {
+                break; // complete
+            }
+
+            if Self::fifo_not_empty(spi).await? {
+                let b = Self::read_register_static(spi, REG_FIFO).await?;
+                buf.push(b);
+                idle = 0;
+            } else {
+                // FIFO briefly empty mid-burst: wait a moment for more bytes, then
+                // give up (epulse's short usleep-and-retry to avoid truncation).
+                idle += 1;
+                if idle > 6 {
+                    break;
+                }
+                sleep(Duration::from_micros(300)).await;
+            }
         }
+
+        let complete = size > 0 && buf.len() >= size as usize;
+
+        // DIAGNOSTIC: read the AFC frequency correction for this frame (AfcAutoOn is
+        // set, so it reflects this transmission's carrier offset). freq_err = AFC * Fstep.
+        let afc = {
+            let hi = Self::read_register_static(spi, REG_AFCMSB)
+                .await
+                .unwrap_or(0);
+            let lo = Self::read_register_static(spi, REG_AFCLSB)
+                .await
+                .unwrap_or(0);
+            i16::from_be_bytes([hi, lo])
+        };
+        let afc_hz = (afc as f64 * 61.03515625) as i32;
+
+        // Re-arm the receiver for the next frame: STANDBY → RX (epulse per-packet
+        // cycle). Read-modify-write only the mode bits (0x1C) of RegOpMode.
+        let op = Self::read_register_static(spi, REG_OPMODE).await?;
+        Self::write_register_static(spi, REG_OPMODE, (op & !0x1C) | RF_OPMODE_STANDBY).await?;
+
+        if complete {
+            let packet: Vec<u8> = buf[..size as usize].to_vec();
+            info!(
+                "FRAME afc={afc_hz}Hz len={} {}",
+                packet.len(),
+                hex::encode(&packet)
+            );
+            {
+                let mut s = stats.lock().unwrap();
+                s.packets_received += 1;
+            }
+            let mut q = received.lock().unwrap();
+            q.push_back((packet, rssi_dbm));
+            while q.len() > 256 {
+                q.pop_front();
+            }
+        } else {
+            // Noise-triggered sync or truncated burst: drain any remainder.
+            while Self::fifo_not_empty(spi).await? {
+                let _ = Self::read_register_static(spi, REG_FIFO).await?;
+            }
+        }
+
+        let op = Self::read_register_static(spi, REG_OPMODE).await?;
+        Self::write_register_static(spi, REG_OPMODE, (op & !0x1C) | RF_OPMODE_RECEIVER).await?;
 
         Ok(())
     }
@@ -770,7 +945,7 @@ impl Rfm69Driver {
         // Validate payload size against maximum expected
         if payload_size > 255 {
             warn!("Invalid payload size detected: {}", payload_size);
-            stats.lock().await.fifo_overruns += 1;
+            stats.lock().unwrap().fifo_overruns += 1;
             Self::clear_fifo(spi).await?;
             return Ok(());
         }
@@ -902,19 +1077,23 @@ impl Rfm69Driver {
         self.stats.lock().unwrap().clone()
     }
 
-    /// Initialize SPI interface
+    /// Initialize SPI interface.
+    ///
+    /// The bus and chip-select are derived from the configured `spidev` path
+    /// (e.g. `/dev/spidev0.1` → bus 0, CS1). Previously this hardcoded CS0, so a
+    /// radio wired to CS1 never responded ("Failed to sync with radio chip").
     #[cfg(feature = "rfm69")]
     fn init_spi(config: &Rfm69Config) -> Result<Spi, Rfm69Error> {
-        let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, SPI_SPEED, Mode::Mode0)
+        let path = config
+            .spidev
+            .as_deref()
+            .unwrap_or("/dev/spidev0.0")
+            .to_string();
+        let (bus, ss) = parse_spidev(&path);
+        let spi = Spi::new(bus, ss, SPI_SPEED, Mode::Mode0)
             .map_err(|e| Rfm69Error::Spi(format!("Failed to initialize SPI: {}", e)))?;
 
-        info!(
-            "SPI interface initialized: {}",
-            config
-                .spidev
-                .as_ref()
-                .unwrap_or(&"/dev/spidev0.0".to_string())
-        );
+        info!("SPI interface initialized: {path} (bus={bus:?}, cs={ss:?})");
         Ok(spi)
     }
 
@@ -987,14 +1166,15 @@ impl Rfm69Driver {
         let fifo_status = Self::read_register_static(spi, 0x28).await?; // REG_IRQFLAGS2
 
         // Check if FIFO has data
-        if (fifo_status & 0x40) == 0 {  // FifoNotEmpty bit
+        if (fifo_status & 0x40) == 0 {
+            // FifoNotEmpty bit
             return Ok(0);
         }
 
         // For now, estimate based on typical wM-Bus frame sizes
         // In a full implementation, we'd peek at the length field
         // Most wM-Bus frames are 50-100 bytes
-        Ok(100)  // Conservative estimate to ensure we read enough
+        Ok(100) // Conservative estimate to ensure we read enough
     }
 
     /// Clear the FIFO buffer
@@ -1068,12 +1248,37 @@ impl crate::wmbus::radio::radio_driver::RadioDriver for Rfm69Driver {
     async fn start_receive(
         &mut self,
     ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
-        self.set_mode(Rfm69Mode::Rx).await.map_err(|e| {
-            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
-                "Failed to start RX: {}",
-                e
-            ))
-        })
+        use crate::wmbus::radio::radio_driver::RadioDriverError as RDE;
+        // Replicate epulse's RX-entry sequence to avoid the RFM69 RX deadlock, where
+        // a stale FIFO / stuck PayloadReady after reset leaves the receiver unable to
+        // accept new data (FIFO never fills). Drain the FIFO, and if PayloadReady is
+        // stuck, pulse RestartRx (RegPacketConfig2 bit2) before entering RX.
+        let map_err = |e: Rfm69Error| RDE::DeviceError(format!("start RX: {e}"));
+
+        // Drain any stale bytes left in the FIFO.
+        for _ in 0..80 {
+            let f2 = self.read_register(REG_IRQFLAGS2).await.map_err(map_err)?;
+            if f2 & RF_IRQFLAGS2_FIFONOTEMPTY == 0 {
+                break;
+            }
+            let _ = self.read_register(REG_FIFO).await.map_err(map_err)?;
+        }
+
+        // Deadlock avoidance: if PayloadReady is stuck, restart the receiver.
+        let f2 = self.read_register(REG_IRQFLAGS2).await.map_err(map_err)?;
+        if f2 & RF_IRQFLAGS2_PAYLOADREADY != 0 {
+            self.write_register_bits(REG_PACKETCONFIG2, 0x04, 0x04)
+                .await
+                .map_err(map_err)?;
+        }
+
+        self.set_mode(Rfm69Mode::Rx).await.map_err(map_err)?;
+
+        // Pulse RestartRx once after entering RX to arm the sync detector cleanly.
+        self.write_register_bits(REG_PACKETCONFIG2, 0x04, 0x04)
+            .await
+            .map_err(map_err)?;
+        Ok(())
     }
 
     async fn stop_receive(
@@ -1130,29 +1335,19 @@ impl crate::wmbus::radio::radio_driver::RadioDriver for Rfm69Driver {
         Option<crate::wmbus::radio::radio_driver::ReceivedPacket>,
         crate::wmbus::radio::radio_driver::RadioDriverError,
     > {
-        // Check packet buffer for complete packets
-        let mut buffer = self.packet_buffer.lock().unwrap();
-
-        if buffer.is_complete() {
-            match buffer.extract_packet() {
-                Ok(data) => {
-                    // TODO: Get real RSSI and other packet info
-                    let packet = crate::wmbus::radio::radio_driver::ReceivedPacket {
-                        data,
-                        rssi_dbm: -80, // Placeholder
-                        freq_error_hz: None,
-                        lqi: None,
-                        crc_valid: true, // RFM69 packet processing validates CRC
-                    };
-                    Ok(Some(packet))
-                }
-                Err(e) => {
-                    warn!("Failed to extract packet: {}", e);
-                    Ok(None)
-                }
-            }
-        } else {
-            Ok(None)
+        // Pop a completed frame delivered by the interrupt task. (The interrupt
+        // task is the sole owner of packet assembly; get_received_packet must not
+        // re-extract from the buffer or the two would race and drop frames.)
+        let entry = self.received.lock().unwrap().pop_front();
+        match entry {
+            Some((data, rssi_dbm)) => Ok(Some(crate::wmbus::radio::radio_driver::ReceivedPacket {
+                data,
+                rssi_dbm,
+                freq_error_hz: None,
+                lqi: None,
+                crc_valid: true, // block CRCs validated downstream
+            })),
+            None => Ok(None),
         }
     }
 
@@ -1162,13 +1357,16 @@ impl crate::wmbus::radio::radio_driver::RadioDriver for Rfm69Driver {
         crate::wmbus::radio::radio_driver::RadioStats,
         crate::wmbus::radio::radio_driver::RadioDriverError,
     > {
-        let stats = self.get_stats();
+        // Read the inherent PacketStats directly. Calling `self.get_stats()` here
+        // resolves to *this* async trait method (name collision), not the inherent
+        // one, yielding a Future instead of stats.
+        let stats = self.stats.lock().unwrap().clone();
         Ok(crate::wmbus::radio::radio_driver::RadioStats {
-            packets_received: stats.total_frames,
-            packets_crc_valid: stats.crc_ok_frames,
-            packets_crc_error: stats.total_frames - stats.crc_ok_frames,
-            packets_length_error: 0, // RFM69 doesn't track this separately
-            last_rssi_dbm: -80,      // TODO: Get real RSSI
+            packets_received: stats.packets_received as u32,
+            packets_crc_valid: stats.packets_valid as u32,
+            packets_crc_error: stats.packets_crc_error as u32,
+            packets_length_error: stats.packets_invalid_header as u32,
+            last_rssi_dbm: -80, // TODO: Get real RSSI
         })
     }
 

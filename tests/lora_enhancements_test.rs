@@ -4,11 +4,8 @@
 //! including hardware initialization, structured logging, and Pi platform detection.
 
 use mbus_rs::logging::{
-    init_enhanced_logging,
-    is_rtt_available,
-    get_rtt_stats,
-    structured,
-    encoders::{IrqEvent, LoRaEvent, CryptoEvent, LoRaEventType, CryptoOp, CryptoBackend},
+    encoders::{CryptoBackend, CryptoEvent, CryptoOp, IrqEvent, LoRaEvent, LoRaEventType},
+    get_rtt_stats, init_enhanced_logging, is_rtt_available, structured,
 };
 use std::time::Instant;
 use tokio::time::{sleep, Duration};
@@ -32,8 +29,10 @@ mod rtt_logging_tests {
         {
             if rtt_available {
                 let stats = get_rtt_stats();
-                println!("RTT Stats: Platform: {}, Channels: {}, SWO: {} Hz",
-                         stats.platform, stats.channels_active, stats.swo_baud);
+                println!(
+                    "RTT Stats: Platform: {}, Channels: {}, SWO: {} Hz",
+                    stats.platform, stats.channels_active, stats.swo_baud
+                );
 
                 // Verify platform detection works correctly
                 assert!(!stats.platform.is_empty());
@@ -62,11 +61,7 @@ mod rtt_logging_tests {
 
             // Test multiple IRQ events
             for i in 0..10 {
-                structured::log_irq_event(
-                    1 << (i % 8),
-                    10000 + i * 1000,
-                    26 + (i % 4) as u8,
-                );
+                structured::log_irq_event(1 << (i % 8), 10000 + i * 1000, 26 + (i % 4) as u8);
                 sleep(Duration::from_millis(1)).await;
             }
         }
@@ -105,11 +100,17 @@ mod rtt_logging_tests {
             }
             let duration = start.elapsed();
 
-            println!("100 LoRa events logged in {:?} ({:.2} events/ms)",
-                     duration, 100.0 / duration.as_millis() as f64);
+            println!(
+                "100 LoRa events logged in {:?} ({:.2} events/ms)",
+                duration,
+                100.0 / duration.as_millis() as f64
+            );
 
             // Verify high throughput (should be much faster than printf)
-            assert!(duration.as_millis() < 100, "RTT logging should be very fast");
+            assert!(
+                duration.as_millis() < 100,
+                "RTT logging should be very fast"
+            );
         }
     }
 
@@ -137,15 +138,22 @@ mod rtt_logging_tests {
             for i in 0..1000 {
                 structured::log_crypto_event(
                     CryptoOp::Encrypt,
-                    if i % 2 == 0 { CryptoBackend::Hardware } else { CryptoBackend::Software },
+                    if i % 2 == 0 {
+                        CryptoBackend::Hardware
+                    } else {
+                        CryptoBackend::Software
+                    },
                     128 + (i % 128),
                     (5 + (i % 20)) as u64,
                 );
             }
             let duration = start.elapsed();
 
-            println!("1000 crypto events logged in {:?} ({:.2} events/ms)",
-                     duration, 1000.0 / duration.as_millis() as f64);
+            println!(
+                "1000 crypto events logged in {:?} ({:.2} events/ms)",
+                duration,
+                1000.0 / duration.as_millis() as f64
+            );
         }
     }
 
@@ -153,7 +161,10 @@ mod rtt_logging_tests {
     fn test_cross_platform_compatibility() {
         // This test should pass on all platforms
         let result = init_enhanced_logging();
-        assert!(result.is_ok(), "Logging initialization should work on all platforms");
+        assert!(
+            result.is_ok(),
+            "Logging initialization should work on all platforms"
+        );
 
         // RTT availability is platform-dependent
         let rtt_available = is_rtt_available();
@@ -181,7 +192,10 @@ mod rtt_logging_tests {
         #[cfg(not(feature = "rtt-logging"))]
         {
             let rtt_available = is_rtt_available();
-            assert!(!rtt_available, "RTT should not be available when feature is disabled");
+            assert!(
+                !rtt_available,
+                "RTT should not be available when feature is disabled"
+            );
         }
 
         // Traditional logging should always work
@@ -193,7 +207,7 @@ mod rtt_logging_tests {
 mod tests {
     use mbus_rs::wmbus::radio::lora::{
         cad::{CadExitMode, CadStats, LoRaCadParams},
-        params::{SyncWords, LoRaModParams, LoRaModParamsExt, LoRaPacketParams},
+        params::{LoRaModParams, LoRaModParamsExt, LoRaPacketParams, SyncWords},
         CodingRate, LoRaBandwidth, SpreadingFactor,
     };
 
@@ -423,8 +437,13 @@ mod tests {
 
             // Duration should be reasonable (up to 2 seconds for SF12 with many symbols)
             let duration = params.duration_ms(sf, bw);
-            assert!(duration > 0 && duration < 2000,
-                    "Unexpected duration for SF{:?}/BW{:?}: {}ms", sf, bw, duration);
+            assert!(
+                duration > 0 && duration < 2000,
+                "Unexpected duration for SF{:?}/BW{:?}: {}ms",
+                sf,
+                bw,
+                duration
+            );
         }
     }
 

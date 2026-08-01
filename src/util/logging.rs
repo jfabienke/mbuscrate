@@ -16,7 +16,6 @@
 //!
 //! ```rust
 //! use mbus_rs::util::logging::{LogThrottle, log_frame_hex, span_frame_processing};
-//! use tracing::info_span;
 //!
 //! // Rate-limited logging
 //! let mut throttle = LogThrottle::new(1000, 5); // 5 messages per second
@@ -25,6 +24,7 @@
 //! }
 //!
 //! // Structured frame processing
+//! # let frame_data = [0x68u8, 0x04, 0x04, 0x68];
 //! let _span = span_frame_processing("wM-Bus Type A");
 //! log_frame_hex("Received frame", &frame_data);
 //! ```
@@ -297,24 +297,18 @@ pub mod debug {
         if valid {
             log::debug!("CRC valid: {expected:04X}");
         } else {
-            log::warn!(
-                "CRC mismatch: expected {expected:04X}, calculated {calculated:04X}"
-            );
+            log::warn!("CRC mismatch: expected {expected:04X}, calculated {calculated:04X}");
         }
     }
 
     /// Log frame type detection
     pub fn log_frame_type_detection(sync_byte: u8, frame_type: &str) {
-        log::debug!(
-            "Frame type detected: sync={sync_byte:02X} -> {frame_type}"
-        );
+        log::debug!("Frame type detected: sync={sync_byte:02X} -> {frame_type}");
     }
 
     /// Log encryption detection
     pub fn log_encryption_detection(ci: u8, acc: u8, encrypted: bool) {
-        log::debug!(
-            "Encryption check: CI={ci:02X}, ACC={acc:02X} -> encrypted={encrypted}"
-        );
+        log::debug!("Encryption check: CI={ci:02X}, ACC={acc:02X} -> encrypted={encrypted}");
     }
 }
 

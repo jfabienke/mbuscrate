@@ -497,7 +497,12 @@ pub fn parse_variable_record_with_vendor(
     // Check for vendor-specific DIF handling (0x0F or 0x1F)
     if let (Some(mfr_id), Some(reg)) = (manufacturer_id, registry) {
         if record.drh.dib.dif == 0x0F || record.drh.dib.dif == 0x1F {
-            if let Some(vendor_records) = vendors::dispatch_dif_hook(reg, mfr_id, record.drh.dib.dif, &record.data[..record.data_len])? {
+            if let Some(vendor_records) = vendors::dispatch_dif_hook(
+                reg,
+                mfr_id,
+                record.drh.dib.dif,
+                &record.data[..record.data_len],
+            )? {
                 // Convert first vendor record to MBusRecord (simplified)
                 if let Some(first) = vendor_records.first() {
                     record.unit = first.unit.clone();
@@ -513,7 +518,12 @@ pub fn parse_variable_record_with_vendor(
 
         // Check for vendor-specific VIF handling (0x7F or 0xFF)
         if record.drh.vib.vif == 0x7F || record.drh.vib.vif == 0xFF {
-            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(reg, mfr_id, record.drh.vib.vif, &record.data[..record.data_len])? {
+            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(
+                reg,
+                mfr_id,
+                record.drh.vib.vif,
+                &record.data[..record.data_len],
+            )? {
                 record.unit = unit;
                 record.quantity = qty;
                 record.value = match var {
@@ -521,7 +531,7 @@ pub fn parse_variable_record_with_vendor(
                         // Apply exponent
                         let scaled = n * 10_f64.powi(exp as i32);
                         MBusRecordValue::Numeric(scaled)
-                    },
+                    }
                     vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
                     _ => MBusRecordValue::String("Vendor specific".to_string()),
                 };
@@ -530,7 +540,12 @@ pub fn parse_variable_record_with_vendor(
 
         // Check for QUNDIS-specific VIF 0x04 date handling
         if mfr_id == "QDS" && record.drh.vib.vif == 0x04 {
-            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(reg, mfr_id, record.drh.vib.vif, &record.data[..record.data_len])? {
+            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(
+                reg,
+                mfr_id,
+                record.drh.vib.vif,
+                &record.data[..record.data_len],
+            )? {
                 record.unit = unit;
                 record.quantity = qty;
                 record.value = match var {
@@ -538,7 +553,7 @@ pub fn parse_variable_record_with_vendor(
                         // Apply exponent
                         let scaled = n * 10_f64.powi(exp as i32);
                         MBusRecordValue::Numeric(scaled)
-                    },
+                    }
                     vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
                     _ => MBusRecordValue::String("Vendor specific".to_string()),
                 };
@@ -549,13 +564,18 @@ pub fn parse_variable_record_with_vendor(
         if record.data_len > 0 {
             // Status byte is often at the end of fixed data structures
             let status_byte = record.data[record.data_len - 1];
-            if (status_byte & 0xE0) != 0 {  // Check bits [7:5]
-                if let Some(status_vars) = vendors::dispatch_status_hook(reg, mfr_id, status_byte)? {
+            if (status_byte & 0xE0) != 0 {
+                // Check bits [7:5]
+                if let Some(status_vars) = vendors::dispatch_status_hook(reg, mfr_id, status_byte)?
+                {
                     // Add status to quantity/unit for visibility
-                    let status_str = status_vars.iter()
+                    let status_str = status_vars
+                        .iter()
                         .filter_map(|v| match v {
                             vendors::VendorVariable::Boolean(true) => Some("ALARM"),
-                            vendors::VendorVariable::ErrorFlags { flags } if *flags != 0 => Some("ERROR"),
+                            vendors::VendorVariable::ErrorFlags { flags } if *flags != 0 => {
+                                Some("ERROR")
+                            }
                             _ => None,
                         })
                         .collect::<Vec<_>>()

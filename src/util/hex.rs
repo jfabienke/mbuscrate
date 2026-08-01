@@ -71,7 +71,7 @@ pub fn decode_hex(hex_str: &str) -> Result<Vec<u8>, HexError> {
     // Remove whitespace and normalize
     let cleaned: String = hex_str.chars().filter(|c| !c.is_whitespace()).collect();
 
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err(HexError::OddLength(cleaned.len()));
     }
 
@@ -151,7 +151,7 @@ pub fn parse_hex_lenient(input: &str) -> Result<Vec<u8>, HexError> {
         return Err(HexError::EmptyString);
     }
 
-    if hex_chars.len() % 2 != 0 {
+    if !hex_chars.len().is_multiple_of(2) {
         return Err(HexError::OddLength(hex_chars.len()));
     }
 

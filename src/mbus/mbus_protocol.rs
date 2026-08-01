@@ -517,11 +517,11 @@ impl StateMachine {
 
         // Validate value is reasonable (not NaN, not infinite) for numeric values
         match &mut record.value {
-            crate::payload::record::MBusRecordValue::Numeric(value) => {
-                if value.is_nan() || value.is_infinite() {
-                    // Set to 0 and log the issue rather than failing
-                    *value = 0.0;
-                }
+            crate::payload::record::MBusRecordValue::Numeric(value)
+                if (value.is_nan() || value.is_infinite()) =>
+            {
+                // Set to 0 and log the issue rather than failing
+                *value = 0.0;
             }
             _ => {
                 // String values don't need this validation

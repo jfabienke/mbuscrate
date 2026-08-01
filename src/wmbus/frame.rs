@@ -19,12 +19,12 @@
 //!
 //! ## CRC Calculation
 //!
-//! The CRC is calculated using the CCITT polynomial 0x1021 (reversed as 0x8408)
-//! with initial value 0x3791. The calculation covers the entire frame from
-//! L-field to the end of data (excluding the CRC itself).
+//! The CRC is CRC-16/EN-13757 (poly 0x3D65, init 0x0000, xorout 0xFFFF); see
+//! [`crate::wmbus::crc`] for the canonical implementation and its check value.
 
-use crate::vendors;
 use crate::instrumentation::stats::{update_device_error, update_device_success, ErrorType};
+use crate::vendors;
+use crate::wmbus::crc::read_crc_be;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -52,48 +52,23 @@ pub enum ParseError {
     BufferTooShort,
 }
 
-/// Calculate wM-Bus CRC using CCITT polynomial with wM-Bus specific parameters
+/// Calculate the wM-Bus CRC over `data` (CRC-16/EN-13757).
 ///
-/// According to EN 13757-4, the CRC is calculated using:
-/// - Polynomial: 0x1021 (CCITT standard)
-/// - Reversed polynomial: 0x8408 (for MSB-first calculation)
-/// - Initial value: 0x3791
-/// - Final XOR: None (result is NOT complemented)
-///
-/// # Arguments
-///
-/// * `data` - Data to calculate CRC over (from L-field to end of payload)
-///
-/// # Returns
-///
-/// * CRC-16 value as specified by wM-Bus standard
+/// Delegates to the canonical implementation in [`crate::wmbus::crc`] (poly 0x3D65,
+/// init 0x0000, xorout 0xFFFF, check value 0xC2B7). The previous implementation used
+/// a reflected 0x8408 polynomial with a 0x3791 init — a non-standard CRC that no
+/// meter transmits; it only ever round-tripped against this crate's own [`add_wmbus_crc`].
 ///
 /// # Examples
 ///
 /// ```rust
+/// use mbus_rs::wmbus::frame::calculate_wmbus_crc;
+///
 /// let frame_data = [0x44, 0x93, 0x15, 0x68, 0x61, 0x05, 0x28, 0x74, 0x37, 0x01, 0x8E];
 /// let crc = calculate_wmbus_crc(&frame_data);
 /// ```
 pub fn calculate_wmbus_crc(data: &[u8]) -> u16 {
-    const POLYNOMIAL: u16 = 0x8408; // Reversed CCITT polynomial
-    const INITIAL: u16 = 0x3791; // wM-Bus specific initial value
-
-    let mut crc = INITIAL;
-
-    for &byte in data {
-        crc ^= byte as u16;
-
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ POLYNOMIAL;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-
-    // Important: wM-Bus does NOT complement the final result
-    crc
+    crate::wmbus::crc::calculate_wmbus_crc(data)
 }
 
 /// Check if frame is encrypted based on control field and CI
@@ -120,29 +95,30 @@ pub fn is_encrypted_frame(control_field: u8, control_info: u8) -> bool {
     acc_bit_set || encrypted_ci
 }
 
-/// Verify CRC of a complete wM-Bus frame
+/// Verify CRC of a complete wM-Bus frame.
 ///
-/// Calculates the expected CRC over the frame data and compares it with
-/// the provided CRC field.
+/// Uses the canonical CRC-16/EN-13757 algorithm (via [`calculate_wmbus_crc`]) and reads
+/// the trailing CRC **big-endian**, as wM-Bus transmits it (see
+/// [`crate::wmbus::crc::read_crc_be`]) — matching [`add_wmbus_crc`] and the block-level
+/// path in [`super::mode_c::decode_mode_c`].
+///
+/// # Note: single vs. block CRC
+///
+/// This models one trailing CRC over the whole frame — correct for a single-block frame.
+/// EN 13757-4 multi-block on-wire frames (first block + each 16-byte data block, each with
+/// its own CRC) are decoded by [`super::mode_c::decode_mode_c`] / the streaming
+/// [`super::frame_decode::FrameDecoder`], which is the canonical live-RX path.
 ///
 /// # Arguments
 ///
 /// * `frame_data` - Complete frame data including CRC field
-///
-/// # Returns
-///
-/// * `true` if CRC is valid
-/// * `false` if CRC is invalid
 pub fn verify_wmbus_crc(frame_data: &[u8]) -> bool {
     if frame_data.len() < 3 {
         return false; // Too short to contain CRC
     }
 
-    // Extract CRC from last 2 bytes (little-endian)
-    let frame_crc = u16::from_le_bytes([
-        frame_data[frame_data.len() - 2],
-        frame_data[frame_data.len() - 1],
-    ]);
+    // Extract CRC from last 2 bytes (big-endian, as transmitted)
+    let frame_crc = read_crc_be(&frame_data[frame_data.len() - 2..]);
 
     // Calculate CRC over data (excluding the CRC field itself)
     let data_for_crc = &frame_data[..frame_data.len() - 2];
@@ -166,8 +142,8 @@ pub fn add_wmbus_crc(frame_data: &[u8]) -> Vec<u8> {
     let crc = calculate_wmbus_crc(frame_data);
     let mut result = frame_data.to_vec();
 
-    // Append CRC in little-endian format
-    result.extend_from_slice(&crc.to_le_bytes());
+    // Append CRC big-endian, as wM-Bus transmits it (see crate::wmbus::crc::read_crc_be)
+    result.extend_from_slice(&crc.to_be_bytes());
 
     result
 }
@@ -189,7 +165,10 @@ pub fn add_wmbus_crc(frame_data: &[u8]) -> Vec<u8> {
 /// # Examples
 ///
 /// ```rust
-/// let raw_frame = [0x44, 0x93, 0x15, 0x68, /* ... */, 0x12, 0x34]; // Complete frame with CRC
+/// use mbus_rs::wmbus::frame::{parse_wmbus_frame, WMBusFrame};
+///
+/// // A complete frame, CRC included
+/// let raw_frame = WMBusFrame::build(0x44, 0x6815, 0x74280561, 0x37, 0x01, 0x8E, &[0x01, 0x02]);
 /// match parse_wmbus_frame(&raw_frame) {
 ///     Ok(frame) => println!("Parsed frame from device {:#X}", frame.device_address),
 ///     Err(e) => println!("Parse error: {:?}", e),
@@ -251,11 +230,8 @@ pub fn parse_wmbus_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
         vec![]
     };
 
-    // Extract CRC from last 2 bytes
-    let crc = u16::from_le_bytes([
-        raw_bytes[raw_bytes.len() - 2],
-        raw_bytes[raw_bytes.len() - 1],
-    ]);
+    // Extract CRC from last 2 bytes (big-endian, as transmitted)
+    let crc = read_crc_be(&raw_bytes[raw_bytes.len() - 2..]);
 
     // Track successful frame parsing
     let device_id = format!("{device_address:08X}");
@@ -315,11 +291,8 @@ fn parse_compact_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
         vec![]
     };
 
-    // Extract CRC
-    let crc = u16::from_le_bytes([
-        raw_bytes[raw_bytes.len() - 2],
-        raw_bytes[raw_bytes.len() - 1],
-    ]);
+    // Extract CRC (big-endian, as transmitted)
+    let crc = read_crc_be(&raw_bytes[raw_bytes.len() - 2..]);
 
     // For compact frames, device info would be retrieved from cache using signature
     // Here we use placeholder values - in production, lookup from cache
@@ -333,7 +306,7 @@ fn parse_compact_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
         control_info,
         payload,
         crc,
-        encrypted: false,           // Compact frames are typically not encrypted
+        encrypted: false, // Compact frames are typically not encrypted
     })
 }
 
@@ -352,12 +325,9 @@ pub fn parse_wmbus_frame_with_vendor(
     if let (Some(mfr_id), Some(reg)) = (manufacturer_id, registry) {
         if frame.control_info >= 0xA0 && frame.control_info <= 0xB7 {
             // Dispatch to vendor hook
-            if let Ok(Some(_vendor_record)) = vendors::dispatch_ci_hook(
-                reg,
-                mfr_id,
-                frame.control_info,
-                &frame.payload,
-            ) {
+            if let Ok(Some(_vendor_record)) =
+                vendors::dispatch_ci_hook(reg, mfr_id, frame.control_info, &frame.payload)
+            {
                 // For now, just mark in payload that vendor handling occurred
                 // In a full implementation, we'd convert vendor_record to appropriate format
                 let mut modified_payload = vec![0xFF]; // Vendor marker
@@ -393,6 +363,8 @@ impl WMBusFrame {
     /// # Examples
     ///
     /// ```rust
+    /// use mbus_rs::wmbus::frame::WMBusFrame;
+    ///
     /// let frame_data = WMBusFrame::build(
     ///     0x44,                    // Control field
     ///     0x6815,                  // Manufacturer ID (Engelmann)

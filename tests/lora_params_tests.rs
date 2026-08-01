@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use mbus_rs::wmbus::radio::lora::params::{
-        lora_bitrate_hz, class_a_window_delay_sf, get_lora_sensitivity_dbm,
-        get_min_snr_db, requires_ldro
+        class_a_window_delay_sf, get_lora_sensitivity_dbm, get_min_snr_db, lora_bitrate_hz,
+        requires_ldro,
     };
     use mbus_rs::wmbus::radio::lora::{CodingRate, LoRaBandwidth, SpreadingFactor};
 
@@ -24,7 +24,11 @@ mod tests {
             LoRaBandwidth::BW125,
             CodingRate::CR4_8,
         );
-        assert!((low_bitrate - 183.0).abs() < 10.0, "SF12 bitrate: {}", low_bitrate);
+        assert!(
+            (low_bitrate - 183.0).abs() < 10.0,
+            "SF12 bitrate: {}",
+            low_bitrate
+        );
     }
 
     #[test]
@@ -57,24 +61,63 @@ mod tests {
     #[test]
     fn test_sensitivity_values() {
         // Test sensitivity at 125kHz bandwidth (reference values from AN1200.22)
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF5, LoRaBandwidth::BW125), -124);
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF6, LoRaBandwidth::BW125), -127);
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW125), -130);
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF8, LoRaBandwidth::BW125), -133);
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF9, LoRaBandwidth::BW125), -136);
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF10, LoRaBandwidth::BW125), -139);
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF11, LoRaBandwidth::BW125), -141);
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF12, LoRaBandwidth::BW125), -144);
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF5, LoRaBandwidth::BW125),
+            -124
+        );
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF6, LoRaBandwidth::BW125),
+            -127
+        );
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW125),
+            -130
+        );
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF8, LoRaBandwidth::BW125),
+            -133
+        );
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF9, LoRaBandwidth::BW125),
+            -136
+        );
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF10, LoRaBandwidth::BW125),
+            -139
+        );
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF11, LoRaBandwidth::BW125),
+            -141
+        );
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF12, LoRaBandwidth::BW125),
+            -144
+        );
 
         // Test bandwidth adjustments
         // Lower BW = better sensitivity
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW62_5), -131);
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW31_2), -132);
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW7_8), -136);
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW62_5),
+            -131
+        );
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW31_2),
+            -132
+        );
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW7_8),
+            -136
+        );
 
         // Higher BW = worse sensitivity
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW250), -127);
-        assert_eq!(get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW500), -124);
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW250),
+            -127
+        );
+        assert_eq!(
+            get_lora_sensitivity_dbm(SpreadingFactor::SF7, LoRaBandwidth::BW500),
+            -124
+        );
     }
 
     #[test]
@@ -107,14 +150,14 @@ mod tests {
                 sf: SpreadingFactor::SF5,
                 bw: LoRaBandwidth::BW500,
                 cr: CodingRate::CR4_5,
-                expected_bps: 62500.0,  // 5 * (500000/32) * 0.8
+                expected_bps: 62500.0, // 5 * (500000/32) * 0.8
                 tolerance: 100.0,
             },
             TestCase {
                 sf: SpreadingFactor::SF7,
                 bw: LoRaBandwidth::BW500,
                 cr: CodingRate::CR4_5,
-                expected_bps: 21875.0,  // 7 * (500000/128) * 0.8
+                expected_bps: 21875.0, // 7 * (500000/128) * 0.8
                 tolerance: 100.0,
             },
             // Medium data rates
@@ -122,7 +165,7 @@ mod tests {
                 sf: SpreadingFactor::SF9,
                 bw: LoRaBandwidth::BW125,
                 cr: CodingRate::CR4_5,
-                expected_bps: 1758.0,  // 9 * (125000/512) * 0.8
+                expected_bps: 1758.0, // 9 * (125000/512) * 0.8
                 tolerance: 10.0,
             },
             // Slow data rates
@@ -130,7 +173,7 @@ mod tests {
                 sf: SpreadingFactor::SF12,
                 bw: LoRaBandwidth::BW62_5,
                 cr: CodingRate::CR4_8,
-                expected_bps: 92.0,  // 12 * (62500/4096) * 0.5
+                expected_bps: 92.0, // 12 * (62500/4096) * 0.5
                 tolerance: 5.0,
             },
             // Ultra-slow for maximum range
@@ -138,7 +181,7 @@ mod tests {
                 sf: SpreadingFactor::SF12,
                 bw: LoRaBandwidth::BW7_8,
                 cr: CodingRate::CR4_8,
-                expected_bps: 11.0,  // 12 * (7800/4096) * 0.5
+                expected_bps: 11.0, // 12 * (7800/4096) * 0.5
                 tolerance: 2.0,
             },
         ];
@@ -148,7 +191,11 @@ mod tests {
             assert!(
                 (bitrate - tc.expected_bps).abs() < tc.tolerance,
                 "SF{:?} BW{:?} CR{:?}: expected {} bps, got {} bps",
-                tc.sf, tc.bw, tc.cr, tc.expected_bps, bitrate
+                tc.sf,
+                tc.bw,
+                tc.cr,
+                tc.expected_bps,
+                bitrate
             );
         }
     }

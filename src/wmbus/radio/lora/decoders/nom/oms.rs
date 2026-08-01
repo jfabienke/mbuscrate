@@ -139,7 +139,9 @@ pub fn parse_oms_data_records(input: &[u8]) -> IResult<&[u8], Vec<OmsDataRecord>
                 // Convert M-Bus record to OMS record
                 // Convert data::MBusRecordValue to record::MBusRecordValue
                 let value = match record.value {
-                    crate::payload::data::MBusRecordValue::Numeric(n) => MBusRecordValue::Numeric(n),
+                    crate::payload::data::MBusRecordValue::Numeric(n) => {
+                        MBusRecordValue::Numeric(n)
+                    }
                     crate::payload::data::MBusRecordValue::String(s) => MBusRecordValue::String(s),
                 };
                 let oms_record = OmsDataRecord {

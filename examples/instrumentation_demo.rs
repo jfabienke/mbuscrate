@@ -1,11 +1,10 @@
 // Demonstration of dual-path instrumentation with realistic scenarios
 use mbus_rs::instrumentation::{
-    UnifiedInstrumentation, MeteringReport, Reading, ReadingQuality,
-    DeviceType, ProtocolType, DeviceStatus, BatteryStatus, RadioMetrics,
-    FrameStatistics,
+    BatteryStatus, DeviceStatus, DeviceType, FrameStatistics, MeteringReport, ProtocolType,
+    RadioMetrics, Reading, ReadingQuality, UnifiedInstrumentation,
 };
-use std::time::SystemTime;
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 fn main() {
     println!("=== Dual-Path Instrumentation Demo ===\n");
@@ -152,9 +151,14 @@ fn scenario_sensor_failure() {
     let metering = MeteringReport::from_unified(&inst);
 
     println!("⚠️ Status: Sensor failure detected");
-    println!("   Metering: {} good readings (partial data)", metering.readings.len());
-    println!("   Instrumentation: {} bad readings detected",
-        inst.bad_readings.as_ref().map(|b| b.len()).unwrap_or(0));
+    println!(
+        "   Metering: {} good readings (partial data)",
+        metering.readings.len()
+    );
+    println!(
+        "   Instrumentation: {} bad readings detected",
+        inst.bad_readings.as_ref().map(|b| b.len()).unwrap_or(0)
+    );
     println!("   Error: Temperature sensor failure (code 0x02)");
     println!("   Action: Service required");
     println!();
@@ -174,17 +178,15 @@ fn scenario_data_corruption() {
     inst.model = Some("AS3000".to_string());
 
     // Some good readings
-    inst.readings = vec![
-        Reading {
-            name: "Active Energy Import".to_string(),
-            value: 45678.123,
-            unit: "kWh".to_string(),
-            timestamp: SystemTime::now(),
-            tariff: Some(1),
-            storage_number: Some(0),
-            quality: ReadingQuality::Good,
-        },
-    ];
+    inst.readings = vec![Reading {
+        name: "Active Energy Import".to_string(),
+        value: 45678.123,
+        unit: "kWh".to_string(),
+        timestamp: SystemTime::now(),
+        tariff: Some(1),
+        storage_number: Some(0),
+        quality: ReadingQuality::Good,
+    }];
 
     // Corrupted data
     inst.bad_readings = Some(vec![
@@ -233,12 +235,16 @@ fn scenario_data_corruption() {
 
     println!("❌ Status: Data corruption detected");
     println!("   Metering: {} readings salvaged", metering.readings.len());
-    println!("   Instrumentation: {} corrupted readings",
-        inst.bad_readings.as_ref().map(|b| b.len()).unwrap_or(0));
-    println!("   Frame errors: {} CRC, {} decrypt, {} parse",
+    println!(
+        "   Instrumentation: {} corrupted readings",
+        inst.bad_readings.as_ref().map(|b| b.len()).unwrap_or(0)
+    );
+    println!(
+        "   Frame errors: {} CRC, {} decrypt, {} parse",
         inst.frame_statistics.crc_errors,
         inst.frame_statistics.decryption_errors,
-        inst.frame_statistics.parsing_errors);
+        inst.frame_statistics.parsing_errors
+    );
     println!("   Action: Check communication link");
     println!();
 }
@@ -277,17 +283,15 @@ fn scenario_battery_low() {
         },
     ];
 
-    inst.bad_readings = Some(vec![
-        Reading {
-            name: "Pressure".to_string(),
-            value: 0.0, // Sensor shutdown due to low power
-            unit: "hPa".to_string(),
-            timestamp: SystemTime::now(),
-            tariff: None,
-            storage_number: None,
-            quality: ReadingQuality::Invalid,
-        },
-    ]);
+    inst.bad_readings = Some(vec![Reading {
+        name: "Pressure".to_string(),
+        value: 0.0, // Sensor shutdown due to low power
+        unit: "hPa".to_string(),
+        timestamp: SystemTime::now(),
+        tariff: None,
+        storage_number: None,
+        quality: ReadingQuality::Invalid,
+    }]);
 
     inst.battery_status = Some(BatteryStatus {
         voltage: Some(2.1),
@@ -312,11 +316,21 @@ fn scenario_battery_low() {
 
     println!("🔋 Status: Low battery affecting operations");
     println!("   Battery: 5% (⚠️ 7 days remaining)");
-    println!("   Metering: {} readings (partial)", metering.readings.len());
-    println!("   Instrumentation: {} sensors offline",
-        inst.bad_readings.as_ref().map(|b| b.len()).unwrap_or(0));
-    println!("   Radio: RSSI {} dBm (weak signal)",
-        inst.radio_metrics.as_ref().and_then(|r| r.rssi_dbm).unwrap_or(0));
+    println!(
+        "   Metering: {} readings (partial)",
+        metering.readings.len()
+    );
+    println!(
+        "   Instrumentation: {} sensors offline",
+        inst.bad_readings.as_ref().map(|b| b.len()).unwrap_or(0)
+    );
+    println!(
+        "   Radio: RSSI {} dBm (weak signal)",
+        inst.radio_metrics
+            .as_ref()
+            .and_then(|r| r.rssi_dbm)
+            .unwrap_or(0)
+    );
     println!("   Action: Replace battery immediately");
     println!();
 }

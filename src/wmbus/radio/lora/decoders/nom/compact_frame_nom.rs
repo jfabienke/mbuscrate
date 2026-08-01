@@ -9,7 +9,7 @@ use crate::wmbus::radio::lora::decoder::{
 use nom::{
     combinator::opt,
     number::complete::{le_i16, le_u16, le_u32, u8 as parse_u8},
-    IResult,
+    IResult, Parser,
 };
 use std::time::SystemTime;
 
@@ -32,10 +32,10 @@ pub fn parse_simple_compact(input: &[u8]) -> IResult<&[u8], SimpleCompactFrame> 
     let (input, battery) = parse_u8(input)?;
 
     // Optional temperature (2 bytes)
-    let (input, temperature) = opt(le_i16)(input)?;
+    let (input, temperature) = opt(le_i16).parse(input)?;
 
     // Optional pressure (2 bytes)
-    let (input, pressure) = opt(le_u16)(input)?;
+    let (input, pressure) = opt(le_u16).parse(input)?;
 
     Ok((
         input,

@@ -619,9 +619,7 @@ fn test_frame_processing_performance() {
         (successful_decodes as f64 * frame_data.len() as f64) / elapsed.as_secs_f64();
 
     println!("\nPerformance results:");
-    println!(
-        "  Frames processed: {successful_decodes}/{test_iterations}"
-    );
+    println!("  Frames processed: {successful_decodes}/{test_iterations}");
     println!("  Time elapsed: {elapsed:?}");
     println!("  Frames/second: {frames_per_second:.1}");
     println!("  Bytes/second: {bytes_per_second:.0}");

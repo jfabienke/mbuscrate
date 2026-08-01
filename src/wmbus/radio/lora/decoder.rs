@@ -382,8 +382,8 @@ pub mod helpers {
 
     /// Calculate battery percentage from voltage
     pub fn voltage_to_percentage(voltage: f32, min_voltage: f32, max_voltage: f32) -> u8 {
-        let percentage = ((voltage - min_voltage) / (max_voltage - min_voltage) * 100.0)
-            .clamp(0.0, 100.0);
+        let percentage =
+            ((voltage - min_voltage) / (max_voltage - min_voltage) * 100.0).clamp(0.0, 100.0);
         percentage as u8
     }
 }

@@ -2,12 +2,12 @@
 
 // Re-export types from modulation module to avoid duplication
 pub use crate::wmbus::radio::modulation::{
-    SpreadingFactor, LoRaBandwidth, CodingRate, LoRaModParams, LoRaPacketParams
+    CodingRate, LoRaBandwidth, LoRaModParams, LoRaPacketParams, SpreadingFactor,
 };
 
 /// Calculate LoRa bitrate in bps (datasheet formula)
 pub fn lora_bitrate_hz(sf: SpreadingFactor, bw: LoRaBandwidth, cr: CodingRate) -> f64 {
-    use crate::wmbus::radio::modulation::{SpreadingFactor, LoRaBandwidth, CodingRate};
+    use crate::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, SpreadingFactor};
     let sf_num = match sf {
         SpreadingFactor::SF5 => 5,
         SpreadingFactor::SF6 => 6,
@@ -75,7 +75,7 @@ impl LoRaModParamsExt for crate::wmbus::radio::modulation::LoRaModParams {
     fn eu868_defaults() -> Self {
         Self {
             sf: SpreadingFactor::SF9,
-            bw: LoRaBandwidth::BW125,  // Standard EU868 bandwidth
+            bw: LoRaBandwidth::BW125, // Standard EU868 bandwidth
             cr: CodingRate::CR4_5,
             low_data_rate_optimize: false,
         }
@@ -106,13 +106,15 @@ impl LoRaModParamsExt for crate::wmbus::radio::modulation::LoRaModParams {
     fn validate(&self) -> Result<(), &'static str> {
         // Check for incompatible SF/BW combinations
         if matches!(self.sf, SpreadingFactor::SF11 | SpreadingFactor::SF12)
-            && matches!(self.bw, LoRaBandwidth::BW500) {
+            && matches!(self.bw, LoRaBandwidth::BW500)
+        {
             return Err("SF11/SF12 with BW500 not recommended - excessive time on air");
         }
 
         // Warn about very low data rates
         if matches!(self.sf, SpreadingFactor::SF12)
-            && matches!(self.bw, LoRaBandwidth::BW7_8 | LoRaBandwidth::BW10_4) {
+            && matches!(self.bw, LoRaBandwidth::BW7_8 | LoRaBandwidth::BW10_4)
+        {
             return Err("SF12 with BW<31.2kHz results in <20bps - consider higher BW");
         }
 
@@ -141,7 +143,7 @@ impl Default for LoRaPacketParams {
     fn default() -> Self {
         Self {
             preamble_len: 8,        // Standard preamble (User Guide Fig. 9)
-            implicit_header: false,  // Explicit header for flexibility
+            implicit_header: false, // Explicit header for flexibility
             payload_len: 64,        // Typical metering packet size
             crc_on: true,           // Enable CRC for data integrity
             iq_inverted: false,     // Standard IQ polarity
@@ -167,15 +169,15 @@ pub fn get_lora_sensitivity_dbm(sf: SpreadingFactor, bw: LoRaBandwidth) -> i16 {
 
     // Bandwidth adjustment (relative to 125kHz)
     let bw_adjustment = match bw {
-        LoRaBandwidth::BW7_8 => -6,   // Better sensitivity at lower BW
+        LoRaBandwidth::BW7_8 => -6, // Better sensitivity at lower BW
         LoRaBandwidth::BW10_4 => -5,
         LoRaBandwidth::BW15_6 => -4,
         LoRaBandwidth::BW20_8 => -3,
         LoRaBandwidth::BW31_2 => -2,
         LoRaBandwidth::BW41_7 => -1,
         LoRaBandwidth::BW62_5 => -1,
-        LoRaBandwidth::BW125 => 0,    // Reference
-        LoRaBandwidth::BW250 => 3,    // Worse sensitivity at higher BW
+        LoRaBandwidth::BW125 => 0, // Reference
+        LoRaBandwidth::BW250 => 3, // Worse sensitivity at higher BW
         LoRaBandwidth::BW500 => 6,
     };
 
@@ -201,11 +203,17 @@ pub fn get_min_snr_db(sf: SpreadingFactor) -> f32 {
 /// Per AN1200.22: Required for SF11/SF12 when BW <= 125kHz
 pub fn requires_ldro(sf: SpreadingFactor, bw: LoRaBandwidth) -> bool {
     matches!(sf, SpreadingFactor::SF11 | SpreadingFactor::SF12)
-        && matches!(bw,
-            LoRaBandwidth::BW7_8 | LoRaBandwidth::BW10_4 |
-            LoRaBandwidth::BW15_6 | LoRaBandwidth::BW20_8 |
-            LoRaBandwidth::BW31_2 | LoRaBandwidth::BW41_7 |
-            LoRaBandwidth::BW62_5 | LoRaBandwidth::BW125)
+        && matches!(
+            bw,
+            LoRaBandwidth::BW7_8
+                | LoRaBandwidth::BW10_4
+                | LoRaBandwidth::BW15_6
+                | LoRaBandwidth::BW20_8
+                | LoRaBandwidth::BW31_2
+                | LoRaBandwidth::BW41_7
+                | LoRaBandwidth::BW62_5
+                | LoRaBandwidth::BW125
+        )
 }
 
 /// Sync word definitions for network types

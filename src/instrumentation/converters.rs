@@ -1,12 +1,15 @@
 //! Converters from specific device types to unified instrumentation
 
 use super::{
-    UnifiedInstrumentation, ProtocolType, Reading, ReadingQuality,
-    RadioMetrics, MeteringReport, validate_reading,
+    validate_reading, MeteringReport, ProtocolType, RadioMetrics, Reading, ReadingQuality,
+    UnifiedInstrumentation,
 };
 use crate::mbus::frame::MBusFrame;
 use crate::mbus::secondary_addressing::SecondaryAddress;
-use crate::payload::record::{MBusDataRecordHeader, MBusRecord, MBusRecordValue, MBusDataInformationBlock, MBusValueInformationBlock};
+use crate::payload::record::{
+    MBusDataInformationBlock, MBusDataRecordHeader, MBusRecord, MBusRecordValue,
+    MBusValueInformationBlock,
+};
 
 impl Default for MBusDataRecordHeader {
     fn default() -> Self {
@@ -25,7 +28,7 @@ impl Default for MBusDataRecordHeader {
         }
     }
 }
-use crate::vendors::{VendorDeviceInfo, manufacturer_id_to_string};
+use crate::vendors::{manufacturer_id_to_string, VendorDeviceInfo};
 use crate::wmbus::frame::WMBusFrame;
 use crate::wmbus::radio::lora::decoder::MeteringData;
 use std::time::SystemTime;
@@ -81,7 +84,11 @@ pub fn from_mbus_frame_with_split(
             value,
             unit: record.unit.clone(),
             timestamp: record.timestamp,
-            tariff: if record.tariff >= 0 { Some(record.tariff as u32) } else { None },
+            tariff: if record.tariff >= 0 {
+                Some(record.tariff as u32)
+            } else {
+                None
+            },
             storage_number: Some(record.storage_number),
             quality: ReadingQuality::Good,
         };
@@ -367,7 +374,6 @@ pub fn from_vendor_device_info(
     inst
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,23 +391,21 @@ mod tests {
             more_records_follow: false,
         };
 
-        let records = vec![
-            MBusRecord {
-                timestamp: SystemTime::now(),
-                storage_number: 0,
-                tariff: -1,
-                device: -1,
-                is_numeric: true,
-                value: MBusRecordValue::Numeric(123.45),
-                unit: "m³".to_string(),
-                function_medium: String::new(),
-                quantity: "Volume".to_string(),
-                drh: Default::default(),
-                data_len: 0,
-                data: [0; 256],
-                more_records_follow: 0,
-            },
-        ];
+        let records = vec![MBusRecord {
+            timestamp: SystemTime::now(),
+            storage_number: 0,
+            tariff: -1,
+            device: -1,
+            is_numeric: true,
+            value: MBusRecordValue::Numeric(123.45),
+            unit: "m³".to_string(),
+            function_medium: String::new(),
+            quantity: "Volume".to_string(),
+            drh: Default::default(),
+            data_len: 0,
+            data: [0; 256],
+            more_records_follow: 0,
+        }];
 
         let inst = from_mbus_frame(&frame, &records, None);
 
@@ -439,8 +443,8 @@ mod tests {
     #[test]
     fn test_lora_converter() {
         use crate::wmbus::radio::lora::decoder::{
-            MeteringData, DeviceStatus as LoRaDeviceStatus,
-            BatteryStatus as LoRaBatteryStatus, Reading as LoRaReading
+            BatteryStatus as LoRaBatteryStatus, DeviceStatus as LoRaDeviceStatus, MeteringData,
+            Reading as LoRaReading,
         };
 
         let data = MeteringData {
@@ -510,6 +514,9 @@ mod tests {
         assert_eq!(inst.readings[1].unit, "%");
 
         // Verify raw payload
-        assert_eq!(inst.raw_payload, Some(vec![0x01, 0x67, 0x00, 0xEB, 0x02, 0x68, 0x82]));
+        assert_eq!(
+            inst.raw_payload,
+            Some(vec![0x01, 0x67, 0x00, 0xEB, 0x02, 0x68, 0x82])
+        );
     }
 }

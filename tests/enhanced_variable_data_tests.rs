@@ -246,9 +246,7 @@ mod prop_tests {
                 _ => 4
             };
 
-            for _ in 0..data_len {
-                data.push(0x12);
-            }
+            data.resize(data.len() + data_len, 0x12);
 
             let result = parse_enhanced_variable_data_record(&data);
             prop_assert!(result.is_ok(), "Failed to parse valid DIF/VIFE chain: {:?}", data);

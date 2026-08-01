@@ -204,7 +204,7 @@ impl WildcardSearchManager {
 
         // Then narrow down by trying each nibble value
         let byte_pos = position / 2; // Which byte we're narrowing
-        let is_high_nibble = position % 2 == 0; // High or low nibble
+        let is_high_nibble = position.is_multiple_of(2); // High or low nibble
 
         if byte_pos < 8 {
             // Save original value

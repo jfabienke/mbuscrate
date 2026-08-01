@@ -22,20 +22,31 @@
 //!
 //! ## Usage
 //!
-//! ```rust
-//! use mbus_rs::wmbus::crypto::{WMBusCrypto, EncryptionMode, AesKey};
+//! ```rust,no_run
+//! use mbus_rs::wmbus::crypto::{WMBusCrypto, AesKey, DeviceInfo};
 //!
-//! let key = AesKey::from_bytes(&[0; 16]);
-//! let crypto = WMBusCrypto::new(key);
+//! let key = AesKey::from_bytes(&[0; 16]).unwrap();
+//! let mut crypto = WMBusCrypto::new(key);
 //!
+//! # let encrypted_frame: Vec<u8> = Vec::new();
+//! # let device_info = DeviceInfo {
+//! #     device_id: 0x12345678,
+//! #     manufacturer: 0x2C2D,
+//! #     version: 0x01,
+//! #     device_type: 0x07,
+//! #     access_number: None,
+//! # };
 //! // Decrypt wM-Bus frame
-//! let decrypted = crypto.decrypt_frame(&encrypted_frame, &device_info)?;
+//! let decrypted = crypto.decrypt_frame(&encrypted_frame, &device_info).unwrap();
 //! ```
 
+use super::crypto_hardware::{get_aes_backend, AesBackend};
+// Only referenced from the `crypto`-gated calculate_hmac_sha1 below; gating the
+// import too keeps it from reading as unused under the default feature set.
+#[cfg(feature = "crypto")]
+use super::sha_hardware::calculate_hmac_sha1 as hw_calculate_hmac_sha1;
 use crate::util::{hex, logging};
 use crate::vendors;
-use super::crypto_hardware::{AesBackend, get_aes_backend};
-use super::sha_hardware::{calculate_hmac_sha1 as hw_calculate_hmac_sha1};
 use std::sync::Arc;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -203,7 +214,7 @@ impl WMBusCrypto {
             master_key,
             error_throttle: logging::LogThrottle::new(1000, 3), // 3 errors per second
             backend,
-            add_crc_mode9: false,                               // Default: no CRC for compatibility
+            add_crc_mode9: false, // Default: no CRC for compatibility
             verify_crc_mode9: false,
             full_tag_compatibility: true, // Default: use 16-byte tags for testing
         }
@@ -258,10 +269,12 @@ impl WMBusCrypto {
             };
 
             // Try to get vendor-provided key
-            if let Ok(Some(vendor_key)) = vendors::dispatch_key_hook(reg, mfr_id, &vendor_info, encrypted_frame) {
+            if let Ok(Some(vendor_key)) =
+                vendors::dispatch_key_hook(reg, mfr_id, &vendor_info, encrypted_frame)
+            {
                 // Use vendor key instead of derived key
-                let device_key = AesKey::from_bytes(&vendor_key)
-                    .map_err(|_| CryptoError::InvalidKeyLength {
+                let device_key =
+                    AesKey::from_bytes(&vendor_key).map_err(|_| CryptoError::InvalidKeyLength {
                         expected: 16,
                         actual: vendor_key.len(),
                     })?;
@@ -464,7 +477,7 @@ impl WMBusCrypto {
         ciphertext: &[u8],
         device_info: &DeviceInfo,
     ) -> Result<Vec<u8>, CryptoError> {
-        if ciphertext.len() % 16 != 0 {
+        if !ciphertext.len().is_multiple_of(16) {
             return Err(CryptoError::InvalidDataLength {
                 block_size: 16,
                 actual: ciphertext.len(),
@@ -501,7 +514,7 @@ impl WMBusCrypto {
         key: &AesKey,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        if ciphertext.len() % 16 != 0 {
+        if !ciphertext.len().is_multiple_of(16) {
             return Err(CryptoError::InvalidDataLength {
                 block_size: 16,
                 actual: ciphertext.len(),
@@ -727,7 +740,8 @@ impl WMBusCrypto {
         block: &[u8; 16],
     ) -> Result<[u8; 16], CryptoError> {
         let mut output = [0u8; 16];
-        self.backend.encrypt_block(block, key.as_bytes(), &mut output);
+        self.backend
+            .encrypt_block(block, key.as_bytes(), &mut output);
         Ok(output)
     }
 
@@ -738,7 +752,8 @@ impl WMBusCrypto {
         block: &[u8; 16],
     ) -> Result<[u8; 16], CryptoError> {
         let mut output = [0u8; 16];
-        self.backend.decrypt_block(block, key.as_bytes(), &mut output);
+        self.backend
+            .decrypt_block(block, key.as_bytes(), &mut output);
         Ok(output)
     }
 
@@ -1125,13 +1140,13 @@ impl WMBusCrypto {
         dev_addr: u32,
         fcnt: u32,
     ) -> Result<[u8; 4], CryptoError> {
-        use cmac::{Cmac, Mac};
         use aes::Aes128;
+        use cmac::{Cmac, Mac};
 
         // Build B0 block for MIC calculation
         let mut b0 = vec![
             0x49, // Fixed value for MIC calculation
-            0x00, 0x00, 0x00, 0x00, // 4 bytes reserved
+            0x00, 0x00, 0x00, 0x00,      // 4 bytes reserved
             direction, // Direction: 0=uplink, 1=downlink
         ];
 
@@ -1148,8 +1163,8 @@ impl WMBusCrypto {
         b0.push(msg.len() as u8);
 
         // Create CMAC instance
-        let mut mac = Cmac::<Aes128>::new_from_slice(key)
-            .map_err(|_| CryptoError::InvalidKeyLength {
+        let mut mac =
+            Cmac::<Aes128>::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength {
                 expected: 16,
                 actual: key.len(),
             })?;

@@ -70,9 +70,9 @@ impl LoRaPayloadDecoder for SensativeDecoder {
                         });
                     }
                 }
-                0x02 => {
+                0x02
                     // Humidity (1 byte, 0.5% resolution)
-                    if len == 1 {
+                    if len == 1 => {
                         let humidity = data[0] as f64 * 0.5;
                         readings.push(Reading {
                             value: MBusRecordValue::Numeric(humidity),
@@ -83,7 +83,6 @@ impl LoRaPayloadDecoder for SensativeDecoder {
                             description: Some("Humidity sensor".to_string()),
                         });
                     }
-                }
                 _ => {
                     // Unknown type - skip
                 }

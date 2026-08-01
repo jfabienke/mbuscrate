@@ -406,7 +406,6 @@ async fn test_simulated_device_discovery() {
 
     // For this test, we can't easily verify the exact results without more
     // sophisticated mocking, but we can verify the operations don't crash
-    assert!(true, "Device discovery simulation completed without errors");
 }
 
 #[tokio::test]
@@ -425,10 +424,12 @@ async fn test_unexpected_irq_bit() {
         "Should detect that some interrupt is active"
     );
 
-    // Verify that the raw value includes the unexpected bit
+    // Verify that the raw value includes the unexpected bit.
+    // Derive the expectation from the enum rather than hardcoding it: per the SX126x
+    // IRQ register, TxDone is bit 0 and RxDone is bit 1, so this is 0x8002, not 0x8001.
     assert_eq!(
         unexpected_irq.raw(),
-        0x8001,
+        0x8000 | (IrqMaskBit::RxDone as u16),
         "Raw value should include unexpected bit"
     );
 

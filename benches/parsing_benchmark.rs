@@ -1,8 +1,9 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use mbus_rs::mbus::frame::{pack_frame, parse_frame, verify_frame, MBusFrame, MBusFrameType};
 use mbus_rs::payload::data::mbus_data_record_decode;
 use mbus_rs::payload::data_encoding::{decode_bcd, decode_int};
 use mbus_rs::payload::vif::{parse_vib, parse_vif};
+use std::hint::black_box;
 use std::time::Duration;
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
@@ -18,11 +19,9 @@ const SHORT_FRAME_HEX: &str = "10400150E516";
 const LONG_FRAME_HEX: &str = "6831316808017245585703B40534049E0027B60306F934150315C6004D052E00000000053D00000000055B22F32642055FC7DA0D42FA16";
 const ACK_FRAME_HEX: &str = "E5";
 
-// Performance targets (must complete within these times)
-const TARGET_FRAME_PARSE_MS: f64 = 1.0;
-const TARGET_VIF_DECODE_MS: f64 = 0.1;
-const TARGET_RECORD_PARSE_MS: f64 = 0.5;
-const TARGET_CHECKSUM_MS: f64 = 0.05;
+// NOTE: TARGET_*_MS constants were removed. They declared performance targets that
+// nothing asserted against, so they documented an aspiration rather than a guarantee.
+// Criterion reports the real numbers; use those.
 
 fn benchmark_frame_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("frame_parsing");

@@ -29,7 +29,7 @@ const WIRED_BASIC_LONG_FRAME: &str =
 
 /// Variable Data Block with Standard CI=0x72 (Mode 2 LSB)
 /// Source: EN 13757-3 p.40 (variable data structure)
-const WIRED_VARIABLE_DATA_BLOCK: &str = 
+const WIRED_VARIABLE_DATA_BLOCK: &str =
     "68 1B 1B 68 08 01 72 78 56 34 12 0A 00 04 13 78 56 34 12 84 10 13 00 00 00 00 FD 0B 01 02 03 79 16";
 
 /// Secondary Addressing: SND_UD Selection (C=0x53)

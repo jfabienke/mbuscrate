@@ -6,7 +6,7 @@ use nom::{
     bytes::complete::take,
     combinator::map,
     number::complete::{be_u32, be_u8},
-    IResult,
+    IResult, Parser,
 };
 use std::time::SystemTime;
 
@@ -49,7 +49,8 @@ pub enum MBusRecordValue {
 pub fn mbus_data_record_decode(input: &[u8]) -> IResult<&[u8], MBusDataRecord> {
     let (input, timestamp) = map(be_u32, |t| {
         SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(t.into())
-    })(input)?;
+    })
+    .parse(input)?;
     let (input, dif) = be_u8(input)?;
     let (input, vib) = parse_vib(input)?;
 
@@ -152,10 +153,7 @@ pub fn parse_enhanced_variable_data_record(input: &[u8]) -> IResult<&[u8], Enhan
 
 /// Parse DIF + DIFE chain with up to 10 extensions per EN 13757-3
 /// Parse special VIF chain including 0x7C, 0x7E, 0x7F codes
-fn parse_special_vif_chain<'a>(
-    vif_chain: &[u8],
-    remaining: &'a [u8],
-) -> SpecialVifResult<'a> {
+fn parse_special_vif_chain<'a>(vif_chain: &[u8], remaining: &'a [u8]) -> SpecialVifResult<'a> {
     if vif_chain.is_empty() {
         return Ok(("".to_string(), 1.0, "".to_string()));
     }
@@ -183,10 +181,7 @@ fn parse_special_vif_chain<'a>(
         // Manufacturer-specific VIF (0x7F/0xFF)
         0x7F | 0xFF => {
             // Extract manufacturer-specific data
-            let mfg_data: Vec<String> = vif_chain[1..]
-                .iter()
-                .map(|b| format!("{b:02X}"))
-                .collect();
+            let mfg_data: Vec<String> = vif_chain[1..].iter().map(|b| format!("{b:02X}")).collect();
             let unit = format!("MFG[{}]", mfg_data.join(" "));
             Ok((unit, 1.0, "Manufacturer".to_string()))
         }
@@ -536,10 +531,7 @@ mod tests {
 
         if let MBusRecordValue::Numeric(value) = record.value {
             println!("Multi-tariff actual value: {value}, Expected: 4660");
-            assert!(
-                (value - 4660.0).abs() < 1e-6,
-                "Expected 4660, got {value}"
-            );
+            assert!((value - 4660.0).abs() < 1e-6, "Expected 4660, got {value}");
         } else {
             panic!("Expected numeric value");
         }

@@ -129,10 +129,7 @@ impl MBusDeviceManager {
 
         // Scan for available wM-Bus devices
         for (_, handle) in self.wmbus_handles.iter_mut() {
-            let wmbus_devices = handle
-                .scan_devices()
-                .await
-                .map_err(MBusError::from)?;
+            let wmbus_devices = handle.scan_devices().await.map_err(MBusError::from)?;
             // Convert DeviceInfo to String addresses
             addresses.extend(
                 wmbus_devices
@@ -347,9 +344,7 @@ impl MBusDeviceManager {
         secondary_addr: &SecondaryAddress,
     ) -> Result<Vec<crate::payload::record::MBusRecord>, MBusError> {
         let _handle = self.mbus_handles.get_mut(port_name).ok_or_else(|| {
-            MBusError::DeviceDiscoveryError(format!(
-                "M-Bus handle not found for port: {port_name}"
-            ))
+            MBusError::DeviceDiscoveryError(format!("M-Bus handle not found for port: {port_name}"))
         })?;
 
         // Build secondary selection frame

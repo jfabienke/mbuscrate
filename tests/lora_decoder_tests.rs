@@ -3,11 +3,11 @@
 #[cfg(test)]
 mod tests {
     use mbus_rs::payload::record::MBusRecordValue;
-    use mbus_rs::wmbus::radio::lora::decoders::*;
     use mbus_rs::wmbus::radio::lora::decoder::{
         DecentlabChannel, DecentlabConfig, DecoderType, DraginoModel, GenericCounterConfig,
-        LoRaDeviceManager, LoRaPayloadDecoder, LoRaDecodeError,
+        LoRaDecodeError, LoRaDeviceManager, LoRaPayloadDecoder,
     };
+    use mbus_rs::wmbus::radio::lora::decoders::*;
 
     #[test]
     #[ignore = "LoRa decoder implementation changed"]

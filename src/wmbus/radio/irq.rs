@@ -21,21 +21,25 @@
 //!
 //! ## Example
 //!
-//! ```rust,no_run
-//! use crate::wmbus::radio::irq::{IrqMaskBit, IrqStatus};
+//! ```rust
+//! use mbus_rs::wmbus::radio::irq::{IrqMaskBit, IrqStatus};
+//! # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+//! # use mbus_rs::wmbus::radio::hal::MockHal;
 //!
+//! # fn main() -> Result<(), DriverError> {
+//! # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
 //! // Configure interrupt routing for RX/TX operations
 //! let irq_mask = IrqMaskBit::RxDone as u16 | IrqMaskBit::TxDone as u16;
 //! driver.set_dio_irq_params(irq_mask, IrqMaskBit::RxDone as u16, 0, 0)?;
 //!
-//! // Process interrupts in main loop
-//! if gpio.read_pin(DIO1_PIN) {
-//!     let status = driver.get_irq_status()?;
-//!     if status.rx_done() {
-//!         println!("Packet received!");
-//!     }
-//!     driver.clear_irq_status(0xFFFF)?; // Clear all interrupts
+//! // Process interrupts in the main loop, typically gated on the DIO1 line
+//! let status = driver.get_irq_status()?;
+//! if status.rx_done() {
+//!     println!("Packet received!");
 //! }
+//! driver.clear_irq_status(0xFFFF)?; // Clear all interrupts
+//! # Ok(())
+//! # }
 //! ```
 
 /// SX126x interrupt bit definitions
@@ -103,7 +107,7 @@ impl IrqMask {
     ///
     /// # Examples
     /// ```rust
-    /// use crate::wmbus::radio::irq::IrqMask;
+    /// use mbus_rs::wmbus::radio::irq::IrqMask;
     ///
     /// let mask = IrqMask::none();
     /// assert_eq!(u16::from(mask), 0x0000);
@@ -118,7 +122,7 @@ impl IrqMask {
     ///
     /// # Examples
     /// ```rust
-    /// use crate::wmbus::radio::irq::IrqMask;
+    /// use mbus_rs::wmbus::radio::irq::IrqMask;
     ///
     /// let mask = IrqMask::all();
     /// assert_eq!(u16::from(mask), 0xFFFF);
@@ -136,7 +140,7 @@ impl IrqMask {
     ///
     /// # Examples
     /// ```rust
-    /// use crate::wmbus::radio::irq::{IrqMask, IrqMaskBit};
+    /// use mbus_rs::wmbus::radio::irq::{IrqMask, IrqMaskBit};
     ///
     /// let mask = IrqMask::none()
     ///     .combine(IrqMaskBit::RxDone)
@@ -174,7 +178,11 @@ impl Default for IrqMask {
 ///
 /// # Usage
 ///
-/// ```rust,no_run
+/// ```rust
+/// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+/// # use mbus_rs::wmbus::radio::hal::MockHal;
+/// # fn main() -> Result<(), DriverError> {
+/// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
 /// // Read interrupt status from radio
 /// let status = driver.get_irq_status()?;
 ///
@@ -188,14 +196,14 @@ impl Default for IrqMask {
 ///
 /// // Clear all interrupts
 /// driver.clear_irq_status(0xFFFF)?;
+/// # Ok(())
+/// # }
 /// ```
-#[derive(Copy, Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
 pub struct IrqStatus {
     /// Raw 16-bit interrupt status register value
     inner: u16,
 }
-
 
 impl From<u16> for IrqStatus {
     /// Create IrqStatus from raw 16-bit register value

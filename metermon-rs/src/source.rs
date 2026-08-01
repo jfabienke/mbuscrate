@@ -1,0 +1,113 @@
+//! Frame sources: where raw wM-Bus frames come from.
+//!
+//! The decode core is identical regardless of source. That is the whole point of
+//! the capture-replay A/B: `FileReplaySource` feeds the *same bytes* a real radio
+//! saw through the same decoder, deterministically, on any host — while
+//! `Rfm69Source` (Pi-only, behind the `radio` feature) is the live path.
+
+use anyhow::Result;
+
+/// A source of raw wM-Bus frames (each item is one frame: L-field..CRC inclusive).
+pub trait FrameSource {
+    /// Return the next frame, or `Ok(None)` when the source is exhausted.
+    fn next_frame(&mut self) -> Result<Option<Vec<u8>>>;
+}
+
+/// Replays frames from a capture file: one hex-encoded frame per line
+/// (`#` comments and blank lines ignored). This is the A/B input.
+pub struct FileReplaySource {
+    frames: std::vec::IntoIter<Vec<u8>>,
+}
+
+impl FileReplaySource {
+    pub fn from_path(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        Self::from_str(&text)
+    }
+
+    pub fn from_str(text: &str) -> Result<Self> {
+        let mut frames = Vec::new();
+        for (i, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Tolerate spaces within a hex line (e.g. "68 04 04 68 ...").
+            let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            let bytes = hex::decode(&compact)
+                .map_err(|e| anyhow::anyhow!("line {}: invalid hex: {e}", i + 1))?;
+            frames.push(bytes);
+        }
+        Ok(Self {
+            frames: frames.into_iter(),
+        })
+    }
+}
+
+impl FrameSource for FileReplaySource {
+    fn next_frame(&mut self) -> Result<Option<Vec<u8>>> {
+        Ok(self.frames.next())
+    }
+}
+
+/// Live RFM69 radio source (Raspberry Pi only).
+///
+/// Reaches the radio through the `RadioDriver` trait rather than `WMBusHandle`,
+/// because the handle is hardcoded to the SX126x driver (mbus-rs Phase 2.2 gap).
+/// This is the one place the client depends on that unfinished wiring.
+#[cfg(feature = "radio")]
+pub struct Rfm69Source {
+    driver: mbus_rs::wmbus::radio::rfm69::Rfm69Driver,
+}
+
+#[cfg(feature = "radio")]
+impl Rfm69Source {
+    /// Open and initialize the RFM69 on `spidev` (radio not yet receiving).
+    pub async fn open(spidev: &str) -> Result<Self> {
+        use mbus_rs::wmbus::radio::rfm69::{Rfm69Config, Rfm69Driver};
+        let cfg = Rfm69Config {
+            spidev: Some(spidev.to_string()),
+            ..Default::default()
+        };
+        let mut driver = Rfm69Driver::new(cfg).await?;
+        driver.initialize().await?;
+        Ok(Self { driver })
+    }
+
+    /// Enter continuous receive mode. Call once before polling.
+    pub async fn start(&mut self) -> Result<()> {
+        use mbus_rs::wmbus::radio::radio_driver::RadioDriver;
+        self.driver.start_receive().await?;
+        Ok(())
+    }
+
+    /// Non-blocking poll for one received frame `(bytes, rssi_dbm)`, if available.
+    pub async fn poll(&mut self) -> Result<Option<(Vec<u8>, i16)>> {
+        use mbus_rs::wmbus::radio::radio_driver::RadioDriver;
+        Ok(self
+            .driver
+            .get_received_packet()
+            .await?
+            .map(|p| (p.data, p.rssi_dbm)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replays_hex_lines_ignoring_comments_and_spaces() {
+        let text = "# a capture\n68 04 04 68\n\n1040015016\n";
+        let mut src = FileReplaySource::from_str(text).unwrap();
+        assert_eq!(
+            src.next_frame().unwrap().unwrap(),
+            vec![0x68, 0x04, 0x04, 0x68]
+        );
+        assert_eq!(
+            src.next_frame().unwrap().unwrap(),
+            vec![0x10, 0x40, 0x01, 0x50, 0x16]
+        );
+        assert!(src.next_frame().unwrap().is_none());
+    }
+}

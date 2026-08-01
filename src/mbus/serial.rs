@@ -614,9 +614,7 @@ impl MBusDeviceHandle {
             let response_frame = timeout(communication_timeout, self.recv_frame())
                 .await
                 .map_err(|_| MBusError::Other("Response timeout".to_string()))?
-                .map_err(|e| {
-                    MBusError::FrameParseError(format!("Failed to receive frame: {e}"))
-                })?;
+                .map_err(|e| MBusError::FrameParseError(format!("Failed to receive frame: {e}")))?;
 
             // Step 3: Validate and process received frame
             let (payload_data, more_frames) = state_machine.receive_data(&response_frame).await?;

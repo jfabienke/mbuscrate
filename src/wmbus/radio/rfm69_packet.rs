@@ -192,22 +192,14 @@ pub enum PacketEvent {
     FifoOverrun,
 }
 
-/// Calculate wM-Bus CRC using the standard polynomial
+/// Calculate the wM-Bus CRC-16/EN-13757 (canonical; see [`crate::wmbus::crc`]).
+///
+/// This path previously returned the *raw* CRC with no final xor, so it never
+/// matched a real (complemented) on-wire CRC. It already reads the stored CRC
+/// big-endian in [`verify_wmbus_crc`], which is the correct on-wire order — so with
+/// the canonical algorithm this RFM69 packet path is now correct for real frames.
 pub fn calculate_wmbus_crc(data: &[u8]) -> u16 {
-    let mut crc = 0u16;
-
-    for &byte in data {
-        crc ^= (byte as u16) << 8;
-        for _ in 0..8 {
-            if crc & 0x8000 != 0 {
-                crc = (crc << 1) ^ CRC_POLY;
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
-
-    crc
+    crate::wmbus::crc::calculate_wmbus_crc(data)
 }
 
 /// Verify wM-Bus CRC of a complete frame
@@ -273,11 +265,28 @@ pub fn sync_norm(sync: u8) -> u8 {
     }
 }
 
+/// Total on-FIFO frame length (including the sync/type byte) from the L-field.
+///
+/// Type A is block-structured: block 0 is 10 bytes (+CRC), then 16-byte data blocks
+/// each with their own CRC. So the total is `2 + L + num_crcs*2` (epulse `PacketSize`),
+/// NOT the naive `L+3` which undercounts multi-block CRCs. Type B carries a single CRC
+/// over block 0, so `L + 2`.
+fn wmbus_packet_len(l: u8, type_b: bool) -> i32 {
+    let l = l as i32;
+    if type_b {
+        l + 2
+    } else {
+        // BLOCK0_LEN=10, BLOCKA_LEN=16, CRC_LEN=2
+        let num_crcs = 1 + ((l - 10).max(0) + 15) / 16;
+        2 + l + num_crcs * 2
+    }
+}
+
 /// Determine packet size from header bytes with robust validation
 ///
 /// Handles all 4 possible header arrangements:
-/// - Case A/B: \[SYNC\]\[LEN\] → L + (A:3, B:2)
-/// - Case C/D: \[LEN\]\[SYNC\] → L + (A:3, B:2)
+/// - Case A/B: \[SYNC\]\[LEN\]
+/// - Case C/D: \[LEN\]\[SYNC\]
 pub fn packet_size(data: &[u8]) -> i32 {
     if data.len() < 2 {
         return -1; // Need more data
@@ -288,16 +297,14 @@ pub fn packet_size(data: &[u8]) -> i32 {
 
     // Case A/B: [SYNC][LEN]
     if sync_norm(b0) == 0xCD || sync_norm(b0) == 0x3D {
-        let l = b1; // Already normalized if fix #1 is active
         let type_b = sync_norm(b0) == 0x3D;
-        return (l as i32) + if type_b { 2 } else { 3 }; // A: L+3, B: L+2
+        return wmbus_packet_len(b1, type_b);
     }
 
     // Case C/D: [LEN][SYNC]
     if sync_norm(b1) == 0xCD || sync_norm(b1) == 0x3D {
-        let l = b0; // Already normalized if fix #1 is active
         let type_b = sync_norm(b1) == 0x3D;
-        return (l as i32) + if type_b { 2 } else { 3 };
+        return wmbus_packet_len(b0, type_b);
     }
 
     // Not a WM-Bus header → drop
@@ -481,9 +488,9 @@ mod tests {
 
     #[test]
     fn test_packet_size_case_a() {
-        // Case A: [SYNC_A][LEN] → L + 3
-        let data = [SYNC_A, 10]; // Sync A, length 10
-        assert_eq!(packet_size(&data), 13); // 10 + 3
+        // Type A: 2 + L + num_crcs*2. L=10 → block0(10)+1 CRC → 2+10+2 = 14.
+        let data = [SYNC_A, 10];
+        assert_eq!(packet_size(&data), 14);
     }
 
     #[test]
@@ -495,9 +502,9 @@ mod tests {
 
     #[test]
     fn test_packet_size_case_c() {
-        // Case C: [LEN][SYNC_A] → L + 3
-        let data = [8, SYNC_A]; // Length 8, Sync A
-        assert_eq!(packet_size(&data), 11); // 8 + 3
+        // Type A: 2 + L + num_crcs*2. L=8 → block0+1 CRC → 2+8+2 = 12.
+        let data = [8, SYNC_A];
+        assert_eq!(packet_size(&data), 12);
     }
 
     #[test]
@@ -554,18 +561,18 @@ mod tests {
 
         assert_eq!(buffer.len(), 2);
 
-        // Determine size
+        // Determine size: Type A L=10 → 2 + 10 + 1 CRC*2 = 14.
         let size = buffer.determine_packet_size();
-        assert_eq!(size, Some(13)); // Type A: 10 + 3
+        assert_eq!(size, Some(14));
 
-        // Add more bytes to complete packet
-        for _ in 0..11 {
+        // Add more bytes to complete packet (14 total).
+        for _ in 0..12 {
             buffer.push_byte(0x00);
         }
 
         assert!(buffer.is_complete());
         let packet = buffer.extract_packet().unwrap();
-        assert_eq!(packet.len(), 13);
+        assert_eq!(packet.len(), 14);
     }
 
     #[test]

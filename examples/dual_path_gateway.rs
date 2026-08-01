@@ -8,14 +8,13 @@
 //! Example simulates receiving data from various sources and routing
 //! it to appropriate channels based on validation.
 
-use mbus_rs::instrumentation::{
-    MeteringReport, UnifiedInstrumentation, Reading, ReadingQuality,
-    converters::{from_mbus_metering, from_lora_metering, from_mbus_instrumentation, from_lora_instrumentation},
+use mbus_rs::instrumentation::converters::{
+    from_lora_instrumentation, from_lora_metering, from_mbus_instrumentation, from_mbus_metering,
 };
 use mbus_rs::mbus::frame::{MBusFrame, MBusFrameType};
 use mbus_rs::payload::record::{MBusRecord, MBusRecordValue};
 use mbus_rs::wmbus::radio::lora::decoder::{
-    MeteringData, DeviceStatus, BatteryStatus, Reading as LoRaReading,
+    BatteryStatus, DeviceStatus, MeteringData, Reading as LoRaReading,
 };
 use std::time::SystemTime;
 
@@ -152,8 +151,10 @@ fn demo_mbus_dual_path() {
     if let Some(bad_readings) = &inst.bad_readings {
         println!("  Bad Readings: {}", bad_readings.len());
         for reading in bad_readings {
-            println!("    ✗ {}: {} {} (Invalid/Out of bounds)",
-                reading.name, reading.value, reading.unit);
+            println!(
+                "    ✗ {}: {} {} (Invalid/Out of bounds)",
+                reading.name, reading.value, reading.unit
+            );
         }
     } else {
         println!("  Bad Readings: None (would show Good quality if no errors)");
@@ -164,7 +165,10 @@ fn demo_mbus_dual_path() {
         println!("\n  Instrumentation JSON (showing bad_readings):");
         // Find and show bad_readings section
         for line in json.lines() {
-            if line.contains("bad_readings") || line.contains("Temperature Sensor 2") || line.contains("Energy") {
+            if line.contains("bad_readings")
+                || line.contains("Temperature Sensor 2")
+                || line.contains("Energy")
+            {
                 println!("    {}", line);
             }
         }
@@ -277,8 +281,10 @@ fn demo_lora_dual_path() {
     if let Some(bad_readings) = &inst.bad_readings {
         println!("  Bad Readings: {}", bad_readings.len());
         for reading in bad_readings {
-            println!("    ✗ {}: {} {} (Invalid/Out of bounds)",
-                reading.name, reading.value, reading.unit);
+            println!(
+                "    ✗ {}: {} {} (Invalid/Out of bounds)",
+                reading.name, reading.value, reading.unit
+            );
         }
     } else {
         println!("  Bad Readings: None - all sensors operating normally");

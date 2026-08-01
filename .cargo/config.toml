@@ -2,16 +2,21 @@
 
 [target.aarch64-unknown-linux-gnu]
 # Raspberry Pi 4 (64-bit) / Raspberry Pi 5
+# NOTE: this is a *-gnu target but the linker below is a musl toolchain. Verify
+# against your installed cross toolchain; aarch64-linux-gnu-gcc is the usual match.
 linker = "aarch64-linux-musl-gcc"
-# Enable crypto extensions for Pi 5 (Cortex-A76)
-# For Pi 4 (Cortex-A72), remove +aes,+sha2,+crypto
+# Enable crypto extensions for Pi 5 (Cortex-A76).
+# For Pi 4 (Cortex-A72), drop target-cpu to cortex-a72; +aes/+sha2 are still present.
+# The flag is `target-feature` (singular) — `target-features` is not a rustc option
+# and was previously being rejected, so these extensions never reached the compiler.
+# This matters for RustCrypto's `aes`/`sha2`, which select their ARMv8 backends from it.
 rustflags = [
     "-C", "target-cpu=cortex-a76",
-    "-C", "target-features=+aes,+sha2,+neon,+crc,+crypto",
+    "-C", "target-feature=+aes,+sha2,+neon,+crc",
     "-C", "opt-level=3",
 ]
 
-[target.armv7-unknown-linux-gnueabihf]  
+[target.armv7-unknown-linux-gnueabihf]
 # Raspberry Pi 4 (32-bit) / Raspberry Pi 3/2/Zero
 linker = "arm-linux-gnueabihf-gcc"
 
@@ -19,12 +24,14 @@ linker = "arm-linux-gnueabihf-gcc"
 # Raspberry Pi 1/Zero (original ARM11)
 linker = "arm-linux-gnueabihf-gcc"
 
-# Build optimizations for embedded targets
+# Build optimizations for embedded targets.
+# NOTE: `panic = "abort"` is deliberately absent. mbus-rs is a library; aborting on
+# panic breaks unwinding for downstream consumers and makes `#[should_panic]` tests
+# unrunnable. Set it in the *binary* crate that links this one if you want it.
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
 strip = true
 debug = false
 overflow-checks = false
@@ -35,11 +42,10 @@ rpath = false
 inherits = "release"
 debug = true
 
-# Raspberry Pi specific features
-[features]
-default = []
-raspberry-pi = ["rppal"]
-raspberry-pi-4 = ["raspberry-pi"]
-raspberry-pi-5 = ["raspberry-pi"] 
-gpio-interrupt = ["raspberry-pi"]
-hardware-spi = ["raspberry-pi"]
+# Cargo aliases for development.
+# These belong here, not in Cargo.toml — an [alias] table in a manifest is ignored.
+[alias]
+bench-crypto = "bench --bench crypto_benchmark --features crypto"
+bench-all = "bench --features crypto"
+pio-demo = "run --example pio_irq_demo --features pio-irq"
+pio-test = "test --test pio_irq_tests --features pio-irq"

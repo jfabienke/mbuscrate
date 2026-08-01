@@ -54,16 +54,15 @@ pub use payload::{mbus_data_record_decode, normalize_vib, MBusRecord, MBusRecord
 
 // Vendor extension system
 pub use vendors::{
-    VendorExtension, VendorRegistry, VendorDataRecord, VendorVariable, VendorDeviceInfo,
-    manufacturer_id_to_string, parse_manufacturer_id,
+    manufacturer_id_to_string, parse_manufacturer_id, VendorDataRecord, VendorDeviceInfo,
+    VendorExtension, VendorRegistry, VendorVariable,
 };
 
 // Manufacturer database
 pub use vendors::manufacturer::{
-    ManufacturerInfo, get_manufacturer_info, get_manufacturer_name,
-    has_quirks, all_manufacturers, is_valid_id,
-    manufacturer_to_id, id_to_manufacturer,
-    is_soft_address, set_soft_address,
+    all_manufacturers, get_manufacturer_info, get_manufacturer_name, has_quirks,
+    id_to_manufacturer, is_soft_address, is_valid_id, manufacturer_to_id, set_soft_address,
+    ManufacturerInfo,
 };
 
 // Vendor-specific extensions
@@ -71,13 +70,13 @@ pub use vendors::qundis_hca::QundisHcaExtension;
 
 // Unified instrumentation model
 pub use instrumentation::{
-    UnifiedInstrumentation, DeviceType, ProtocolType, RadioMetrics, BatteryStatus,
-    DeviceStatus, FrameStatistics, Reading, ReadingQuality, InstrumentationSource,
+    BatteryStatus, DeviceStatus, DeviceType, FrameStatistics, InstrumentationSource, ProtocolType,
+    RadioMetrics, Reading, ReadingQuality, UnifiedInstrumentation,
 };
 
 // Instrumentation converters
 pub use instrumentation::converters::{
-    from_mbus_frame, from_wmbus_frame, /* from_lora_metering_data, */ from_vendor_device_info,
+    from_mbus_frame, /* from_lora_metering_data, */ from_vendor_device_info, from_wmbus_frame,
 };
 
 /// Connect to M-Bus device via serial port.

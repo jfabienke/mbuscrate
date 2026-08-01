@@ -1,8 +1,8 @@
 use crate::wmbus::radio::modulation::LoRaPacketStatus;
-use thiserror::Error;
 use ciborium::de::from_reader;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::io::Cursor;
+use thiserror::Error;
 
 /// Errors for LoRa packet parsing and handling.
 #[derive(Error, Debug)]
@@ -32,15 +32,20 @@ pub struct LoRaPayload {
 }
 
 /// Parse LoRa packet (basic non-LoRaWAN)
-pub fn decode_lora_packet(payload: &[u8], _status: LoRaPacketStatus) -> Result<LoRaPayload, LoRaError> {
+pub fn decode_lora_packet(
+    payload: &[u8],
+    _status: LoRaPacketStatus,
+) -> Result<LoRaPayload, LoRaError> {
     if payload.is_empty() {
         return Err(LoRaError::Parse("Empty payload".to_string()));
     }
 
     let mhdr = payload[0];
     match mhdr {
-        0x00 => { // JoinReq (OTAA)
-            if payload.len() < 18 { // Min: MHDR + DevEUI(8) + AppEUI(8) + DevNonce(2)
+        0x00 => {
+            // JoinReq (OTAA)
+            if payload.len() < 18 {
+                // Min: MHDR + DevEUI(8) + AppEUI(8) + DevNonce(2)
                 return Err(LoRaError::Parse("Too short for JoinReq".to_string()));
             }
             let _dev_eui = &payload[1..9]; // 8B
@@ -59,8 +64,10 @@ pub fn decode_lora_packet(payload: &[u8], _status: LoRaPacketStatus) -> Result<L
                 frm_payload, // Includes schedule
             })
         }
-        0x20 | 0x80 => { // Unconf/Conf DataUp (ABP)
-            if payload.len() < 13 { // Min: MHDR + DevAddr(4) + FCtrl(1) + FPort(1) + MIC(4)
+        0x20 | 0x80 => {
+            // Unconf/Conf DataUp (ABP)
+            if payload.len() < 13 {
+                // Min: MHDR + DevAddr(4) + FCtrl(1) + FPort(1) + MIC(4)
                 return Err(LoRaError::Parse("Too short for DataUp".to_string()));
             }
             let dev_addr = payload[1..5].try_into().unwrap(); // 4B
@@ -101,7 +108,7 @@ pub fn parse_otaa_join(payload: &[u8]) -> Result<JoinRequest, LoRaError> {
     let dev_nonce = u16::from_le_bytes(
         decoded.frm_payload[16..18]
             .try_into()
-            .map_err(|_| LoRaError::Parse("Invalid dev_nonce bytes".to_string()))?
+            .map_err(|_| LoRaError::Parse("Invalid dev_nonce bytes".to_string()))?,
     );
     let schedule_start = 18;
     let schedule_info: ScheduleInfo = if decoded.frm_payload.len() > schedule_start {
@@ -150,7 +157,7 @@ pub fn build_trigger_frame(device_addr: u32, payload: &[u8]) -> Result<Vec<u8>, 
     frame.push(0x00); // FCtrl: Unconfirmed, no ACK
     frame.push(0xFF); // FPort: Custom triggers
     frame.extend_from_slice(payload); // CBOR command (e.g., { "cmd": "tx_now" })
-    // MIC omitted for simplicity (add if needed)
+                                      // MIC omitted for simplicity (add if needed)
 
     Ok(frame)
 }
