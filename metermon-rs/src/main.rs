@@ -16,9 +16,11 @@
 
 mod config;
 mod decode;
+mod devices;
 mod keystore;
 mod publish;
 mod source;
+mod sweep;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -78,14 +80,77 @@ enum Cmd {
         #[arg(long, default_value = "metermon.conf")]
         config: String,
     },
+    /// Capture the raw 868.95 MHz bitstream with HW sync DISABLED (mode-agnostic).
+    /// Streams demodulated bytes to a binary file for offline C/T-mode analysis.
+    /// Run with the monitor stopped. (requires `radio` feature)
+    ProbeRaw {
+        /// Output binary file (raw demodulated byte stream).
+        out: String,
+        #[arg(long, default_value = "metermon.conf")]
+        config: String,
+        /// Capture duration in seconds.
+        #[arg(long, default_value_t = 180)]
+        seconds: u64,
+        /// RX centre frequency in Hz (868950000 for C/T, 868300000 for S).
+        #[arg(long, default_value_t = 868_950_000)]
+        freq_hz: u64,
+        /// Chip/bit rate in bps (100000 for C/T, 32768 for S).
+        #[arg(long, default_value_t = 100_000)]
+        bitrate_bps: u32,
+    },
     /// Run continuously, decoding frames and accumulating per-meter statistics
     /// (count, CRC pass/fail, RSSI). Prints a stats table periodically. (`radio` feature.)
+    ///
+    /// AES keys are pulled live from the MQTT control topic (as metermon does); an
+    /// optional `--keys` file seeds the store for offline/immediate decryption.
     Monitor {
         #[arg(long, default_value = "metermon.conf")]
         config: String,
         /// Seconds between stats reports.
         #[arg(long, default_value_t = 60)]
         report: u64,
+        /// AES key file to seed the keystore (JSON map or op:key lines), in addition
+        /// to keys pulled live from the control topic.
+        #[arg(long)]
+        keys: Option<String>,
+        /// redb device-manager store (device info + event history, persists across
+        /// restarts). Inspect with `metermon-rs devices --db <path>` (monitor stopped).
+        #[arg(long, default_value = "metermon-devices.redb")]
+        db: String,
+        /// Hours between airwave discovery sweeps (C/T/S mode scan); 0 disables.
+        /// Each sweep pauses C reception for ~2 min and records a `discovery` event.
+        #[arg(long, default_value_t = 12)]
+        sweep_hours: u64,
+    },
+    /// Show the device manager's stored device table and recent events (no radio).
+    Devices {
+        /// redb device-manager store written by `monitor` (open it with the monitor stopped).
+        #[arg(long, default_value = "metermon-devices.redb")]
+        db: String,
+        /// Number of recent events to show.
+        #[arg(long, default_value_t = 20)]
+        events: usize,
+    },
+    /// Run one airwave discovery sweep now (C/T/S mode scan) and record it to the store.
+    /// Run with the monitor stopped. (requires `radio` feature)
+    Sweep {
+        #[arg(long, default_value = "metermon.conf")]
+        config: String,
+        #[arg(long, default_value = "metermon-devices.redb")]
+        db: String,
+        /// Capture seconds per band.
+        #[arg(long, default_value_t = 60)]
+        seconds: u64,
+    },
+    /// Import a JSON device dump into the redb store (merges counts, appends events).
+    /// Run with the monitor stopped. Use to migrate the old SQLite store.
+    Import {
+        /// redb store to merge into.
+        #[arg(long, default_value = "metermon-devices.redb")]
+        db: String,
+        /// JSON dump: {"devices":[...],"events":[...]} (e.g. exported from the old SQLite DB).
+        #[arg(long)]
+        from: String,
     },
 }
 
@@ -106,8 +171,70 @@ fn main() -> Result<()> {
             count,
         } => run_capture(&config, &out, seconds, count),
         Cmd::DumpRegs { config } => run_dumpregs(&config),
-        Cmd::Monitor { config, report } => run_monitor(&config, report),
+        Cmd::ProbeRaw {
+            out,
+            config,
+            seconds,
+            freq_hz,
+            bitrate_bps,
+        } => run_probe_raw(&config, &out, seconds, freq_hz, bitrate_bps),
+        Cmd::Monitor {
+            config,
+            report,
+            keys,
+            db,
+            sweep_hours,
+        } => run_monitor(&config, report, keys.as_deref(), &db, sweep_hours),
+        Cmd::Devices { db, events } => run_devices(&db, events),
+        Cmd::Sweep {
+            config,
+            db,
+            seconds,
+        } => run_sweep(&config, &db, seconds),
+        Cmd::Import { db, from } => run_import(&db, &from),
     }
+}
+
+/// One-shot airwave discovery sweep (monitor must be stopped). Records to redb.
+#[cfg(feature = "radio")]
+fn run_sweep(config_path: &str, db: &str, seconds: u64) -> Result<()> {
+    let cfg = Config::load(config_path)?;
+    let spidev = cfg
+        .devices
+        .values()
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
+        .and_then(|d| d.spidev.clone())
+        .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
+    log::info!("airwave sweep: scanning C/T (868.95) then S (868.30), {seconds}s each");
+    let (meters, t, s) = sweep::sweep_once(&spidev, seconds)?;
+    let summary = format!("C:{meters:?} T-bursts:{t} S-bursts:{s}");
+    let dm = devices::DeviceManager::open(db, 20, 600)?;
+    dm.record_discovery(&summary)?;
+    println!("airwave sweep: C meters {meters:?}, T-bursts {t}, S-bursts {s}");
+    Ok(())
+}
+
+#[cfg(not(feature = "radio"))]
+fn run_sweep(_config_path: &str, _db: &str, _seconds: u64) -> Result<()> {
+    bail_no_radio("sweep")
+}
+
+/// Show the device manager store (device table + recent events). Host-independent.
+fn run_devices(db: &str, events: usize) -> Result<()> {
+    let dm = devices::DeviceManager::open_readonly(db)?;
+    dm.print_report(events)
+}
+
+/// Merge a JSON device dump into the redb store (monitor must be stopped).
+fn run_import(db: &str, from: &str) -> Result<()> {
+    let text = std::fs::read_to_string(from)
+        .map_err(|e| anyhow::anyhow!("cannot read dump {from}: {e}"))?;
+    let dump: devices::ImportDump = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("invalid dump JSON in {from}: {e}"))?;
+    let dm = devices::DeviceManager::open(db, 20, 600)?;
+    let (devices_n, events_n) = dm.import_dump(&dump)?;
+    println!("imported {devices_n} device row(s) and {events_n} event(s) into {db}");
+    Ok(())
 }
 
 /// Per-meter running statistics for the monitor.
@@ -118,11 +245,21 @@ struct MeterStat {
     fail: u64,
     last_rssi: i16,
     sum_rssi: i64,
+    /// Whether an AES key is currently held for this meter (from config seed,
+    /// `--keys` file, or pulled live off the control topic).
+    has_key: bool,
 }
 
 #[cfg(feature = "radio")]
-fn run_monitor(config_path: &str, report_secs: u64) -> Result<()> {
+fn run_monitor(
+    config_path: &str,
+    report_secs: u64,
+    keys_path: Option<&str>,
+    db_path: &str,
+    sweep_hours: u64,
+) -> Result<()> {
     use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     let cfg = Config::load(config_path)?;
@@ -133,11 +270,60 @@ fn run_monitor(config_path: &str, report_secs: u64) -> Result<()> {
         .and_then(|d| d.spidev.clone())
         .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
 
-    let mut keys = KeyStore::new();
-    keys.seed_from_config(&cfg);
+    // Shared keystore: seeded from config + optional `--keys` file, then fed live
+    // from the MQTT control topic exactly as the C++ metermon is.
+    let keys = Arc::new(Mutex::new(KeyStore::new()));
+    {
+        let mut k = keys.lock().unwrap();
+        k.seed_from_config(&cfg);
+        if let Some(path) = keys_path {
+            match KeyStore::load_file(path) {
+                Ok(loaded) => {
+                    for (id, hk) in loaded.iter() {
+                        k.install(id, hk.to_string());
+                    }
+                }
+                Err(e) => log::warn!("could not load keys from {path}: {e}"),
+            }
+        }
+        log::info!("keystore seeded with {} key(s)", k.len());
+    }
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
+        // Device manager (redb): persists device info + a significant-event log
+        // (sample 1-in-20, flag a device silent after 10 min without an identified frame).
+        let dm = devices::DeviceManager::open(db_path, 20, 600)?;
+        log::info!("device store: {db_path}");
+
+        // AES key pull: subscribe to meter/control/<gwid> and install op:key messages
+        // live, mirroring metermon. Non-fatal if the broker is unreachable — the
+        // radio monitor keeps running on whatever keys were seeded.
+        let _publisher = match publish::Publisher::connect(&cfg.mqtt, None) {
+            Ok(mut p) => match &cfg.mqtt.control_topic {
+                Some(control) => {
+                    let keys_cb = keys.clone();
+                    match p.subscribe_control(control, move |msg| {
+                        if let Some(id) = keys_cb.lock().unwrap().handle_control(msg) {
+                            log::info!("installed AES key for meter {id} (from control topic)");
+                        }
+                    }) {
+                        Ok(()) => log::info!("pulling AES keys from control topic {control}"),
+                        Err(e) => log::warn!("control-topic subscribe failed: {e}"),
+                    }
+                    Some(p)
+                }
+                None => {
+                    log::warn!("no control-topic in config; live AES key pull disabled");
+                    Some(p)
+                }
+            },
+            Err(e) => {
+                log::warn!("MQTT connect failed ({e}); live key pull off, using seeded keys");
+                None
+            }
+        };
+
         let mut radio = source::Rfm69Source::open(&spidev).await?;
         radio.start().await?;
         log::info!("metermon-rs monitor on {spidev} — reporting every {report_secs}s");
@@ -146,10 +332,20 @@ fn run_monitor(config_path: &str, report_secs: u64) -> Result<()> {
         let start = tokio::time::Instant::now();
         let mut last_report = Instant::now();
         let interval = Duration::from_secs(report_secs);
+        let sweep_interval = Duration::from_secs(sweep_hours.saturating_mul(3600));
+        let mut last_sweep = Instant::now();
+        if sweep_hours > 0 {
+            log::info!("airwave discovery sweep enabled: every {sweep_hours}h");
+        }
 
         loop {
             if let Some((frame, rssi)) = radio.poll().await? {
-                let v = decode::decode_frame(&frame, &cfg, &keys);
+                let (v, has_key) = {
+                    let k = keys.lock().unwrap();
+                    let v = decode::decode_frame(&frame, &cfg, &k);
+                    let meter = v["meterid"].as_u64().unwrap_or(0) as u32;
+                    (v, k.get(meter).is_some())
+                };
                 let meter = v["meterid"].as_u64().unwrap_or(0) as u32;
                 let crc_ok = v["crc_ok"].as_bool().unwrap_or(false);
                 let ft = v["frame_type"].as_str().unwrap_or("?").to_string();
@@ -158,31 +354,88 @@ fn run_monitor(config_path: &str, report_secs: u64) -> Result<()> {
                 e.total += 1;
                 e.last_rssi = rssi;
                 e.sum_rssi += rssi as i64;
+                e.has_key = has_key;
                 if crc_ok {
                     e.ok += 1;
                 } else {
                     e.fail += 1;
                 }
-                log::info!("frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} rssi={rssi}dBm");
+
+                // Persist to the device manager (info + significant/sampled events).
+                let obs = devices::Observation {
+                    meter_id: meter,
+                    manufacturer: v["manufacturer"].as_str().unwrap_or("?").to_string(),
+                    version: v["version"].as_u64().unwrap_or(0) as u8,
+                    device_type: v["type"].as_u64().unwrap_or(0) as u8,
+                    frame_type: ft.clone(),
+                    ci: ci
+                        .strip_prefix("0x")
+                        .and_then(|h| u8::from_str_radix(h, 16).ok()),
+                    encrypted: v["encrypted"].as_bool().unwrap_or(false),
+                    crc_ok,
+                    rssi,
+                    has_key,
+                    reading: None, // populated once ELL decrypt lands (Phase 1.4b)
+                };
+                if let Err(err) = dm.record_frame(&obs) {
+                    log::warn!("device store write failed: {err}");
+                }
+
+                log::info!(
+                    "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm"
+                );
             } else {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
 
             if last_report.elapsed() >= interval {
-                print_stats(&stats, start.elapsed());
+                if let Err(err) = dm.check_silence() {
+                    log::warn!("silence check failed: {err}");
+                }
+                let nkeys = keys.lock().unwrap().len();
+                print_stats(&stats, start.elapsed(), nkeys);
+                // redb is single-writer, so the standalone `devices` viewer can't open the
+                // store while we hold it — print the persisted device report here too.
+                if let Err(err) = dm.print_report(10) {
+                    log::warn!("device report failed: {err}");
+                }
                 last_report = Instant::now();
+            }
+
+            // Periodic airwave discovery sweep: pause C reception, scan C/T + S, record.
+            if sweep_hours > 0 && last_sweep.elapsed() >= sweep_interval {
+                log::info!("airwave sweep: starting (pausing C reception ~2 min)");
+                drop(radio); // release SPI for the raw sync-off capture
+                match sweep::sweep_once(&spidev, 60) {
+                    Ok((meters, t, s)) => {
+                        let summary = format!("C:{meters:?} T-bursts:{t} S-bursts:{s}");
+                        if let Err(e) = dm.record_discovery(&summary) {
+                            log::warn!("discovery record failed: {e}");
+                        }
+                        log::info!("airwave sweep done: C meters {meters:?}, T-bursts {t}, S-bursts {s}");
+                    }
+                    Err(e) => log::warn!("airwave sweep failed: {e}"),
+                }
+                // Always restore C reception.
+                radio = source::Rfm69Source::open(&spidev).await?;
+                radio.start().await?;
+                last_sweep = Instant::now();
             }
         }
     })
 }
 
 #[cfg(feature = "radio")]
-fn print_stats(stats: &std::collections::BTreeMap<u32, MeterStat>, uptime: std::time::Duration) {
+fn print_stats(
+    stats: &std::collections::BTreeMap<u32, MeterStat>,
+    uptime: std::time::Duration,
+    keys_held: usize,
+) {
     let mins = uptime.as_secs_f64() / 60.0;
-    println!("\n=== metermon-rs stats (uptime {:.1} min) ===", mins);
+    println!("\n=== metermon-rs stats (uptime {mins:.1} min, {keys_held} AES key(s) held) ===");
     println!(
-        "{:>10}  {:>5}  {:>5}  {:>5}  {:>6}  {:>8}  {:>8}",
-        "meter", "total", "ok", "fail", "pass%", "avg_rssi", "last_rssi"
+        "{:>10}  {:>5}  {:>5}  {:>5}  {:>6}  {:>8}  {:>8}  {:>3}",
+        "meter", "total", "ok", "fail", "pass%", "avg_rssi", "last_rssi", "key"
     );
     let (mut t, mut o) = (0u64, 0u64);
     for (meter, s) in stats {
@@ -197,8 +450,14 @@ fn print_stats(stats: &std::collections::BTreeMap<u32, MeterStat>, uptime: std::
             0
         };
         println!(
-            "{meter:>10}  {:>5}  {:>5}  {:>5}  {:>5.0}%  {:>6}dBm  {:>6}dBm",
-            s.total, s.ok, s.fail, pass, avg, s.last_rssi
+            "{meter:>10}  {:>5}  {:>5}  {:>5}  {:>5.0}%  {:>6}dBm  {:>6}dBm  {:>3}",
+            s.total,
+            s.ok,
+            s.fail,
+            pass,
+            avg,
+            s.last_rssi,
+            if s.has_key { "yes" } else { "-" }
         );
         t += s.total;
         o += s.ok;
@@ -212,7 +471,13 @@ fn print_stats(stats: &std::collections::BTreeMap<u32, MeterStat>, uptime: std::
 }
 
 #[cfg(not(feature = "radio"))]
-fn run_monitor(_config_path: &str, _report_secs: u64) -> Result<()> {
+fn run_monitor(
+    _config_path: &str,
+    _report_secs: u64,
+    _keys_path: Option<&str>,
+    _db_path: &str,
+    _sweep_hours: u64,
+) -> Result<()> {
     bail_no_radio("monitor")
 }
 
@@ -301,6 +566,50 @@ fn run_dumpregs(config_path: &str) -> Result<()> {
 #[cfg(not(feature = "radio"))]
 fn run_dumpregs(_config_path: &str) -> Result<()> {
     bail_no_radio("dumpregs")
+}
+
+/// Sync-DISABLED raw bitstream capture: capture the demodulated stream (via
+/// [`sweep::capture_raw`]) and write it to a binary file for offline C/T/S analysis.
+/// Mode-agnostic. Run with the monitor stopped.
+#[cfg(feature = "radio")]
+fn run_probe_raw(
+    config_path: &str,
+    out: &str,
+    seconds: u64,
+    freq_hz: u64,
+    bitrate_bps: u32,
+) -> Result<()> {
+    let cfg = Config::load(config_path)?;
+    let spidev = cfg
+        .devices
+        .values()
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
+        .and_then(|d| d.spidev.clone())
+        .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
+
+    log::info!(
+        "probe-raw: sync-OFF capture on {spidev} @ {:.3} MHz, {bitrate_bps} bps, {seconds}s -> {out}",
+        freq_hz as f64 / 1e6
+    );
+    let raw = sweep::capture_raw(&spidev, freq_hz, bitrate_bps, seconds)?;
+    std::fs::write(out, &raw)?;
+    log::info!(
+        "probe-raw: captured {} bytes ({:.1} KB/s) -> {out}",
+        raw.len(),
+        raw.len() as f64 / 1024.0 / seconds as f64
+    );
+    Ok(())
+}
+
+#[cfg(not(feature = "radio"))]
+fn run_probe_raw(
+    _config_path: &str,
+    _out: &str,
+    _seconds: u64,
+    _freq_hz: u64,
+    _bitrate_bps: u32,
+) -> Result<()> {
+    bail_no_radio("probe-raw")
 }
 
 /// A/B input path: identical bytes -> decode core -> JSON. Host-independent.
