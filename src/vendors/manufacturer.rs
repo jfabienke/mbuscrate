@@ -112,6 +112,16 @@ pub static KNOWN_MANUFACTURERS: Lazy<HashMap<u16, ManufacturerInfo>> = Lazy::new
         0x68AE,
         ManufacturerInfo::new("ZEN", "Zenner International", false),
     );
+    map.insert(
+        0x6A49,
+        ManufacturerInfo::with_description(
+            "ZRI",
+            "Zenner International",
+            false,
+            "Observed on Zenner water meters over the optical interface; \
+             distinct from the ZEN (0x68AE) and ZRM (0x6A4D) codes",
+        ),
+    );
     map.insert(0x1596, ManufacturerInfo::new("ELV", "Elvaco", false));
     map.insert(0x34B4, ManufacturerInfo::new("MET", "Metrix", false));
 
@@ -408,6 +418,28 @@ mod tests {
         assert_eq!(id_to_manufacturer(0x68AE), "ZEN");
         assert_eq!(id_to_manufacturer(0x2C2D), "KAM");
         assert_eq!(id_to_manufacturer(0x0442), "ABB");
+    }
+
+    /// ZRI is the code a physical Zenner water meter reports over the optical
+    /// interface. Zenner uses three distinct FLAG codes, so a lookup that only
+    /// knows ZEN will fail to resolve real hardware.
+    #[test]
+    fn test_zenner_codes() {
+        assert_eq!(manufacturer_to_id("ZRI"), Some(0x6A49));
+        assert_eq!(id_to_manufacturer(0x6A49), "ZRI");
+
+        let info = get_manufacturer_info(0x6A49).expect("ZRI must be in the database");
+        assert_eq!(info.code, "ZRI");
+        assert_eq!(info.name, "Zenner International");
+
+        // The three Zenner-family codes are distinct and all resolvable.
+        for (code, id) in [("ZEN", 0x68AEu16), ("ZRI", 0x6A49), ("ZRM", 0x6A4D)] {
+            assert_eq!(manufacturer_to_id(code), Some(id));
+            assert!(
+                get_manufacturer_info(id).is_some(),
+                "{code} ({id:#06X}) missing from the database"
+            );
+        }
     }
 
     #[test]

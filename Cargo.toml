@@ -86,6 +86,25 @@ harness = false
 name = "sha_benchmark"
 harness = false
 
+# Criterion benches must declare `harness = false` (they provide their own main via
+# criterion_main!); otherwise the default libtest harness rejects Criterion CLI args like
+# `--save-baseline` (as the enhanced-CI benchmark job hit for vif_benchmark).
+[[bench]]
+name = "vif_benchmark"
+harness = false
+
+[[bench]]
+name = "edge_cases_benchmark"
+harness = false
+
+[[bench]]
+name = "simd_benchmark"
+harness = false
+
+[[bench]]
+name = "aes_hardware_benchmark"
+harness = false
+
 # Targets that depend on feature-gated symbols. Without these, `cargo test` and
 # `cargo build --examples` fail on the default feature set because the RTT logging
 # API only exists under `rtt-logging` (see src/logging.rs).
@@ -100,6 +119,13 @@ required-features = ["rtt-logging"]
 [[example]]
 name = "pio_irq_demo"
 required-features = ["pio-irq"]
+
+# Its helpers (and inline #[test]s) are all `#[cfg(feature = "raspberry-pi")]`, so gate the
+# whole example behind that feature — otherwise `cargo test --all-targets` fails to compile
+# the example's tests on the default feature set.
+[[example]]
+name = "raspberry_pi_wmbus"
+required-features = ["raspberry-pi"]
 
 # NOTE: cargo aliases live in .cargo/config.toml, not here. An [alias] table in
 # Cargo.toml is silently ignored ("unused manifest key: alias").

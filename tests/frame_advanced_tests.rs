@@ -179,7 +179,7 @@ fn test_pack_frame_various_types() {
         address: 0x01,
         control_information: 0x00,
         data: vec![0x01, 0x02, 0x03, 0x04, 0x05],
-        checksum: 0x5F,
+        checksum: 0x00, // ignored: pack_frame computes it (C+A+CI+data = 0x63)
         more_records_follow: false,
     };
     let packed = pack_frame(&long_frame);
@@ -187,7 +187,7 @@ fn test_pack_frame_various_types() {
         0x68, 0x08, 0x08, 0x68, // Start bytes and length
         0x53, 0x01, 0x00, // Control, address, CI
         0x01, 0x02, 0x03, 0x04, 0x05, // Data
-        0x5F, 0x16, // Checksum and stop
+        0x63, 0x16, // Checksum (0x53+0x01+0x00+0x01+..+0x05) and stop
     ];
     assert_eq!(packed, expected);
 }
@@ -252,4 +252,20 @@ fn test_empty_data_frames() {
     let (_, parsed) = parse_frame(&packed).unwrap();
     assert_eq!(parsed.data.len(), 0);
     assert_eq!(parsed.frame_type, MBusFrameType::Control);
+}
+
+#[test]
+fn pack_short_frame_computes_checksum() {
+    // Regression for fix #1: REQ_UD2 to address 1 must carry checksum C+A = 0x5B+0x01 = 0x5C,
+    // not the 0x00 placeholder pack_frame previously emitted verbatim.
+    let frame = MBusFrame {
+        frame_type: MBusFrameType::Short,
+        control: 0x5B,
+        address: 0x01,
+        control_information: 0,
+        data: vec![],
+        checksum: 0,
+        more_records_follow: false,
+    };
+    assert_eq!(pack_frame(&frame), vec![0x10, 0x5B, 0x01, 0x5C, 0x16]);
 }

@@ -457,7 +457,9 @@ fn sha1_process_block_software(state: &mut [u32; 5], block: &[u8; SHA1_BLOCK_SIZ
     let mut d = state[3];
     let mut e = state[4];
 
-    // Main loop
+    // Main loop. The index selects both the round constants/functions and w[i], so a
+    // range loop is the clearest form here.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..80 {
         let (f, k) = if i < 20 {
             ((b & c) | (!b & d), 0x5A827999)

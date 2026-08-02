@@ -374,6 +374,13 @@ pub mod gcm {
     use std::arch::aarch64::*;
 
     /// GHASH computation using PMULL for polynomial multiplication
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the target CPU supports the `aes` and `neon` features
+    /// (this function is compiled with `#[target_feature(enable = "aes,neon")]`, so
+    /// invoking it on hardware lacking those extensions is undefined behavior). Verify
+    /// with `std::arch::is_aarch64_feature_detected!` before calling.
     #[target_feature(enable = "aes,neon")]
     pub unsafe fn ghash_pmull(h: &[u8; 16], data: &[u8]) -> [u8; 16] {
         // This is a placeholder for PMULL-based GHASH

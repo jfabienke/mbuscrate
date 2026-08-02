@@ -451,3 +451,33 @@ async fn test_unexpected_irq_bit() {
     // This test ensures the driver won't panic with unexpected hardware behavior
     // and will log warnings appropriately (though we can't easily test logging here)
 }
+
+#[test]
+fn full_frame_with_0x79_manufacturer_lowbyte_not_misparsed_as_compact() {
+    // Regression for fix #4/#1: manufacturer-ID low byte 0x79 collides with the compact-frame
+    // CI marker at byte 2. A full frame with CI 0x73 (fixed-data response) or 0x8E (ELL) — both
+    // omitted from the old narrow allowlist — must still parse as a FULL frame, not compact.
+    for ci in [0x73u8, 0x8E] {
+        let built = WMBusFrame::build(
+            0x44,
+            0x2C79,
+            0x11223344,
+            0x01,
+            0x07,
+            ci,
+            &[0x01, 0x02, 0x03],
+        );
+        assert_eq!(
+            built[2], 0x79,
+            "manufacturer low byte is the 0x79 collision case"
+        );
+        let frame = parse_wmbus_frame(&built)
+            .unwrap_or_else(|e| panic!("CI {ci:#04X}: should parse as a full frame, got {e:?}"));
+        assert_eq!(frame.control_info, ci, "CI {ci:#04X}: parsed as full");
+        assert_eq!(
+            frame.device_address, 0x1122_3344,
+            "CI {ci:#04X}: full address, not compact placeholder"
+        );
+        assert_eq!(frame.manufacturer_id, 0x2C79);
+    }
+}

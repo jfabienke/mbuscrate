@@ -6,6 +6,8 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use mbus_rs::mbus::frame::calculate_mbus_checksum;
 use mbus_rs::wmbus::block::{calculate_block_crc, verify_blocks};
+#[cfg(feature = "crypto")]
+use mbus_rs::wmbus::crypto::{AesKey, WMBusCrypto};
 use mbus_rs::wmbus::frame::{calculate_wmbus_crc, verify_wmbus_crc};
 use std::hint::black_box;
 use std::time::Duration;

@@ -202,7 +202,9 @@ pub fn pack_frame(frame: &MBusFrame) -> Vec<u8> {
             data.push(0x10);
             data.push(frame.control);
             data.push(frame.address);
-            data.push(frame.checksum);
+            // Always compute the checksum from the fields; the supplied `frame.checksum`
+            // is advisory (0 for freshly built request frames).
+            data.push(calculate_checksum(frame));
             data.push(0x16);
         }
         MBusFrameType::Control | MBusFrameType::Long => {
@@ -227,7 +229,8 @@ fn pack_control_or_long_frame(data: &mut Vec<u8>, frame: &MBusFrame) {
     data.push(frame.address);
     data.push(frame.control_information);
     data.extend_from_slice(&frame.data);
-    data.push(frame.checksum);
+    // Computed over C + A + CI + data, per EN 13757-2.
+    data.push(calculate_checksum(frame));
     data.push(0x16);
 }
 

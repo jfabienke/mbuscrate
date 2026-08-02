@@ -43,25 +43,26 @@ pub fn decode_lora_packet(
     let mhdr = payload[0];
     match mhdr {
         0x00 => {
-            // JoinReq (OTAA)
-            if payload.len() < 18 {
-                // Min: MHDR + DevEUI(8) + AppEUI(8) + DevNonce(2)
+            // JoinReq (OTAA): MHDR(1) + DevEUI(8) + AppEUI(8) + DevNonce(2) = 19 bytes min,
+            // so byte 18 (the DevNonce high byte) is always in bounds.
+            if payload.len() < 19 {
                 return Err(LoRaError::Parse("Too short for JoinReq".to_string()));
             }
             let _dev_eui = &payload[1..9]; // 8B
             let _app_eui = &payload[9..17]; // 8B
             let _dev_nonce = u16::from_le_bytes([payload[17], payload[18]]); // 2B
-            let schedule_start = 19; // Custom CBOR after nonce
-            let frm_payload = payload[schedule_start..].to_vec();
+            let frm_payload = payload[19..].to_vec(); // custom schedule CBOR (may be empty)
 
-            // Parse custom schedule from CBOR
-            let _schedule: ScheduleInfo = from_reader(Cursor::new(&frm_payload))?;
+            // Parse custom schedule from CBOR only if present.
+            if !frm_payload.is_empty() {
+                let _schedule: ScheduleInfo = from_reader(Cursor::new(&frm_payload))?;
+            }
             Ok(LoRaPayload {
                 mhdr,
                 dev_addr: [0; 4], // Not in JoinReq
                 fctrl: 0,
                 fport: 0,
-                frm_payload, // Includes schedule
+                frm_payload, // schedule only (EUI/nonce stay in the original packet)
             })
         }
         0x20 | 0x80 => {
@@ -97,22 +98,22 @@ pub fn decode_lora_packet(
 
 /// Parse OTAA Join Request
 pub fn parse_otaa_join(payload: &[u8]) -> Result<JoinRequest, LoRaError> {
-    let decoded = decode_lora_packet(payload, LoRaPacketStatus::default())?;
-    if decoded.mhdr != 0x00 {
-        return Err(LoRaError::InvalidMhdr(decoded.mhdr));
+    if payload.is_empty() || payload[0] != 0x00 {
+        return Err(LoRaError::InvalidMhdr(
+            payload.first().copied().unwrap_or(0),
+        ));
+    }
+    if payload.len() < 19 {
+        return Err(LoRaError::Parse("Too short for JoinReq".to_string()));
     }
 
-    // Extract from frm_payload (custom after nonce)
-    let dev_eui = hex::encode(&decoded.frm_payload[0..8]); // Assume first 8B DevEUI
-    let app_eui = hex::encode(&decoded.frm_payload[8..16]); // Next 8B AppEUI
-    let dev_nonce = u16::from_le_bytes(
-        decoded.frm_payload[16..18]
-            .try_into()
-            .map_err(|_| LoRaError::Parse("Invalid dev_nonce bytes".to_string()))?,
-    );
-    let schedule_start = 18;
-    let schedule_info: ScheduleInfo = if decoded.frm_payload.len() > schedule_start {
-        from_reader(Cursor::new(&decoded.frm_payload[schedule_start..]))?
+    // EUI/nonce come from the JoinReq header itself, not the schedule payload:
+    // MHDR(1) | DevEUI(8) | AppEUI(8) | DevNonce(2) | schedule CBOR...
+    let dev_eui = hex::encode(&payload[1..9]);
+    let app_eui = hex::encode(&payload[9..17]);
+    let dev_nonce = u16::from_le_bytes([payload[17], payload[18]]);
+    let schedule_info: ScheduleInfo = if payload.len() > 19 {
+        from_reader(Cursor::new(&payload[19..]))?
     } else {
         ScheduleInfo::default() // No schedule reported
     };
@@ -202,4 +203,30 @@ pub struct DataPayload {
     pub fport: u8,
     pub meter_data: Vec<u8>, // Raw binary (wM-Bus-like records)
     pub schedule_info: Option<ScheduleInfo>,
+}
+
+#[cfg(test)]
+mod join_parse_tests {
+    use super::*;
+
+    #[test]
+    fn join_18_bytes_errors_without_panicking() {
+        // 18 bytes is one short of the 19-byte minimum; must error, not index-panic on byte 18.
+        let payload = [0x00u8; 18];
+        assert!(decode_lora_packet(&payload, LoRaPacketStatus::default()).is_err());
+        assert!(parse_otaa_join(&payload).is_err());
+    }
+
+    #[test]
+    fn parse_otaa_join_reads_fields_from_header_not_schedule() {
+        // MHDR(0x00) + DevEUI(8) + AppEUI(8) + DevNonce(2 LE), no schedule.
+        let mut p = vec![0x00u8];
+        p.extend_from_slice(&[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]); // DevEUI
+        p.extend_from_slice(&[0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8]); // AppEUI
+        p.extend_from_slice(&[0xCD, 0xAB]); // DevNonce LE = 0xABCD
+        let jr = parse_otaa_join(&p).expect("valid 19-byte join");
+        assert_eq!(jr.dev_eui, "1122334455667788");
+        assert_eq!(jr.app_eui, "a1a2a3a4a5a6a7a8");
+        assert_eq!(jr.dev_nonce, 0xABCD);
+    }
 }

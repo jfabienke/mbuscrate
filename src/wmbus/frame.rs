@@ -174,9 +174,42 @@ pub fn add_wmbus_crc(frame_data: &[u8]) -> Vec<u8> {
 ///     Err(e) => println!("Parse error: {:?}", e),
 /// }
 /// ```
+/// Centralized classifier for wM-Bus / OMS Control-Information (CI) field values that begin
+/// the application layer of a FULL frame (EN 13757-3 §5.5, OMS Vol.2). Kept in one place so
+/// the full/compact disambiguation stays exhaustive — earlier a narrow allowlist omitted
+/// valid CIs such as `0x73` (fixed-data response) and `0x8E` (ELL) and misrouted those full
+/// frames to the compact parser.
+pub fn is_application_ci(ci: u8) -> bool {
+    matches!(
+        ci,
+        0x51 | 0x52 | 0x54 | 0x55 | 0x5A | 0x5B | 0x5F | 0x60 | 0x61 // commands / SND-UD / RSP
+      | 0x64 | 0x65 | 0x69 | 0x6A | 0x6B | 0x6C | 0x6D | 0x6E | 0x6F // COSEM / date-time
+      | 0x70 | 0x71                                                   // application error / alarm
+      | 0x72 | 0x73 | 0x74 | 0x75 | 0x76 | 0x77                       // variable/fixed data, long header
+      | 0x78 | 0x79 | 0x7A | 0x7B | 0x7C | 0x7D | 0x7E | 0x7F         // no/short header, compact, plain
+      | 0x80 | 0x8A | 0x8B | 0x8C | 0x8D | 0x8E | 0x8F                // TPL / ELL
+      | 0x90 | 0x91 | 0x92 | 0x93 | 0x94 | 0x95 | 0x96 | 0x97         // AFL
+      | 0xA0..=0xB7 // manufacturer-specific
+    )
+}
+
+/// Heuristic used to disambiguate a full frame from a compact frame (both can carry a `0x79`
+/// at byte 2): a full frame is the right length for its L-field and has a valid application
+/// CI at the full-frame CI position (byte 10). A frame shorter than 13 bytes cannot be full.
+///
+/// This cannot be perfect — a compact frame whose payload byte 10 coincidentally looks like a
+/// CI is still ambiguous — so callers that *know* the format should use [`parse_wmbus_frame`]
+/// (full) or [`parse_compact_frame`] directly rather than relying on auto-detection.
+fn looks_like_full_frame(b: &[u8]) -> bool {
+    b.len() >= 13 && b.len() == b[0] as usize + 3 && is_application_ci(b[10])
+}
+
 pub fn parse_wmbus_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
-    // Check for compact frame mode first (CI=0x79)
-    if raw_bytes.len() >= 3 && raw_bytes[2] == 0x79 {
+    // A compact frame (OMS format B) carries CI=0x79 at byte 2. But in a FULL frame byte 2
+    // is the manufacturer-ID low byte, so a plain `byte[2] == 0x79` test misroutes full
+    // frames whose manufacturer code ends that way. Only treat it as compact when the bytes
+    // do NOT form a well-formed full frame (right length + a plausible CI at byte 10).
+    if raw_bytes.len() >= 7 && raw_bytes[2] == 0x79 && !looks_like_full_frame(raw_bytes) {
         return parse_compact_frame(raw_bytes);
     }
 
@@ -207,18 +240,13 @@ pub fn parse_wmbus_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
     // Check if frame is encrypted
     let encrypted = is_encrypted_frame(control_field, control_info);
 
-    // Only verify CRC for non-encrypted frames (encrypted frames need post-decrypt CRC)
-    if !encrypted && !verify_wmbus_crc(raw_bytes) {
-        // Track CRC error for this device
+    // Always verify the on-wire link-layer CRC first — including for encrypted frames, whose
+    // CRC covers the ciphertext and is valid on a correctly received frame. (Previously
+    // encrypted frames skipped this and accepted corrupted ciphertext as a valid frame.)
+    if !verify_wmbus_crc(raw_bytes) {
         let device_id = format!("{device_address:08X}");
         update_device_error(&device_id, ErrorType::Crc);
         return Err(ParseError::InvalidCrc);
-    }
-
-    if encrypted {
-        log::debug!(
-            "Encrypted frame detected (CI=0x{control_info:02X}, C=0x{control_field:02X}), deferring CRC validation"
-        );
     }
 
     // Extract payload (everything between CI field and CRC)

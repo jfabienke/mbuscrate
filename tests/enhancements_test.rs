@@ -192,28 +192,26 @@ fn test_frame_with_stats_integration() {
 }
 
 #[test]
-#[ignore = "Functionality not fully implemented"]
-fn test_encrypted_frame_no_crc_check() {
-    // Frame with encryption CI should not validate CRC
+fn test_encrypted_frame_with_bad_crc_is_rejected() {
+    // Regression for fix #5: an encrypted frame whose trailing link CRC is wrong must be
+    // REJECTED. The link CRC covers the ciphertext and is validated before decryption;
+    // previously encrypted frames skipped the CRC and accepted corrupted ciphertext.
     let mut frame_bytes = vec![
-        0x44, // L-field
+        0x0E, // L = C + M(2) + A(4) + V + T + CI + 4-byte payload = 14
         0x44, // C-field
-        0x2D, 0x2C, // Manufacturer ID
+        0x2C, 0x2D, // Manufacturer ID (low byte 0x2C, not 0x79 -> not misread as compact)
         0xAA, 0xBB, 0xCC, 0xDD, // Device address
         0x01, // Version
         0x07, // Device type
         0x7B, // CI field (encrypted long format)
+        0x00, 0x00, 0x00, 0x00, // encrypted payload
     ];
+    frame_bytes.push(0xFF); // intentionally bad CRC
+    frame_bytes.push(0xFF); // total = 17 = L(14) + 3
 
-    // Add payload with intentionally bad CRC
-    frame_bytes.extend_from_slice(&[0; 50]);
-    frame_bytes.push(0xFF); // Bad CRC
-    frame_bytes.push(0xFF);
-
-    // Should parse successfully despite bad CRC (encrypted frames skip CRC)
     let result = parse_wmbus_frame(&frame_bytes);
-    assert!(result.is_ok());
-    let frame = result.unwrap();
-    assert!(frame.encrypted);
-    assert_eq!(frame.device_address, 0xDDCCBBAA);
+    assert!(
+        result.is_err(),
+        "encrypted frame with a bad CRC must be rejected, got {result:?}"
+    );
 }

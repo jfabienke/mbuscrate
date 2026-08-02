@@ -23,7 +23,8 @@ fn generate_frame(size: usize) -> Vec<u8> {
         frame[3] = 0x2C; // Manufacturer
         frame[10] = 0x7A; // CI field (encrypted)
     }
-    // Fill rest with pattern
+    // Fill rest with pattern (index is also the value, so a range loop is clearest).
+    #[allow(clippy::needless_range_loop)]
     for i in 12..size {
         frame[i] = (i % 256) as u8;
     }

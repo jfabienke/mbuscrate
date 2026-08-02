@@ -381,7 +381,7 @@ impl UnifiedInstrumentation {
 
     /// Export as CBOR
     #[cfg(feature = "cbor")]
-    pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error> {
+    pub fn to_cbor(&self) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
         let mut buffer = Vec::new();
         ciborium::ser::into_writer(self, &mut buffer)?;
         Ok(buffer)

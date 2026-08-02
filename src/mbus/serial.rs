@@ -469,38 +469,32 @@ impl MBusDeviceHandle {
             return Err(MBusError::NomError("empty".into()));
         }
 
+        // Accumulate the frame as we go, keeping every consumed byte. For a long/control
+        // frame we must PRESERVE the two length bytes and then read only the *remaining*
+        // bytes — reading `total_len - 1` (as before) both dropped the length bytes and
+        // over-read into the next frame.
+        let mut buf = Vec::with_capacity(261);
+        buf.push(start[0]);
         let total_len = match start[0] {
             0xE5 => 1usize, // ACK
             0x10 => 5usize, // SHORT
             0x68 => {
-                // Need to read two length bytes to determine total
                 let mut lenbuf = [0u8; 2];
                 timeout(to, self.port.read_exact(&mut lenbuf))
                     .await
                     .map_err(|_| MBusError::NomError("timeout".into()))
                     .and_then(|res| res.map_err(|e| MBusError::SerialPortError(e.to_string())))?;
-                let length1 = lenbuf[0] as usize;
-                // total = len1 + 6 bytes (0x68 len1 len2 0x68 ... checksum 0x16)
-                6 + length1
+                buf.extend_from_slice(&lenbuf); // keep the length bytes in the frame
+                                                // total = 0x68 len1 len2 0x68 [len1 bytes] checksum 0x16
+                6 + lenbuf[0] as usize
             }
             _ => return Err(MBusError::FrameParseError("Invalid frame start".into())),
         };
 
-        // We already consumed 1 byte, possibly 3 bytes; gather remaining
-        let mut buf = Vec::with_capacity(total_len);
-        buf.push(start[0]);
-        if start[0] == 0x68 {
-            // fetch already-read len bytes and read rest
-            // We already read lenbuf; but we didn't keep them. Re-read full frame after start for simplicity
-            // Read remaining (total_len - 1) bytes
-            let mut rest = vec![0u8; total_len - 1];
-            timeout(to, self.port.read_exact(&mut rest))
-                .await
-                .map_err(|_| MBusError::NomError("timeout".into()))
-                .and_then(|res| res.map_err(|e| MBusError::SerialPortError(e.to_string())))?;
-            buf.extend_from_slice(&rest);
-        } else {
-            let mut rest = vec![0u8; total_len - 1];
+        // Read exactly the bytes not yet consumed.
+        let remaining = total_len.saturating_sub(buf.len());
+        if remaining > 0 {
+            let mut rest = vec![0u8; remaining];
             timeout(to, self.port.read_exact(&mut rest))
                 .await
                 .map_err(|_| MBusError::NomError("timeout".into()))
