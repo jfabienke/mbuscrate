@@ -93,6 +93,25 @@ pub enum LoRaBandwidth {
     BW500 = 0x06,  // 500 kHz
 }
 
+impl LoRaBandwidth {
+    /// Nominal LoRa signal bandwidth in kHz. Used e.g. to scale the modem's
+    /// frequency-error estimate into Hz.
+    pub fn bandwidth_khz(self) -> f64 {
+        match self {
+            LoRaBandwidth::BW7_8 => 7.8,
+            LoRaBandwidth::BW10_4 => 10.4,
+            LoRaBandwidth::BW15_6 => 15.6,
+            LoRaBandwidth::BW20_8 => 20.8,
+            LoRaBandwidth::BW31_2 => 31.25,
+            LoRaBandwidth::BW41_7 => 41.7,
+            LoRaBandwidth::BW62_5 => 62.5,
+            LoRaBandwidth::BW125 => 125.0,
+            LoRaBandwidth::BW250 => 250.0,
+            LoRaBandwidth::BW500 => 500.0,
+        }
+    }
+}
+
 /// Coding Rate (CR) for LoRa (Table 13-49)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CodingRate {
