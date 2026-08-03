@@ -211,12 +211,14 @@ impl<D: RadioDriver + Sx126xExt + Send> ProfileScheduler<D> {
             Ok(Completed::Finished) => Ok(()),
             // Cancelled mid-schedule — restore the documented base state; if that fails, the
             // radio state is undefined and the caller must know.
-            Ok(Completed::Cancelled) => self.restore_base().await.map_err(|recovery| {
-                SchedulerError::RecoveryFailed {
-                    original: None,
-                    recovery,
-                }
-            }),
+            Ok(Completed::Cancelled) => {
+                self.restore_base()
+                    .await
+                    .map_err(|recovery| SchedulerError::RecoveryFailed {
+                        original: None,
+                        recovery,
+                    })
+            }
             // Radio error — restore base, then surface either the original error (restore
             // ok) or a RecoveryFailed carrying both errors (restore also failed).
             Err(original) => match self.restore_base().await {
@@ -344,7 +346,10 @@ mod tests {
         // Ends armed in RX.
         assert_eq!(cmds.last().map(|(op, _)| *op), Some(SET_RX));
         // Every profile change is preceded by leaving RX (SetStandby).
-        let first_pkt = cmds.iter().position(|(op, _)| *op == SET_PACKET_TYPE).unwrap();
+        let first_pkt = cmds
+            .iter()
+            .position(|(op, _)| *op == SET_PACKET_TYPE)
+            .unwrap();
         let first_standby = cmds.iter().position(|(op, _)| *op == SET_STANDBY).unwrap();
         assert!(first_standby < first_pkt);
     }
@@ -395,7 +400,9 @@ mod tests {
         // Never entered LoRa; ended in base GFSK RX.
         let cmds = probe.commands();
         assert!(
-            !cmds.iter().any(|(op, d)| *op == SET_PACKET_TYPE && d == &[LORA]),
+            !cmds
+                .iter()
+                .any(|(op, d)| *op == SET_PACKET_TYPE && d == &[LORA]),
             "cancellation before the window means LoRa is never selected"
         );
         assert_eq!(packet_type_sequence(&cmds).last(), Some(&GFSK));

@@ -197,8 +197,7 @@ impl Hal for RecordingHal {
         if g.fail_every == Some(opcode) {
             return Err(HalError::Spi); // persistent
         }
-        if g
-            .fail_on
+        if g.fail_on
             .as_ref()
             .is_some_and(|(op, d)| *op == opcode && d.as_slice() == data)
         {
@@ -207,10 +206,10 @@ impl Hal for RecordingHal {
         }
         match opcode {
             0x80 => g.mode_bits = if data.first() == Some(&0x01) { 3 } else { 2 }, // SetStandby XOSC/RC
-            0x82 => g.mode_bits = 5, // SetRx
-            0x83 => g.mode_bits = 6, // SetTx
-            0x84 => g.mode_bits = 0, // SetSleep
-            0xC1 => g.mode_bits = 4, // SetFs
+            0x82 => g.mode_bits = 5,                                               // SetRx
+            0x83 => g.mode_bits = 6,                                               // SetTx
+            0x84 => g.mode_bits = 0,                                               // SetSleep
+            0xC1 => g.mode_bits = 4,                                               // SetFs
             _ => {}
         }
         g.commands.push((opcode, data.to_vec()));
