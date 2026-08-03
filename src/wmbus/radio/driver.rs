@@ -2565,74 +2565,8 @@ mod tests {
     // These exercise the single-SX126x profile switch on a recording HAL, with no radio.
 
     use super::{LoRaProfile, RadioProfile, Sx126xDriver, Sx126xExt, WmbusProfile};
-    use crate::wmbus::radio::hal::{Hal, HalError};
+    use crate::wmbus::radio::hal::RecordingHal;
     use crate::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, PacketType, SpreadingFactor};
-
-    /// A test HAL that records every command/register write in order and answers
-    /// `GetStatus` (0xC0) with a chip mode derived from the last mode command, so state
-    /// transitions (`set_standby` → `wait_for_state`) resolve without real hardware.
-    #[derive(Default)]
-    struct RecordingHal {
-        commands: Vec<(u8, Vec<u8>)>,
-        reg_writes: Vec<(u16, Vec<u8>)>,
-        /// Chip-mode nibble reported in `GetStatus` bits [6:4]; 0 = Sleep at start.
-        mode_bits: u8,
-    }
-
-    impl RecordingHal {
-        /// Index of the first recorded write of `opcode`, if any.
-        fn first_cmd(&self, opcode: u8) -> Option<usize> {
-            self.commands.iter().position(|(op, _)| *op == opcode)
-        }
-
-        /// True if `(opcode, data)` was recorded exactly.
-        fn has_cmd(&self, opcode: u8, data: &[u8]) -> bool {
-            self.commands
-                .iter()
-                .any(|(op, d)| *op == opcode && d.as_slice() == data)
-        }
-    }
-
-    impl Hal for RecordingHal {
-        fn write_command(&mut self, opcode: u8, data: &[u8]) -> Result<(), HalError> {
-            match opcode {
-                0x80 => self.mode_bits = if data.first() == Some(&0x01) { 3 } else { 2 }, // SetStandby XOSC/RC
-                0x82 => self.mode_bits = 5, // SetRx
-                0x83 => self.mode_bits = 6, // SetTx
-                0x84 => self.mode_bits = 0, // SetSleep
-                0xC1 => self.mode_bits = 4, // SetFs
-                _ => {}
-            }
-            self.commands.push((opcode, data.to_vec()));
-            Ok(())
-        }
-
-        fn read_command(&mut self, opcode: u8, buf: &mut [u8]) -> Result<(), HalError> {
-            buf.fill(0);
-            if opcode == 0xC0 && !buf.is_empty() {
-                buf[0] = self.mode_bits << 4; // GetStatus: chip mode in bits [6:4]
-            }
-            Ok(())
-        }
-
-        fn write_register(&mut self, addr: u16, data: &[u8]) -> Result<(), HalError> {
-            self.reg_writes.push((addr, data.to_vec()));
-            Ok(())
-        }
-
-        fn read_register(&mut self, _addr: u16, buf: &mut [u8]) -> Result<(), HalError> {
-            buf.fill(0);
-            Ok(())
-        }
-
-        fn gpio_read(&mut self, _pin: u8) -> Result<bool, HalError> {
-            Ok(false)
-        }
-
-        fn gpio_write(&mut self, _pin: u8, _value: bool) -> Result<(), HalError> {
-            Ok(())
-        }
-    }
 
     fn lora_profile() -> LoRaProfile {
         LoRaProfile {

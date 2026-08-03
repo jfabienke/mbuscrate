@@ -114,3 +114,136 @@ pub use enhanced_gpio::{
 // Re-export platform implementations for convenience
 #[cfg(feature = "raspberry-pi")]
 pub use raspberry_pi::{GpioPins, RaspberryPiHal, RaspberryPiHalBuilder};
+
+/// A test HAL that records every command/register write in order and answers `GetStatus`
+/// (0xC0) with a chip mode derived from the last mode command, so state transitions
+/// (`set_standby`/`set_rx` → `wait_for_state`) resolve without real hardware.
+///
+/// Shared by the driver and scheduler tests. The recording lives behind an `Arc<Mutex<_>>`
+/// so a test can clone a probe handle *before* moving the HAL into the driver and inspect
+/// the command stream afterwards. `fail_on` injects a one-shot fault to exercise error paths.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct RecordingHal {
+    inner: std::sync::Arc<std::sync::Mutex<Recording>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct Recording {
+    commands: Vec<(u8, Vec<u8>)>,
+    reg_writes: Vec<(u16, Vec<u8>)>,
+    /// Chip-mode nibble reported in `GetStatus` bits [6:4]; 0 = Sleep at start.
+    mode_bits: u8,
+    /// One-shot fault: the first `write_command` matching `(opcode, data)` fails, then clears.
+    fail_on: Option<(u8, Vec<u8>)>,
+    /// Persistent fault: every `write_command` with this opcode fails (any data).
+    fail_every: Option<u8>,
+}
+
+#[cfg(test)]
+impl RecordingHal {
+    /// A recording HAL with no injected faults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A recording HAL that fails the first `write_command(opcode, data)` it sees (once),
+    /// to exercise error/restore paths.
+    pub fn fail_on(opcode: u8, data: &[u8]) -> Self {
+        let hal = Self::new();
+        hal.inner.lock().unwrap().fail_on = Some((opcode, data.to_vec()));
+        hal
+    }
+
+    /// A recording HAL that fails *every* `write_command` with `opcode` (any data), to
+    /// exercise the case where recovery itself cannot complete.
+    pub fn fail_every(opcode: u8) -> Self {
+        let hal = Self::new();
+        hal.inner.lock().unwrap().fail_every = Some(opcode);
+        hal
+    }
+
+    /// Snapshot of the recorded `(opcode, data)` command stream, in order.
+    pub fn commands(&self) -> Vec<(u8, Vec<u8>)> {
+        self.inner.lock().unwrap().commands.clone()
+    }
+
+    /// Index of the first recorded write of `opcode`, if any.
+    pub fn first_cmd(&self, opcode: u8) -> Option<usize> {
+        self.inner
+            .lock()
+            .unwrap()
+            .commands
+            .iter()
+            .position(|(op, _)| *op == opcode)
+    }
+
+    /// True if `(opcode, data)` was recorded exactly.
+    pub fn has_cmd(&self, opcode: u8, data: &[u8]) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .commands
+            .iter()
+            .any(|(op, d)| *op == opcode && d.as_slice() == data)
+    }
+}
+
+#[cfg(test)]
+impl Hal for RecordingHal {
+    fn write_command(&mut self, opcode: u8, data: &[u8]) -> Result<(), HalError> {
+        let mut g = self.inner.lock().unwrap();
+        if g.fail_every == Some(opcode) {
+            return Err(HalError::Spi); // persistent
+        }
+        if g
+            .fail_on
+            .as_ref()
+            .is_some_and(|(op, d)| *op == opcode && d.as_slice() == data)
+        {
+            g.fail_on = None; // one-shot
+            return Err(HalError::Spi);
+        }
+        match opcode {
+            0x80 => g.mode_bits = if data.first() == Some(&0x01) { 3 } else { 2 }, // SetStandby XOSC/RC
+            0x82 => g.mode_bits = 5, // SetRx
+            0x83 => g.mode_bits = 6, // SetTx
+            0x84 => g.mode_bits = 0, // SetSleep
+            0xC1 => g.mode_bits = 4, // SetFs
+            _ => {}
+        }
+        g.commands.push((opcode, data.to_vec()));
+        Ok(())
+    }
+
+    fn read_command(&mut self, opcode: u8, buf: &mut [u8]) -> Result<(), HalError> {
+        buf.fill(0);
+        if opcode == 0xC0 && !buf.is_empty() {
+            buf[0] = self.inner.lock().unwrap().mode_bits << 4; // GetStatus: chip mode in bits [6:4]
+        }
+        Ok(())
+    }
+
+    fn write_register(&mut self, addr: u16, data: &[u8]) -> Result<(), HalError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .reg_writes
+            .push((addr, data.to_vec()));
+        Ok(())
+    }
+
+    fn read_register(&mut self, _addr: u16, buf: &mut [u8]) -> Result<(), HalError> {
+        buf.fill(0);
+        Ok(())
+    }
+
+    fn gpio_read(&mut self, _pin: u8) -> Result<bool, HalError> {
+        Ok(false)
+    }
+
+    fn gpio_write(&mut self, _pin: u8, _value: bool) -> Result<(), HalError> {
+        Ok(())
+    }
+}
