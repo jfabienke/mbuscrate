@@ -366,6 +366,39 @@ pub struct LoRaProfile {
     pub sync_word: Option<u16>,
 }
 
+/// A received packet tagged with the modem it was captured under, plus the radio metadata
+/// gathered atomically with it.
+///
+/// Produced by [`Sx126xDriver::process_irqs_with_mode`] so a caller holding the driver lock
+/// gets a `(mode, payload, metadata)` tuple that cannot skew if a profile switch happens
+/// immediately after the call returns — the driver stays the single source of truth for
+/// which modem a packet arrived on.
+#[derive(Debug, Clone)]
+pub struct ModeTaggedPacket {
+    /// The modem (GFSK/wM-Bus or LoRa) the packet was received under.
+    pub mode: PacketType,
+    /// Raw payload bytes (undecoded).
+    pub payload: Vec<u8>,
+    /// Instantaneous RSSI for this packet, in dBm.
+    pub rssi_dbm: i16,
+    /// LoRa demodulator metadata; `Some` only when `mode == PacketType::LoRa`.
+    pub lora: Option<LoRaRxInfo>,
+}
+
+/// LoRa-only receive metadata accompanying a [`ModeTaggedPacket`].
+///
+/// (SNR is intentionally omitted for now: [`Sx126xDriver::get_packet_status`] currently
+/// mis-scales the SNR byte as an RSSI, so a correct SNR needs a separate driver fix first.)
+#[derive(Debug, Clone)]
+pub struct LoRaRxInfo {
+    /// Per-packet carrier frequency error in Hz, if the LoRa demodulator reported one.
+    pub freq_error_hz: Option<i32>,
+    /// Active spreading factor.
+    pub sf: SpreadingFactor,
+    /// Active signal bandwidth.
+    pub bw: LoRaBandwidth,
+}
+
 /// SX126x-specific dual-mode capability, layered on top of
 /// [`RadioDriver`](crate::wmbus::radio::radio_driver::RadioDriver).
 ///
@@ -910,6 +943,51 @@ impl<H: Hal> Sx126xDriver<H> {
         }
 
         Ok(None)
+    }
+
+    /// Atomically poll for a received packet **and** tag it with the active modem plus its
+    /// receive metadata.
+    ///
+    /// This is the single-source-of-truth reception op for a dual-mode radio: in one
+    /// `&mut self` call it snapshots the current packet type, drains any received payload,
+    /// reads the RSSI, and — in LoRa mode — the frequency error and modulation params. A
+    /// caller holding the driver lock therefore gets a consistent `(mode, payload, metadata)`
+    /// tuple that cannot skew even if a scheduler switches profiles right afterwards (which
+    /// a later `active_packet_type()` query could otherwise miss).
+    ///
+    /// Returns `Ok(None)` when no packet is pending, or when no profile has been applied yet.
+    pub fn process_irqs_with_mode(&mut self) -> Result<Option<ModeTaggedPacket>, DriverError> {
+        // Snapshot the active modem *before* draining the packet.
+        let Some(mode) = self.current_packet_type else {
+            return Ok(None);
+        };
+        let Some(payload) = self.process_irqs()? else {
+            return Ok(None);
+        };
+        let rssi_dbm = self.get_rssi_instant()?;
+        let lora = match mode {
+            PacketType::LoRa => {
+                let freq_error_hz = self.get_lora_frequency_error()?;
+                match self.current_mod_params {
+                    Some(ModulationParams::LoRa { params }) => Some(LoRaRxInfo {
+                        freq_error_hz,
+                        sf: params.sf,
+                        bw: params.bw,
+                    }),
+                    // LoRa modem selected but no LoRa modulation params recorded: an
+                    // inconsistent radio state. Fail rather than emit a LoRa packet without
+                    // the metadata `ReceivedItem::Lora` requires.
+                    _ => return Err(DriverError::InvalidParams),
+                }
+            }
+            PacketType::Gfsk => None,
+        };
+        Ok(Some(ModeTaggedPacket {
+            mode,
+            payload,
+            rssi_dbm,
+            lora,
+        }))
     }
 
     /// Configure radio for wireless M-Bus operation
@@ -2675,5 +2753,32 @@ mod tests {
         )
         .await;
         assert_eq!(driver.active_packet_type(), Some(PacketType::Gfsk));
+    }
+
+    #[test]
+    fn process_irqs_with_mode_none_before_any_profile() {
+        // No profile applied → current_packet_type is None → nothing to tag.
+        let mut driver = Sx126xDriver::new(RecordingHal::new(), 32_000_000);
+        assert!(driver.process_irqs_with_mode().unwrap().is_none());
+    }
+
+    #[test]
+    fn process_irqs_with_mode_none_when_no_packet_pending() {
+        // With a profile applied but no RxDone pending, it returns None (not an error) in
+        // both modes — the RecordingHal reports no IRQ.
+        let mut gfsk = Sx126xDriver::new(RecordingHal::new(), 32_000_000);
+        gfsk.configure_for_wmbus(868_950_000, 100_000).unwrap();
+        assert!(gfsk.process_irqs_with_mode().unwrap().is_none());
+
+        let mut lora = Sx126xDriver::new(RecordingHal::new(), 32_000_000);
+        lora.configure_for_lora(
+            868_100_000,
+            SpreadingFactor::SF7,
+            LoRaBandwidth::BW125,
+            CodingRate::CR4_5,
+            14,
+        )
+        .unwrap();
+        assert!(lora.process_irqs_with_mode().unwrap().is_none());
     }
 }
