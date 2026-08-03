@@ -366,6 +366,48 @@ pub struct LoRaProfile {
     pub sync_word: Option<u16>,
 }
 
+/// SX126x-specific dual-mode capability, layered on top of
+/// [`RadioDriver`](crate::wmbus::radio::radio_driver::RadioDriver).
+///
+/// The common `RadioDriver` trait is chip-agnostic. Switching a single radio between a
+/// wM-Bus (GFSK) and a LoRa [`RadioProfile`] is an SX126x capability, so it lives in this
+/// extension trait rather than widening `RadioDriver` (which the RFM69, for instance,
+/// cannot satisfy for LoRa). A generic dual-mode consumer — a scheduler or dual-mode
+/// handle — bounds on `D: RadioDriver + Sx126xExt` to require it.
+#[async_trait::async_trait]
+pub trait Sx126xExt {
+    /// Atomically switch the radio to a complete [`RadioProfile`]. Leaves the radio in
+    /// standby (see [`Sx126xDriver::switch_profile`]); the caller then starts RX or transmits.
+    async fn switch_profile(
+        &mut self,
+        profile: &RadioProfile,
+    ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError>;
+
+    /// The packet (modem) type currently configured, or `None` if no profile has been
+    /// applied yet.
+    fn active_packet_type(&self) -> Option<PacketType>;
+}
+
+#[async_trait::async_trait]
+impl<H: Hal + Send + Sync> Sx126xExt for Sx126xDriver<H> {
+    async fn switch_profile(
+        &mut self,
+        profile: &RadioProfile,
+    ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
+        // Delegate to the inherent (sync) method. The fully-qualified inherent path cannot
+        // resolve to this trait method, so there is no accidental recursion.
+        Sx126xDriver::switch_profile(self, profile).map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "profile switch failed: {e:?}"
+            ))
+        })
+    }
+
+    fn active_packet_type(&self) -> Option<PacketType> {
+        self.current_packet_type
+    }
+}
+
 impl<H: Hal> Sx126xDriver<H> {
     /// Create a new SX126x driver instance
     ///
@@ -2522,9 +2564,9 @@ mod tests {
     //
     // These exercise the single-SX126x profile switch on a recording HAL, with no radio.
 
-    use super::{LoRaProfile, RadioProfile, Sx126xDriver, WmbusProfile};
+    use super::{LoRaProfile, RadioProfile, Sx126xDriver, Sx126xExt, WmbusProfile};
     use crate::wmbus::radio::hal::{Hal, HalError};
-    use crate::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, SpreadingFactor};
+    use crate::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, PacketType, SpreadingFactor};
 
     /// A test HAL that records every command/register write in order and answers
     /// `GetStatus` (0xC0) with a chip mode derived from the last mode command, so state
@@ -2677,5 +2719,27 @@ mod tests {
             driver.get_lora_frequency_error().unwrap().is_none(),
             "GFSK profile has no LoRa frequency-error register"
         );
+    }
+
+    #[tokio::test]
+    async fn sx126x_ext_switches_profile_through_trait() {
+        // Drive the switch through the `Sx126xExt` bound a generic scheduler/dual-mode
+        // handle would use, and confirm `active_packet_type` reflects each switch.
+        async fn switch<D: Sx126xExt>(d: &mut D, p: &RadioProfile) {
+            d.switch_profile(p).await.unwrap();
+        }
+
+        let mut driver = Sx126xDriver::new(RecordingHal::default(), 32_000_000);
+        assert_eq!(driver.active_packet_type(), None);
+
+        switch(&mut driver, &RadioProfile::LoRa(lora_profile())).await;
+        assert_eq!(driver.active_packet_type(), Some(PacketType::LoRa));
+
+        switch(
+            &mut driver,
+            &RadioProfile::Wmbus(WmbusProfile::mode_c(868_950_000, 100_000)),
+        )
+        .await;
+        assert_eq!(driver.active_packet_type(), Some(PacketType::Gfsk));
     }
 }
