@@ -7,11 +7,10 @@
 use crate::error::MBusError;
 use crate::mbus::frame::{pack_frame, parse_frame, MBusFrame};
 use crate::mbus::mbus_protocol::StateMachine;
+use crate::mbus::transport::{fill_exact, ByteTransport, SerialTransport};
 use crate::payload::record::MBusRecord;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{sleep, timeout};
-use tokio_serial::SerialPortBuilderExt;
 
 /// Standard M-Bus baud rates as defined in EN 13757-2
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -166,12 +165,10 @@ impl CollisionStatistics {
 
 /// Represents a handle to the M-Bus serial connection, encapsulating the tokio_serial::SerialPort.
 pub struct MBusDeviceHandle {
-    port: tokio_serial::SerialStream,
+    transport: Box<dyn ByteTransport>,
     config: SerialConfig,
     /// Current effective baud rate
     current_baud_rate: MBusBaudRate,
-    /// Port name for reconnection during baud rate switching
-    port_name: String,
     /// Statistics for collision detection and performance monitoring
     collision_stats: CollisionStatistics,
 }
@@ -233,19 +230,12 @@ impl MBusDeviceHandle {
         config: &SerialConfig,
         baud_rate: MBusBaudRate,
     ) -> Result<MBusDeviceHandle, MBusError> {
-        let port = tokio_serial::new(port_name, baud_rate.as_u32())
-            .data_bits(tokio_serial::DataBits::Eight)
-            .stop_bits(tokio_serial::StopBits::One)
-            .parity(tokio_serial::Parity::Even)
-            .timeout(baud_rate.timeout())
-            .open_native_async()
-            .map_err(|e| MBusError::SerialPortError(e.to_string()))?;
+        let transport = SerialTransport::open(port_name, baud_rate)?;
 
         let mut handle = MBusDeviceHandle {
-            port,
+            transport: Box::new(transport),
             config: config.clone(),
             current_baud_rate: baud_rate,
-            port_name: port_name.to_string(),
             collision_stats: CollisionStatistics::default(),
         };
 
@@ -291,18 +281,10 @@ impl MBusDeviceHandle {
             return Ok(()); // Already at desired rate
         }
 
-        // Note: The port will be replaced, which automatically closes the old connection
-
-        // Reconnect at new baud rate
-        let port = tokio_serial::new(&self.port_name, new_baud_rate.as_u32())
-            .data_bits(tokio_serial::DataBits::Eight)
-            .stop_bits(tokio_serial::StopBits::One)
-            .parity(tokio_serial::Parity::Even)
-            .timeout(new_baud_rate.timeout())
-            .open_native_async()
+        // Reconfigure the transport; SerialTransport rebuilds the port, which closes the old one.
+        self.transport
+            .set_baud_rate(new_baud_rate)
             .map_err(|e| MBusError::SerialPortError(e.to_string()))?;
-
-        self.port = port;
         self.current_baud_rate = new_baud_rate;
         self.collision_stats.baud_rate_switches += 1;
 
@@ -396,11 +378,11 @@ impl MBusDeviceHandle {
     /// and then writes the data to the serial port. It also flushes the serial port to ensure the frame is fully transmitted.
     pub async fn send_frame(&mut self, frame: &MBusFrame) -> Result<(), MBusError> {
         let data = pack_frame(frame);
-        self.port
+        self.transport
             .write_all(&data)
             .await
             .map_err(|e| MBusError::SerialPortError(e.to_string()))?;
-        self.port
+        self.transport
             .flush()
             .await
             .map_err(|e| MBusError::SerialPortError(e.to_string()))
@@ -461,7 +443,7 @@ impl MBusDeviceHandle {
     async fn recv_frame_single_attempt(&mut self, to: Duration) -> Result<MBusFrame, MBusError> {
         // Read first byte (start)
         let mut start = [0u8; 1];
-        let n = timeout(to, self.port.read(&mut start))
+        let n = timeout(to, self.transport.read(&mut start))
             .await
             .map_err(|_| MBusError::NomError("timeout".into()))
             .and_then(|res| res.map_err(|e| MBusError::SerialPortError(e.to_string())))?;
@@ -480,7 +462,7 @@ impl MBusDeviceHandle {
             0x10 => 5usize, // SHORT
             0x68 => {
                 let mut lenbuf = [0u8; 2];
-                timeout(to, self.port.read_exact(&mut lenbuf))
+                timeout(to, fill_exact(&mut *self.transport, &mut lenbuf))
                     .await
                     .map_err(|_| MBusError::NomError("timeout".into()))
                     .and_then(|res| res.map_err(|e| MBusError::SerialPortError(e.to_string())))?;
@@ -495,7 +477,7 @@ impl MBusDeviceHandle {
         let remaining = total_len.saturating_sub(buf.len());
         if remaining > 0 {
             let mut rest = vec![0u8; remaining];
-            timeout(to, self.port.read_exact(&mut rest))
+            timeout(to, fill_exact(&mut *self.transport, &mut rest))
                 .await
                 .map_err(|_| MBusError::NomError("timeout".into()))
                 .and_then(|res| res.map_err(|e| MBusError::SerialPortError(e.to_string())))?;

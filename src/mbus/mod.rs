@@ -6,6 +6,7 @@ pub mod mbus_protocol;
 pub mod secondary_addressing;
 pub mod serial;
 pub mod simd;
+pub mod transport;
 
 #[cfg(test)]
 pub mod serial_mock;
