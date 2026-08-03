@@ -1,34 +1,27 @@
-//! SX1262 LoRa Driver with PIO IRQ Debouncing
+//! SX1262 PIO-IRQ demo driver — **EXPERIMENTAL. MOCK SPI. NOT the canonical path.**
 //!
-//! This module provides a high-level driver for the Semtech SX1262 LoRa transceiver
-//! with integrated PIO-based IRQ debouncing for Raspberry Pi 5. It eliminates noisy
-//! GPIO interrupts and provides reliable packet reception with minimal CPU overhead.
+//! > ⚠️ **Quarantined / deprecated.** This module is an early PIO IRQ-debouncing *sketch*.
+//! > Its SPI layer is a **mock** — [`Sx1262Driver::spi_command`] performs no real I/O (it
+//! > only logs and sleeps), so this driver never talks to hardware and is **not** wired to
+//! > the [`Hal`](crate::wmbus::radio::hal::Hal) abstraction the rest of the crate uses.
+//! >
+//! > It is **excluded from the crate's dual-mode wM-Bus/LoRa support.** The canonical
+//! > single-radio dual-mode path is
+//! > [`Sx126xDriver`](crate::wmbus::radio::driver::Sx126xDriver) with its
+//! > [`RadioProfile`](crate::wmbus::radio::driver::RadioProfile) and
+//! > [`switch_profile`](crate::wmbus::radio::driver::Sx126xDriver::switch_profile), driven by
+//! > [`ProfileScheduler`](crate::wmbus::radio::scheduler::ProfileScheduler). In particular
+//! > this module's `configure_for_wmbus` does **not** configure a real GFSK wM-Bus profile —
+//! > it applies LoRa parameters — which is one reason it is quarantined here rather than used.
+//! >
+//! > Retained only as a reference for a future, real PIO-IRQ integration into the canonical
+//! > driver (behind the `pio-irq` feature). Do not build new functionality on it.
 //!
-//! ## Features
+//! ## Original design notes (aspirational)
 //!
-//! - **PIO IRQ Debouncing**: Hardware-accelerated interrupt filtering
-//! - **SPI Communication**: Efficient register access and packet I/O
-//! - **DIO Pin Management**: TX/RX done detection with sub-10μs latency
-//! - **LoRa Configuration**: Optimized for wM-Bus metering applications
-//! - **Error Recovery**: Robust handling of transient failures
-//!
-//! ## Usage
-//!
-//! ```rust,no_run
-//! use mbus_rs::wmbus::radio::lora::sx1262::Sx1262Driver;
-//!
-//! let mut driver = Sx1262Driver::new()?;
-//! driver.configure_for_wmbus(868_950_000, 125_000)?; // 868.95 MHz, 125 kHz
-//!
-//! // Start receiving with PIO debouncing
-//! driver.set_rx_continuous()?;
-//!
-//! // Check for packets (non-blocking)
-//! if driver.is_packet_ready()? {
-//!     let packet = driver.read_packet()?;
-//!     println!("Received {} bytes", packet.len());
-//! }
-//! ```
+//! - **PIO IRQ Debouncing**: hardware-accelerated interrupt filtering
+//! - **DIO Pin Management**: TX/RX done detection
+//! - **Error Recovery**: handling of transient failures
 
 use crate::wmbus::radio::irq::{IrqMask, IrqMaskBit, IrqStatus};
 use crate::wmbus::radio::pio_irq::{
@@ -130,7 +123,14 @@ impl Default for LoRaConfig {
     }
 }
 
-/// SX1262 driver with PIO IRQ integration
+/// SX1262 driver with PIO IRQ integration.
+///
+/// See the module docs: this is an experimental, **mock-SPI** demo and **not** the canonical
+/// dual-mode driver. Use [`Sx126xDriver`](crate::wmbus::radio::driver::Sx126xDriver) instead.
+#[deprecated(
+    note = "experimental PIO-IRQ demo with mock SPI; not wired to Hal and not the canonical \
+            dual-mode path. Use Sx126xDriver + RadioProfile/switch_profile (see module docs)."
+)]
 pub struct Sx1262Driver {
     irq_backend: Arc<dyn PioIrqBackend>,
     config: LoRaConfig,
@@ -139,6 +139,7 @@ pub struct Sx1262Driver {
     last_snr: i8,
 }
 
+#[allow(deprecated)] // this driver is intentionally deprecated; its own impl still uses it
 impl Sx1262Driver {
     /// Create new SX1262 driver with PIO IRQ backend
     pub fn new() -> Result<Self> {
@@ -173,7 +174,13 @@ impl Sx1262Driver {
         Ok(())
     }
 
-    /// Configure for wM-Bus operation
+    /// Configure for wM-Bus operation.
+    ///
+    /// ⚠️ **Mock / not a real wM-Bus profile.** Despite the name, this applies *LoRa*
+    /// parameters (via [`Sx1262Driver::configure_lora`]) — wM-Bus is GFSK, not LoRa — and
+    /// performs no real SPI. For a genuine wM-Bus (GFSK) configuration use
+    /// [`Sx126xDriver::configure_for_wmbus`](crate::wmbus::radio::driver::Sx126xDriver::configure_for_wmbus)
+    /// or [`switch_profile`](crate::wmbus::radio::driver::Sx126xDriver::switch_profile).
     pub fn configure_for_wmbus(&mut self, frequency_hz: u32, bandwidth_hz: u32) -> Result<()> {
         self.config.frequency_hz = frequency_hz;
         self.config.bandwidth_hz = bandwidth_hz;
@@ -550,6 +557,7 @@ impl Sx1262Driver {
     }
 }
 
+#[allow(deprecated)]
 impl Drop for Sx1262Driver {
     fn drop(&mut self) {
         if self.initialized {
@@ -560,6 +568,7 @@ impl Drop for Sx1262Driver {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // exercising the deprecated demo driver on purpose
 mod tests {
     use super::*;
 

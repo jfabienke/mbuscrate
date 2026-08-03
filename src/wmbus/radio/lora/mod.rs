@@ -47,6 +47,9 @@ pub use params::{
 pub use single_channel::{DutyCycleLimiter, SingleChannelConfig};
 pub use smart_decoder::{DeviceStats, SmartDecoder};
 
-// Export SX1262 driver when PIO IRQ feature is enabled
+// Export SX1262 driver when PIO IRQ feature is enabled.
+// NOTE: `Sx1262Driver` is a deprecated experimental mock (see its module docs); the
+// re-export is retained for the `pio-irq` example/tests, hence the allow below.
 #[cfg(feature = "pio-irq")]
+#[allow(deprecated)]
 pub use sx1262::{LoRaConfig, Sx1262Driver, Sx1262Error};
