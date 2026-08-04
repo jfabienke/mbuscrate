@@ -81,14 +81,46 @@ impl Rfm69Source {
         Ok(())
     }
 
-    /// Non-blocking poll for one received frame `(bytes, rssi_dbm)`, if available.
-    pub async fn poll(&mut self) -> Result<Option<(Vec<u8>, i16)>> {
+    /// Non-blocking poll for one received frame `(bytes, rssi_dbm, freq_offset_hz)`,
+    /// if available. `freq_offset_hz` is the AFC-measured carrier offset from the
+    /// 868.95 MHz center for that frame (0 if the driver did not report one).
+    pub async fn poll(&mut self) -> Result<Option<(Vec<u8>, i16, i32)>> {
         use mbus_rs::wmbus::radio::radio_driver::RadioDriver;
         Ok(self
             .driver
             .get_received_packet()
             .await?
-            .map(|p| (p.data, p.rssi_dbm)))
+            .map(|p| (p.data, p.rssi_dbm, p.freq_error_hz.unwrap_or(0))))
+    }
+
+    /// wM-Bus radio mode this source receives on. The RFM69 is a single-channel
+    /// mode-C receiver (868.95 MHz, 100 kbps NRZ), so this is always "C".
+    pub fn mode(&self) -> &'static str {
+        "C"
+    }
+
+    /// Current radio operating-mode byte (RegOpMode) for gateway health/watchdog, or
+    /// `None` if the read fails. Mode field (bits 4:2): 0x10 = RX, 0x04 = STANDBY.
+    pub async fn opmode(&self) -> Option<u8> {
+        self.driver.read_opmode().await.ok()
+    }
+
+    /// Re-arm the receiver (drain FIFO, restart RX) as cheap in-process recovery for a
+    /// radio that has fallen out of RX. The supervisor escalates to a full process
+    /// restart if this does not restore reception.
+    pub async fn recover(&mut self) -> Result<()> {
+        use mbus_rs::wmbus::radio::radio_driver::RadioDriver;
+        self.driver.start_receive().await?;
+        Ok(())
+    }
+
+    /// Park the radio for process shutdown: stop the interrupt task and put the chip
+    /// to sleep so the SPI bus is quiescent before the handle is dropped. A process
+    /// that dies mid-SPI-transaction can wedge in uninterruptible D-state holding the
+    /// bus until reboot.
+    pub async fn stop(&mut self) -> Result<()> {
+        self.driver.shutdown().await?;
+        Ok(())
     }
 }
 

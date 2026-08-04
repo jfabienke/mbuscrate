@@ -23,6 +23,19 @@ const DEVICES: TableDefinition<u32, &str> = TableDefinition::new("devices");
 const EVENTS: TableDefinition<u64, &str> = TableDefinition::new("events");
 /// Small key/value table for bookkeeping (e.g. the one-time SQLite import marker).
 const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
+/// META counter of CRC-failed frames whose (untrustworthy) meter id matched no known
+/// device — contained at ingestion instead of minting ghost device records.
+const UNATTRIBUTED_KEY: &str = "unattributed_crc_fail";
+/// Durable AES keys: meter id (decimal device address) -> 32-hex AES-128 key. Persisting
+/// keys here lets the gateway load credentials locally at startup — before, and independent
+/// of, the MQTT control-topic pull.
+const KEYS: TableDefinition<u32, &str> = TableDefinition::new("keys");
+
+/// A well-formed AES-128 key is exactly 32 hex chars (16 bytes). Validated before any key is
+/// stored; the key value itself is never logged.
+fn is_valid_aes128_hex(key: &str) -> bool {
+    key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit())
+}
 
 /// Persisted per-device record (JSON-encoded as the `devices` table value).
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -43,6 +56,13 @@ struct DeviceRecord {
     frames_fail: u64,
     last_rssi: i16,
     last_reading: Option<String>,
+    /// wM-Bus radio mode this device is received on ("C"/"T"/"S"; "" for records
+    /// written before mode tracking existed).
+    #[serde(default)]
+    mode: String,
+    /// Last AFC-measured carrier offset from the 868.95 MHz center, in Hz.
+    #[serde(default)]
+    last_freq_offset_hz: i32,
 }
 
 /// Persisted event record (JSON-encoded as the `events` table value).
@@ -97,6 +117,10 @@ pub struct Observation {
     pub has_key: bool,
     /// A decoded human reading (e.g. "25.340 m3"), once decryption is available.
     pub reading: Option<String>,
+    /// Radio mode this frame was received on ("C" today — single-channel mode-C RX).
+    pub mode: String,
+    /// AFC-measured carrier offset from the 868.95 MHz center for this frame, in Hz.
+    pub freq_offset_hz: i32,
 }
 
 pub struct DeviceManager {
@@ -117,6 +141,7 @@ impl DeviceManager {
             w.open_table(DEVICES)?;
             w.open_table(EVENTS)?;
             w.open_table(META)?;
+            w.open_table(KEYS)?; // initialize the keys table on first database creation
         }
         w.commit()?;
         Ok(Self {
@@ -140,6 +165,55 @@ impl DeviceManager {
             sample_every: 1,
             silence_after: 0,
         })
+    }
+
+    /// Durably store an AES key for a meter (write-through when a key is pulled upstream).
+    ///
+    /// Validates the key is well-formed hex before writing (a malformed key is rejected, not
+    /// stored), and the key value itself is never logged. The write is a single committed redb
+    /// transaction, so persistence is atomic — a caller can treat success as durable.
+    pub fn store_key(&self, meterid: u32, hexkey: &str) -> Result<()> {
+        if meterid == 0 || !is_valid_aes128_hex(hexkey) {
+            anyhow::bail!("refusing to store malformed AES key for meter {meterid}");
+        }
+        let w = self.db.begin_write()?;
+        {
+            let mut t = w.open_table(KEYS)?;
+            t.insert(meterid, hexkey)?;
+        }
+        w.commit()?;
+        Ok(())
+    }
+
+    /// Remove a persisted AES key (e.g. one that turned out to be bound to the wrong
+    /// meter id). Returns whether a key was present.
+    pub fn remove_key(&self, meterid: u32) -> Result<bool> {
+        let w = self.db.begin_write()?;
+        let existed;
+        {
+            let mut t = w.open_table(KEYS)?;
+            existed = t.remove(meterid)?.is_some();
+        }
+        w.commit()?;
+        Ok(existed)
+    }
+
+    /// Load all persisted `(meterid, hexkey)` pairs, to seed the keystore at startup before
+    /// MQTT/radio initialization.
+    pub fn load_keys(&self) -> Result<Vec<(u32, String)>> {
+        let r = self.db.begin_read()?;
+        let t = match r.open_table(KEYS) {
+            Ok(t) => t,
+            // A store created before the keys table existed: nothing to load.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (k, v) = row?;
+            out.push((k.value(), v.value().to_string()));
+        }
+        Ok(out)
     }
 
     /// Append events under fresh monotonic ids within an existing write transaction.
@@ -167,76 +241,156 @@ impl DeviceManager {
     }
 
     /// Record one decoded frame: upsert the device record and emit significant events.
-    pub fn record_frame(&self, o: &Observation) -> Result<()> {
+    ///
+    /// Ghost containment: every field of a CRC-failed frame — including the meter id —
+    /// is untrustworthy, so such a frame can never *create* a device (it is counted in
+    /// the global [`UNATTRIBUTED_KEY`] tally instead, returning `false`), and for a
+    /// known device it only bumps the failure counters: garbled contents must not
+    /// rewrite identity, reset silence, or emit events.
+    pub fn record_frame(&self, o: &Observation) -> Result<bool> {
         let now = now_unix();
         let txn = self.db.begin_write()?;
         let mut events: Vec<(&str, String)> = Vec::new();
+        let mut attributed = true;
         {
             let mut dtab = txn.open_table(DEVICES)?;
             let prev: Option<DeviceRecord> = dtab
                 .get(o.meter_id)?
                 .map(|g| serde_json::from_str(g.value()))
                 .transpose()?;
-            let is_new = prev.is_none();
-            let prev_has_key = prev.as_ref().map(|r| r.has_key).unwrap_or(false);
-            let was_silent = prev.as_ref().map(|r| r.silent).unwrap_or(false);
-            let prev_reading = prev.as_ref().and_then(|r| r.last_reading.clone());
 
-            let type_name = device_type_name(o.device_type).to_string();
-            let mut rec = prev.unwrap_or_default();
-            rec.manufacturer = o.manufacturer.clone();
-            rec.version = o.version;
-            rec.device_type = o.device_type;
-            rec.type_name = type_name.clone();
-            rec.frame_type = o.frame_type.clone();
-            rec.ci = o.ci;
-            rec.encrypted = o.encrypted;
-            rec.has_key = o.has_key;
-            rec.silent = false;
-            if is_new {
-                rec.first_seen = now;
-            }
-            rec.last_seen = now;
-            rec.frames_total += 1;
-            if o.crc_ok {
-                rec.frames_ok += 1;
-            } else {
-                rec.frames_fail += 1;
-            }
-            rec.last_rssi = o.rssi;
-            if let Some(r) = &o.reading {
-                rec.last_reading = Some(r.clone());
-            }
-            let total = rec.frames_total;
-            dtab.insert(o.meter_id, serde_json::to_string(&rec)?.as_str())?;
-
-            if is_new {
-                events.push((
-                    "first_seen",
-                    format!(
-                        "{} {} v{} type{}",
-                        o.manufacturer, type_name, o.version, o.frame_type
-                    ),
-                ));
-            }
-            if o.has_key && !prev_has_key {
-                events.push(("key", "AES key available".to_string()));
-            }
-            if was_silent {
-                events.push(("resumed", format!("rssi={}", o.rssi)));
-            }
-            if let Some(r) = &o.reading {
-                if prev_reading.as_deref() != Some(r.as_str()) {
-                    events.push(("reading", r.clone()));
+            match (prev, o.crc_ok) {
+                (None, false) => {
+                    drop(dtab);
+                    let mut mtab = txn.open_table(META)?;
+                    let n: u64 = mtab
+                        .get(UNATTRIBUTED_KEY)?
+                        .map(|g| g.value().parse().unwrap_or(0))
+                        .unwrap_or(0);
+                    mtab.insert(UNATTRIBUTED_KEY, (n + 1).to_string().as_str())?;
+                    attributed = false;
                 }
-            }
-            if total.is_multiple_of(self.sample_every) {
-                events.push(("sample", format!("rssi={} crc_ok={}", o.rssi, o.crc_ok)));
+                (Some(mut rec), false) => {
+                    rec.frames_total += 1;
+                    rec.frames_fail += 1;
+                    rec.last_rssi = o.rssi;
+                    let total = rec.frames_total;
+                    dtab.insert(o.meter_id, serde_json::to_string(&rec)?.as_str())?;
+                    if total.is_multiple_of(self.sample_every) {
+                        events.push(("sample", format!("rssi={} crc_ok=false", o.rssi)));
+                    }
+                }
+                (prev, true) => {
+                    let is_new = prev.is_none();
+                    let prev_has_key = prev.as_ref().map(|r| r.has_key).unwrap_or(false);
+                    let was_silent = prev.as_ref().map(|r| r.silent).unwrap_or(false);
+                    let prev_reading = prev.as_ref().and_then(|r| r.last_reading.clone());
+
+                    let type_name = device_type_name(o.device_type).to_string();
+                    let mut rec = prev.unwrap_or_default();
+                    rec.manufacturer = o.manufacturer.clone();
+                    rec.version = o.version;
+                    rec.device_type = o.device_type;
+                    rec.type_name = type_name.clone();
+                    rec.frame_type = o.frame_type.clone();
+                    rec.ci = o.ci;
+                    rec.encrypted = o.encrypted;
+                    rec.has_key = o.has_key;
+                    rec.mode = o.mode.clone();
+                    rec.last_freq_offset_hz = o.freq_offset_hz;
+                    rec.silent = false;
+                    if is_new {
+                        rec.first_seen = now;
+                    }
+                    rec.last_seen = now;
+                    rec.frames_total += 1;
+                    rec.frames_ok += 1;
+                    rec.last_rssi = o.rssi;
+                    if let Some(r) = &o.reading {
+                        rec.last_reading = Some(r.clone());
+                    }
+                    let total = rec.frames_total;
+                    dtab.insert(o.meter_id, serde_json::to_string(&rec)?.as_str())?;
+
+                    if is_new {
+                        events.push((
+                            "first_seen",
+                            format!(
+                                "{} {} v{} type{}",
+                                o.manufacturer, type_name, o.version, o.frame_type
+                            ),
+                        ));
+                    }
+                    if o.has_key && !prev_has_key {
+                        events.push(("key", "AES key available".to_string()));
+                    }
+                    if was_silent {
+                        events.push(("resumed", format!("rssi={}", o.rssi)));
+                    }
+                    if let Some(r) = &o.reading {
+                        if prev_reading.as_deref() != Some(r.as_str()) {
+                            events.push(("reading", r.clone()));
+                        }
+                    }
+                    if total.is_multiple_of(self.sample_every) {
+                        events.push(("sample", format!("rssi={} crc_ok=true", o.rssi)));
+                    }
+                }
             }
         }
         Self::append_events(&txn, now, o.meter_id, &events)?;
         txn.commit()?;
-        Ok(())
+        Ok(attributed)
+    }
+
+    /// Total CRC-failed frames contained at ingestion because their id matched no
+    /// known device.
+    pub fn unattributed_crc_fail(&self) -> Result<u64> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(META)?;
+        Ok(t.get(UNATTRIBUTED_KEY)?
+            .map(|g| g.value().parse().unwrap_or(0))
+            .unwrap_or(0))
+    }
+
+    /// Remove devices that never produced a CRC-valid frame (`frames_ok == 0`), and
+    /// their events — garbled-id ghosts minted before ingestion containment existed.
+    /// A real meter caught by this re-registers on its first valid frame. Returns
+    /// `(devices_removed, events_removed)`.
+    pub fn prune_ghosts(&self) -> Result<(usize, usize)> {
+        let txn = self.db.begin_write()?;
+        let mut removed_events = 0usize;
+        let ghosts: Vec<u32>;
+        {
+            let mut dtab = txn.open_table(DEVICES)?;
+            ghosts = dtab
+                .iter()?
+                .filter_map(|e| e.ok())
+                .filter_map(|(k, v)| {
+                    let rec: DeviceRecord = serde_json::from_str(v.value()).ok()?;
+                    (rec.frames_ok == 0).then(|| k.value())
+                })
+                .collect();
+            for id in &ghosts {
+                dtab.remove(*id)?;
+            }
+            let ghost_set: std::collections::HashSet<u32> = ghosts.iter().copied().collect();
+            let mut etab = txn.open_table(EVENTS)?;
+            let doomed: Vec<u64> = etab
+                .iter()?
+                .filter_map(|e| e.ok())
+                .filter_map(|(k, v)| {
+                    let ev: EventRecord = serde_json::from_str(v.value()).ok()?;
+                    ghost_set.contains(&ev.meter_id).then(|| k.value())
+                })
+                .collect();
+            for k in doomed {
+                etab.remove(k)?;
+                removed_events += 1;
+            }
+        }
+        txn.commit()?;
+        Ok((ghosts.len(), removed_events))
     }
 
     /// Record a periodic airwave-sweep discovery summary as a global event
@@ -289,8 +443,8 @@ impl DeviceManager {
         let txn = self.db.begin_read()?;
 
         println!(
-            "{:>10}  {:>3}  {:<15}  {:>7}  {:>11}  {:>6}  {:>3}",
-            "meter", "mfr", "type", "seen", "frames(ok)", "rssi", "key"
+            "{:>10}  {:>3}  {:<15}  {:>4}  {:>7}  {:>11}  {:>6}  {:>7}  {:>3}",
+            "meter", "mfr", "type", "mode", "seen", "frames(ok)", "rssi", "off(Hz)", "key"
         );
         if let Ok(dtab) = txn.open_table(DEVICES) {
             for entry in dtab.iter()? {
@@ -303,13 +457,25 @@ impl DeviceManager {
                 } else {
                     ago(r.last_seen)
                 };
+                let mode = if r.mode.is_empty() {
+                    "-"
+                } else {
+                    r.mode.as_str()
+                };
                 println!(
-                    "{id:>10}  {:>3}  {:<15}  {seen:>7}  {frames:>11}  {:>4}dBm  {:>3}",
+                    "{id:>10}  {:>3}  {:<15}  {mode:>4}  {seen:>7}  {frames:>11}  {:>4}dBm  {:>+7}  {:>3}",
                     r.manufacturer,
                     r.type_name,
                     r.last_rssi,
+                    r.last_freq_offset_hz,
                     if r.has_key { "yes" } else { "-" },
                 );
+            }
+        }
+
+        if let Ok(n) = self.unattributed_crc_fail() {
+            if n > 0 {
+                println!("({n} unattributed CRC-fail frame(s) contained — no device minted)");
             }
         }
 
@@ -392,6 +558,9 @@ impl DeviceManager {
                         frames_fail: od.frames_fail,
                         last_rssi: od.last_rssi,
                         last_reading: od.last_reading.clone(),
+                        // Old SQLite dumps predate mode/frequency tracking.
+                        mode: String::new(),
+                        last_freq_offset_hz: 0,
                     },
                 };
                 dtab.insert(od.meter_id, serde_json::to_string(&merged)?.as_str())?;
@@ -524,7 +693,25 @@ mod tests {
             rssi: -90,
             has_key,
             reading: None,
+            mode: "C".into(),
+            freq_offset_hz: 0,
         }
+    }
+
+    #[test]
+    fn persists_mode_and_freq_offset() {
+        let dm = DeviceManager::open(&tmp_db(), 20, 600).unwrap();
+        let mut o = obs(74644444, true, false);
+        o.mode = "C".into();
+        o.freq_offset_hz = 305;
+        dm.record_frame(&o).unwrap();
+
+        let txn = dm.db.begin_read().unwrap();
+        let dtab = txn.open_table(DEVICES).unwrap();
+        let raw = dtab.get(74644444u32).unwrap().unwrap();
+        let rec: DeviceRecord = serde_json::from_str(raw.value()).unwrap();
+        assert_eq!(rec.mode, "C");
+        assert_eq!(rec.last_freq_offset_hz, 305);
     }
 
     /// Count events of a given kind for a meter (test helper).
@@ -637,6 +824,94 @@ mod tests {
         let dm = DeviceManager::open(&path, 20, 600).unwrap();
         dm.record_frame(&obs(63398862, true, false)).unwrap();
         assert_eq!(device_counts(&dm, 63398862).0, 2, "count survived reopen");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn has_device(dm: &DeviceManager, meter: u32) -> bool {
+        let txn = dm.db.begin_read().unwrap();
+        let dtab = txn.open_table(DEVICES).unwrap();
+        dtab.get(meter).unwrap().is_some()
+    }
+
+    #[test]
+    fn crc_failed_frames_never_create_devices() {
+        let path = tmp_db();
+        let dm = DeviceManager::open(&path, 1000, 600).unwrap();
+
+        // Unknown id + bad CRC: contained, not minted.
+        assert!(!dm.record_frame(&obs(12345678, false, false)).unwrap());
+        assert!(!dm.record_frame(&obs(12345678, false, false)).unwrap());
+        assert!(!has_device(&dm, 12345678));
+        assert_eq!(dm.unattributed_crc_fail().unwrap(), 2);
+        assert_eq!(count_events(&dm, 12345678, "first_seen"), 0);
+
+        // A valid frame mints the device as usual.
+        assert!(dm.record_frame(&obs(12345678, true, false)).unwrap());
+        assert!(has_device(&dm, 12345678));
+
+        // Bad-CRC frame for a known device: counts the failure, but its garbled
+        // contents must not rewrite identity.
+        let mut garbled = obs(12345678, false, false);
+        garbled.manufacturer = "XXX".into();
+        garbled.device_type = 0x04;
+        assert!(dm.record_frame(&garbled).unwrap());
+        let (total, ok, fail, type_name) = device_counts(&dm, 12345678);
+        assert_eq!((total, ok, fail), (2, 1, 1));
+        assert_eq!(
+            type_name, "Warm Water",
+            "garbled frame must not rewrite identity"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prune_ghosts_removes_never_validated_devices() {
+        let path = tmp_db();
+        let dm = DeviceManager::open(&path, 1000, 600).unwrap();
+        dm.record_frame(&obs(74644444, true, false)).unwrap(); // real device
+
+        // A pre-containment ghost: never CRC-valid, with an event trail.
+        let dump: ImportDump = serde_json::from_str(
+            r#"{
+              "devices":[{"meter_id":63398870,"manufacturer":"KAM","type_name":"Warm Water",
+                          "frames_total":3,"frames_fail":3,"first_seen":100,"last_seen":200}],
+              "events":[{"ts":150,"meter_id":63398870,"kind":"first_seen","detail":"ghost"},
+                        {"ts":180,"meter_id":63398870,"kind":"silent","detail":"no frame"}]
+            }"#,
+        )
+        .unwrap();
+        dm.import_dump(&dump).unwrap();
+        assert!(has_device(&dm, 63398870));
+
+        let (d, e) = dm.prune_ghosts().unwrap();
+        assert_eq!((d, e), (1, 2));
+        assert!(!has_device(&dm, 63398870), "ghost removed");
+        assert!(has_device(&dm, 74644444), "validated device kept");
+        assert_eq!(count_events(&dm, 74644444, "first_seen"), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stores_and_loads_keys_rejecting_malformed_and_surviving_reopen() {
+        let path = tmp_db();
+        let key = "000102030405060708090a0b0c0d0e0f";
+        {
+            let dm = DeviceManager::open(&path, 20, 600).unwrap();
+            dm.store_key(74644444, key).unwrap();
+            // Malformed keys are refused, not stored.
+            assert!(dm.store_key(74644444, "abcd").is_err()); // too short
+            assert!(dm
+                .store_key(74644444, "zz0102030405060708090a0b0c0d0e0f")
+                .is_err()); // non-hex
+            assert!(dm.store_key(0, key).is_err()); // meter 0
+        } // drop -> releases the file
+          // Durable across reopen; the rejected writes left no trace.
+        let dm = DeviceManager::open(&path, 20, 600).unwrap();
+        assert_eq!(dm.load_keys().unwrap(), vec![(74644444, key.to_string())]);
+        // A mis-bound key can be removed; removal is idempotent.
+        assert!(dm.remove_key(74644444).unwrap());
+        assert!(!dm.remove_key(74644444).unwrap());
+        assert!(dm.load_keys().unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
     }
 }

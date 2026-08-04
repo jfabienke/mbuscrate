@@ -68,6 +68,34 @@ use log;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+/// Convert the SX126x LoRa modem frequency-error registers (0x076B..0x076D — a signed
+/// 20-bit value, big-endian, only the low nibble of the first byte is significant) into Hz
+/// for the given LoRa bandwidth in kHz.
+///
+/// The scaling follows the widely-used RadioLib SX126x implementation and assumes the 32 MHz
+/// reference (matching `Sx126xDriver`'s default `xtal_freq`). The sign handling and the
+/// linear scaling with bandwidth are correct by construction; the absolute Hz constant
+/// (1.55/1600) still warrants an on-hardware check against a known offset.
+fn lora_freq_error_hz(regs: [u8; 3], bw_khz: f64) -> i32 {
+    // Assemble the 20-bit value (bit 19 is the sign).
+    let raw = (((regs[0] & 0x0F) as u32) << 16) | ((regs[1] as u32) << 8) | regs[2] as u32;
+    let efe = if raw & 0x0008_0000 != 0 {
+        (raw | 0xFFF0_0000) as i32 // sign-extend negative
+    } else {
+        raw as i32
+    };
+    (1.55 * f64::from(efe) / (1600.0 / bw_khz)).round() as i32
+}
+
+/// Convert the SX126x LoRa `SnrPkt` byte from GetPacketStatus (0x14) into dB.
+///
+/// `SnrPkt` is a *signed* two's-complement byte in quarter-dB units, so the SNR is
+/// `(byte as i8) / 4`. (Earlier code treated this byte as an RSSI — `-(byte)/2` — which is
+/// wrong: it flips the sign and mis-scales, so a real SNR of +5 dB read as roughly -10 dBm.)
+fn lora_snr_db(snr_byte: u8) -> f32 {
+    (snr_byte as i8) as f32 / 4.0
+}
+
 /// Radio operating states based on SX126x chip modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RadioState {
@@ -277,11 +305,160 @@ pub struct Sx126xDriver<H: Hal> {
     rx_base_addr: u8,
     /// Current radio state (tracked for validation and power management)
     current_state: RadioState,
-    /// Current packet type (GFSK or LoRa)
-    #[allow(dead_code)]
+    /// Current packet type (GFSK or LoRa). Written by [`Sx126xDriver::set_packet_type`]
+    /// and read by [`Sx126xDriver::get_lora_frequency_error`] to know whether the LoRa
+    /// frequency-error register is meaningful for the live modem.
     current_packet_type: Option<PacketType>,
     /// Last time state was updated (for timeout detection)
     last_state_change: Option<Instant>,
+}
+
+/// A complete, storable description of one radio operating mode.
+///
+/// A single SX126x runs either a wM-Bus (GFSK) profile or a LoRa profile — never both at
+/// once. `RadioProfile` bundles *all* the caller-facing parameters for a mode so the whole
+/// configuration can be applied in one atomic step by [`Sx126xDriver::switch_profile`]
+/// (standby → packet-type select → modulation → packet params → frequency → sync → IRQ),
+/// rather than being reconstructed field-by-field at each switch.
+#[derive(Debug, Clone)]
+pub enum RadioProfile {
+    /// Wireless M-Bus (GFSK) profile.
+    Wmbus(WmbusProfile),
+    /// LoRa profile.
+    LoRa(LoRaProfile),
+}
+
+impl RadioProfile {
+    /// The SX126x packet (modem) type this profile requires.
+    pub fn packet_type(&self) -> PacketType {
+        match self {
+            RadioProfile::Wmbus(_) => PacketType::Gfsk,
+            RadioProfile::LoRa(_) => PacketType::LoRa,
+        }
+    }
+}
+
+/// Parameters for a wireless M-Bus (GFSK) profile.
+#[derive(Debug, Clone)]
+pub struct WmbusProfile {
+    /// RF carrier frequency in Hz (e.g. `868_950_000` for the EU C/T band).
+    pub frequency_hz: u32,
+    /// On-air bitrate in bits/s (e.g. `100_000` for mode C).
+    pub bitrate: u32,
+}
+
+impl WmbusProfile {
+    /// Mode-C style profile: the given carrier and bitrate with the standard wM-Bus GFSK
+    /// framing that [`Sx126xDriver::apply_wmbus_profile`] applies.
+    pub fn mode_c(frequency_hz: u32, bitrate: u32) -> Self {
+        Self {
+            frequency_hz,
+            bitrate,
+        }
+    }
+}
+
+/// Parameters for a LoRa profile.
+#[derive(Debug, Clone)]
+pub struct LoRaProfile {
+    /// RF carrier frequency in Hz.
+    pub frequency_hz: u32,
+    /// Spreading factor (SF5..SF12).
+    pub sf: SpreadingFactor,
+    /// Signal bandwidth.
+    pub bw: LoRaBandwidth,
+    /// Coding rate (4/5..4/8).
+    pub cr: CodingRate,
+    /// TX power in dBm.
+    pub power_dbm: i8,
+    /// Optional LoRa sync word (network id). `None` leaves the chip default in place.
+    pub sync_word: Option<u16>,
+}
+
+/// A received packet tagged with the modem it was captured under, plus the radio metadata
+/// gathered atomically with it.
+///
+/// Produced by [`Sx126xDriver::process_irqs_with_mode`] so a caller holding the driver lock
+/// gets a `(mode, payload, metadata)` tuple that cannot skew if a profile switch happens
+/// immediately after the call returns — the driver stays the single source of truth for
+/// which modem a packet arrived on.
+#[derive(Debug, Clone)]
+pub struct ModeTaggedPacket {
+    /// The modem (GFSK/wM-Bus or LoRa) the packet was received under.
+    pub mode: PacketType,
+    /// Raw payload bytes (undecoded).
+    pub payload: Vec<u8>,
+    /// Instantaneous RSSI for this packet, in dBm.
+    pub rssi_dbm: i16,
+    /// LoRa demodulator metadata; `Some` only when `mode == PacketType::LoRa`.
+    pub lora: Option<LoRaRxInfo>,
+}
+
+/// LoRa-only receive metadata accompanying a [`ModeTaggedPacket`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoRaRxInfo {
+    /// Signal-to-noise ratio for this packet, in dB (signed).
+    pub snr_db: f32,
+    /// Per-packet carrier frequency error in Hz, if the LoRa demodulator reported one.
+    pub freq_error_hz: Option<i32>,
+    /// Active spreading factor.
+    pub sf: SpreadingFactor,
+    /// Active signal bandwidth.
+    pub bw: LoRaBandwidth,
+}
+
+/// Decoded SX126x GetPacketStatus (0x14) fields. RSSI values are in dBm; `snr_db` is a
+/// signed LoRa SNR and is only meaningful for LoRa packets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PacketStatus {
+    /// Per-packet RSSI in dBm (`RssiPkt`).
+    pub rssi_pkt_dbm: i16,
+    /// LoRa SNR in dB (`SnrPkt`, signed).
+    pub snr_db: f32,
+    /// Post-despread signal RSSI in dBm (`SignalRssiPkt`).
+    pub signal_rssi_dbm: i16,
+}
+
+/// SX126x-specific dual-mode capability, layered on top of
+/// [`RadioDriver`](crate::wmbus::radio::radio_driver::RadioDriver).
+///
+/// The common `RadioDriver` trait is chip-agnostic. Switching a single radio between a
+/// wM-Bus (GFSK) and a LoRa [`RadioProfile`] is an SX126x capability, so it lives in this
+/// extension trait rather than widening `RadioDriver` (which the RFM69, for instance,
+/// cannot satisfy for LoRa). A generic dual-mode consumer — a scheduler or dual-mode
+/// handle — bounds on `D: RadioDriver + Sx126xExt` to require it.
+#[async_trait::async_trait]
+pub trait Sx126xExt {
+    /// Atomically switch the radio to a complete [`RadioProfile`]. Leaves the radio in
+    /// standby (see [`Sx126xDriver::switch_profile`]); the caller then starts RX or transmits.
+    async fn switch_profile(
+        &mut self,
+        profile: &RadioProfile,
+    ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError>;
+
+    /// The packet (modem) type currently configured, or `None` if no profile has been
+    /// applied yet.
+    fn active_packet_type(&self) -> Option<PacketType>;
+}
+
+#[async_trait::async_trait]
+impl<H: Hal + Send + Sync> Sx126xExt for Sx126xDriver<H> {
+    async fn switch_profile(
+        &mut self,
+        profile: &RadioProfile,
+    ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
+        // Delegate to the inherent (sync) method. The fully-qualified inherent path cannot
+        // resolve to this trait method, so there is no accidental recursion.
+        Sx126xDriver::switch_profile(self, profile).map_err(|e| {
+            crate::wmbus::radio::radio_driver::RadioDriverError::DeviceError(format!(
+                "profile switch failed: {e:?}"
+            ))
+        })
+    }
+
+    fn active_packet_type(&self) -> Option<PacketType> {
+        self.current_packet_type
+    }
 }
 
 impl<H: Hal> Sx126xDriver<H> {
@@ -378,6 +555,11 @@ impl<H: Hal> Sx126xDriver<H> {
             PacketType::LoRa => 0x01,
         };
         self.hal.write_command(0x8A, &[param])?;
+        // Track the active modem type so mode-aware reads (e.g. the LoRa
+        // frequency-error register) know which demodulator is live. Without this,
+        // `current_packet_type` stayed `None` and `get_lora_frequency_error` always
+        // short-circuited to `Ok(None)`.
+        self.current_packet_type = Some(packet_type);
         Ok(())
     }
 
@@ -783,6 +965,53 @@ impl<H: Hal> Sx126xDriver<H> {
         Ok(None)
     }
 
+    /// Atomically poll for a received packet **and** tag it with the active modem plus its
+    /// receive metadata.
+    ///
+    /// This is the single-source-of-truth reception op for a dual-mode radio: in one
+    /// `&mut self` call it snapshots the current packet type, drains any received payload,
+    /// reads the RSSI, and — in LoRa mode — the frequency error and modulation params. A
+    /// caller holding the driver lock therefore gets a consistent `(mode, payload, metadata)`
+    /// tuple that cannot skew even if a scheduler switches profiles right afterwards (which
+    /// a later `active_packet_type()` query could otherwise miss).
+    ///
+    /// Returns `Ok(None)` when no packet is pending, or when no profile has been applied yet.
+    pub fn process_irqs_with_mode(&mut self) -> Result<Option<ModeTaggedPacket>, DriverError> {
+        // Snapshot the active modem *before* draining the packet.
+        let Some(mode) = self.current_packet_type else {
+            return Ok(None);
+        };
+        let Some(payload) = self.process_irqs()? else {
+            return Ok(None);
+        };
+        let rssi_dbm = self.get_rssi_instant()?;
+        let lora = match mode {
+            PacketType::LoRa => {
+                let freq_error_hz = self.get_lora_frequency_error()?;
+                let snr_db = self.get_packet_status()?.snr_db;
+                match self.current_mod_params {
+                    Some(ModulationParams::LoRa { params }) => Some(LoRaRxInfo {
+                        snr_db,
+                        freq_error_hz,
+                        sf: params.sf,
+                        bw: params.bw,
+                    }),
+                    // LoRa modem selected but no LoRa modulation params recorded: an
+                    // inconsistent radio state. Fail rather than emit a LoRa packet without
+                    // the metadata `ReceivedItem::Lora` requires.
+                    _ => return Err(DriverError::InvalidParams),
+                }
+            }
+            PacketType::Gfsk => None,
+        };
+        Ok(Some(ModeTaggedPacket {
+            mode,
+            payload,
+            rssi_dbm,
+            lora,
+        }))
+    }
+
     /// Configure radio for wireless M-Bus operation
     ///
     /// This is a convenience method that configures all radio parameters for optimal
@@ -832,16 +1061,31 @@ impl<H: Hal> Sx126xDriver<H> {
         frequency_hz: u32,
         bitrate: u32,
     ) -> Result<(), DriverError> {
+        // Select the GFSK modem *before* applying GFSK modulation/packet params.
+        // (Previously omitted here — switching back from a LoRa profile left the modem
+        // in LoRa, so GFSK reception silently failed.)
+        self.set_packet_type(PacketType::Gfsk)?;
+        self.apply_wmbus_profile(&WmbusProfile::mode_c(frequency_hz, bitrate))
+    }
+
+    /// Apply the parameter set for a wM-Bus (GFSK) profile: modulation, packet framing,
+    /// CRC, whitening, sync word, PA/TX, buffers and IRQ routing.
+    ///
+    /// Assumes the GFSK packet type is already selected (see [`Sx126xDriver::set_packet_type`])
+    /// and the radio is in standby. Both [`Sx126xDriver::configure_for_wmbus`] and
+    /// [`Sx126xDriver::switch_profile`] funnel through here, so there is a single
+    /// GFSK-apply path.
+    pub fn apply_wmbus_profile(&mut self, profile: &WmbusProfile) -> Result<(), DriverError> {
         // Set RF frequency
-        self.set_rf_frequency(frequency_hz)?;
+        self.set_rf_frequency(profile.frequency_hz)?;
 
         // Configure GFSK modulation parameters
         let mod_params = ModulationParams::Gfsk {
             params: GfskModParams {
-                bitrate,
-                modulation_shaping: 1, // Gaussian 0.5 (typical for wM-Bus)
-                bandwidth: 156,        // 156 kHz receiver bandwidth
-                fdev: bitrate / 2,     // Frequency deviation = bitrate/2 (typical FSK)
+                bitrate: profile.bitrate,
+                modulation_shaping: 1,     // Gaussian 0.5 (typical for wM-Bus)
+                bandwidth: 156,            // 156 kHz receiver bandwidth
+                fdev: profile.bitrate / 2, // Frequency deviation = bitrate/2 (typical FSK)
             },
         };
         self.set_modulation_params(mod_params)?;
@@ -1156,21 +1400,46 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// # Returns
     ///
-    /// * `Ok((rssi_avg, rssi_sync, afc_freq_error))` - Packet statistics
+    /// * `Ok((rssi_pkt, rssi_sync))` - Packet RSSI values in dBm
     /// * `Err(DriverError)` - Read failed
-    pub fn get_packet_status(&mut self) -> Result<(i16, i16, i32), DriverError> {
+    ///
+    /// Note: `GetPacketStatus` does NOT report frequency error — its three bytes are
+    /// RSSI/SNR fields (LoRa: RssiPkt, SnrPkt, SignalRssiPkt; GFSK: RxStatus, RssiSync,
+    /// RssiAvg). A previous version mislabeled the third byte as "FreqError"; the real
+    /// per-packet frequency error comes from [`Self::get_lora_frequency_error`].
+    pub fn get_packet_status(&mut self) -> Result<PacketStatus, DriverError> {
         let mut status = [0u8; 3];
         self.hal.read_command(0x14, &mut status)?; // GetPacketStatus command
 
-        // For GFSK packets:
-        // status[0] = RssiAvg (average RSSI during packet)
-        // status[1] = RssiSync (RSSI at sync detection)
-        // status[2] = FreqError (AFC frequency error)
-        let rssi_avg = -(status[0] as i16) / 2;
-        let rssi_sync = -(status[1] as i16) / 2;
-        let freq_error = status[2] as i8 as i32; // Sign-extend to i32
+        // LoRa: status[0] = RssiPkt, status[1] = SnrPkt (signed, quarter-dB),
+        //       status[2] = SignalRssiPkt.
+        Ok(PacketStatus {
+            rssi_pkt_dbm: -(status[0] as i16) / 2,
+            snr_db: lora_snr_db(status[1]),
+            signal_rssi_dbm: -(status[2] as i16) / 2,
+        })
+    }
 
-        Ok((rssi_avg, rssi_sync, freq_error))
+    /// Read the LoRa modem's per-packet frequency-error estimate, in Hz.
+    ///
+    /// Returns `Ok(None)` when the radio is not in LoRa mode (or no LoRa modulation is
+    /// configured): the SX126x exposes a per-packet frequency error only from its LoRa
+    /// demodulator — in GFSK there is no equivalent register, so this is `None` there.
+    ///
+    /// In LoRa mode it reads the signed 20-bit value from registers 0x076B..0x076D and
+    /// scales it by the configured bandwidth (see [`lora_freq_error_hz`]).
+    pub fn get_lora_frequency_error(&mut self) -> Result<Option<i32>, DriverError> {
+        match self.current_packet_type {
+            Some(PacketType::LoRa) => {}
+            _ => return Ok(None),
+        }
+        let bw_khz = match self.current_mod_params {
+            Some(ModulationParams::LoRa { params }) => params.bw.bandwidth_khz(),
+            _ => return Ok(None),
+        };
+        let mut regs = [0u8; 3];
+        self.hal.read_register(0x076B, &mut regs)?; // SX126x LoRa FreqError[19:0]
+        Ok(Some(lora_freq_error_hz(regs, bw_khz)))
     }
 
     /// Get device error status
@@ -1522,11 +1791,36 @@ impl<H: Hal> Sx126xDriver<H> {
         cr: CodingRate,
         power_dbm: i8,
     ) -> Result<(), DriverError> {
+        // Select the LoRa modem before applying LoRa modulation/packet params.
+        self.set_packet_type(PacketType::LoRa)?;
+        self.apply_lora_profile(&LoRaProfile {
+            frequency_hz,
+            sf,
+            bw,
+            cr,
+            power_dbm,
+            sync_word: None,
+        })
+    }
+
+    /// Apply the parameter set for a LoRa profile: modulation (with automatic LDRO),
+    /// packet params, frequency, optional sync word, PA/TX, buffers and IRQ routing.
+    ///
+    /// Assumes the LoRa packet type is already selected and the radio is in standby. Both
+    /// [`Sx126xDriver::configure_for_lora`] and [`Sx126xDriver::switch_profile`] funnel
+    /// through here, so there is a single LoRa-apply path.
+    pub fn apply_lora_profile(&mut self, profile: &LoRaProfile) -> Result<(), DriverError> {
+        let LoRaProfile {
+            frequency_hz,
+            sf,
+            bw,
+            cr,
+            power_dbm,
+            sync_word,
+        } = *profile;
+
         // Set RF frequency
         self.set_rf_frequency(frequency_hz)?;
-
-        // Set packet type to LoRa
-        self.set_packet_type(PacketType::LoRa)?;
 
         // Configure LoRa modulation parameters
         // Per AN1200.22: Enable LDRO for SF11/SF12 when BW <= 125kHz
@@ -1564,6 +1858,11 @@ impl<H: Hal> Sx126xDriver<H> {
             },
         };
         self.set_packet_params(packet_params)?;
+
+        // Optional LoRa sync word (network id) for private-network filtering.
+        if let Some(network_id) = sync_word {
+            self.set_lora_sync_word(network_id)?;
+        }
 
         // Configure power amplifier
         self.set_pa_config(0x04, 0x00, 0x00)?; // Standard PA config
@@ -1621,11 +1920,43 @@ impl<H: Hal> Sx126xDriver<H> {
 
     /// Switch radio to GFSK mode
     ///
-    /// Convenience method to configure the radio for GFSK operation (wM-Bus).
-    /// Sets packet type to GFSK and updates internal state.
+    /// Convenience method that only issues `SetPacketType(GFSK)`. It does **not** reapply
+    /// modulation/packet/frequency/sync state, so it cannot by itself restore a working
+    /// wM-Bus configuration after LoRa. For a reliable mode change use
+    /// [`Sx126xDriver::switch_profile`].
     pub fn switch_to_gfsk_mode(&mut self) -> Result<(), DriverError> {
         self.set_packet_type(PacketType::Gfsk)?;
         log::debug!("Switched to GFSK mode");
+        Ok(())
+    }
+
+    /// Atomically switch the radio to a complete [`RadioProfile`].
+    ///
+    /// Runs the full ordered sequence needed to change modem/profile safely on a single
+    /// SX126x:
+    ///
+    /// 1. force **standby** — `SetPacketType` and reconfiguration are only valid in standby;
+    /// 2. select the packet (modem) type (also updates `current_packet_type`);
+    /// 3. apply the entire profile — modulation, packet params, frequency, optional sync,
+    ///    PA/TX, buffers and IRQ routing — via [`Sx126xDriver::apply_wmbus_profile`] /
+    ///    [`Sx126xDriver::apply_lora_profile`].
+    ///
+    /// The radio is left in **standby**; the caller then issues
+    /// [`start_receive`](crate::wmbus::radio::radio_driver::RadioDriver::start_receive) or a
+    /// transmit. Unlike [`Sx126xDriver::switch_to_gfsk_mode`] /
+    /// [`Sx126xDriver::switch_to_lora_mode`] (which only flip the packet type), this restores
+    /// the complete radio state, so a GFSK→LoRa→GFSK round-trip is reliable.
+    pub fn switch_profile(&mut self, profile: &RadioProfile) -> Result<(), DriverError> {
+        // 1. Standby — required before changing packet type / reconfiguring.
+        self.set_standby(StandbyMode::RC)?;
+        // 2. Select the modem type (also records `current_packet_type`).
+        self.set_packet_type(profile.packet_type())?;
+        // 3. Apply the complete parameter set for the chosen profile.
+        match profile {
+            RadioProfile::Wmbus(p) => self.apply_wmbus_profile(p)?,
+            RadioProfile::LoRa(p) => self.apply_lora_profile(p)?,
+        }
+        log::info!("Radio profile switched to {:?}", profile.packet_type());
         Ok(())
     }
 
@@ -2060,14 +2391,18 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
             ))
         })? {
             Some(data) => {
-                // Get packet status for RSSI info
-                let (rssi_avg, _rssi_sync, freq_error) =
-                    self.get_packet_status().unwrap_or((-80, -80, 0)); // Default values if read fails
+                // RSSI from GetPacketStatus; per-packet frequency error from the LoRa modem
+                // registers (None in GFSK — the SX126x has no per-packet FEI there).
+                let rssi_pkt = self
+                    .get_packet_status()
+                    .map(|s| s.rssi_pkt_dbm)
+                    .unwrap_or(-80);
+                let freq_error_hz = self.get_lora_frequency_error().unwrap_or(None);
 
                 let packet = crate::wmbus::radio::radio_driver::ReceivedPacket {
                     data,
-                    rssi_dbm: rssi_avg,
-                    freq_error_hz: Some(freq_error),
+                    rssi_dbm: rssi_pkt,
+                    freq_error_hz,
                     lqi: None,       // SX126x doesn't provide LQI
                     crc_valid: true, // process_irqs only returns packets with valid CRC
                 };
@@ -2201,6 +2536,48 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
 
 #[cfg(test)]
 mod tests {
+    use super::{lora_freq_error_hz, lora_snr_db};
+
+    #[test]
+    fn lora_freq_error_zero_is_zero() {
+        assert_eq!(lora_freq_error_hz([0x00, 0x00, 0x00], 125.0), 0);
+    }
+
+    #[test]
+    fn lora_freq_error_positive() {
+        // raw = 0x001000 = 4096; 1.55 * 4096 / (1600/125) = 1.55 * 4096 / 12.8 = 496 Hz.
+        assert_eq!(lora_freq_error_hz([0x00, 0x10, 0x00], 125.0), 496);
+    }
+
+    #[test]
+    fn lora_freq_error_sign_extends_negative() {
+        // Bit 19 set -> negative. Only the low nibble of byte 0 is significant, so the high
+        // nibble (0xF0) is ignored: raw20 = 0x0F0000 -> sign-extended = -65536.
+        // 1.55 * -65536 / 12.8 = -7936 Hz.
+        assert_eq!(lora_freq_error_hz([0xFF, 0x00, 0x00], 125.0), -7936);
+    }
+
+    #[test]
+    fn lora_freq_error_scales_with_bandwidth() {
+        // Same raw value scales linearly with bandwidth: 500 kHz is 4x the 125 kHz result.
+        let bw125 = lora_freq_error_hz([0x00, 0x10, 0x00], 125.0);
+        let bw500 = lora_freq_error_hz([0x00, 0x10, 0x00], 500.0);
+        assert_eq!(bw500, bw125 * 4);
+    }
+
+    #[test]
+    fn lora_snr_positive_raw() {
+        // SnrPkt is a signed byte in quarter-dB: 0x14 = 20 -> +5.0 dB.
+        assert_eq!(lora_snr_db(0x14), 5.0);
+        assert_eq!(lora_snr_db(0x00), 0.0);
+    }
+
+    #[test]
+    fn lora_snr_negative_raw() {
+        // Two's-complement negatives: 0xFC = -4 -> -1.0 dB; 0x80 = -128 -> -32.0 dB.
+        assert_eq!(lora_snr_db(0xFC), -1.0);
+        assert_eq!(lora_snr_db(0x80), -32.0);
+    }
 
     // TODO: Implement mock HAL for comprehensive testing
     // The LBT functionality is integrated in the transmit() function
@@ -2300,5 +2677,174 @@ mod tests {
             Err(_) => {}, // Other errors are acceptable for this test
         }
         */
+    }
+
+    // ---- Dual-mode RadioProfile / switch_profile tests -------------------------------
+    //
+    // These exercise the single-SX126x profile switch on a recording HAL, with no radio.
+
+    use super::{LoRaProfile, RadioProfile, Sx126xDriver, Sx126xExt, WmbusProfile};
+    use crate::wmbus::radio::hal::RecordingHal;
+    use crate::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, PacketType, SpreadingFactor};
+
+    fn lora_profile() -> LoRaProfile {
+        LoRaProfile {
+            frequency_hz: 868_100_000,
+            sf: SpreadingFactor::SF7,
+            bw: LoRaBandwidth::BW125,
+            cr: CodingRate::CR4_5,
+            power_dbm: 14,
+            sync_word: None,
+        }
+    }
+
+    #[test]
+    fn switch_profile_forces_standby_before_packet_type() {
+        let mut driver = Sx126xDriver::new(RecordingHal::default(), 32_000_000);
+        driver
+            .switch_profile(&RadioProfile::LoRa(lora_profile()))
+            .unwrap();
+
+        let standby = driver.hal.first_cmd(0x80).expect("SetStandby issued");
+        let pkt_type = driver.hal.first_cmd(0x8A).expect("SetPacketType issued");
+        assert!(
+            standby < pkt_type,
+            "SetStandby (0x80) must precede SetPacketType (0x8A)"
+        );
+        assert!(
+            driver.hal.has_cmd(0x8A, &[0x01]),
+            "LoRa packet type must be selected"
+        );
+    }
+
+    #[test]
+    fn switching_back_to_wmbus_selects_gfsk_packet_type() {
+        // The original bug: configure_for_wmbus never issued SetPacketType(GFSK), so a
+        // LoRa→wM-Bus switch left the modem in LoRa. Guard against its return.
+        let mut driver = Sx126xDriver::new(RecordingHal::default(), 32_000_000);
+        driver
+            .switch_profile(&RadioProfile::LoRa(lora_profile()))
+            .unwrap();
+        driver
+            .switch_profile(&RadioProfile::Wmbus(WmbusProfile::mode_c(
+                868_950_000,
+                100_000,
+            )))
+            .unwrap();
+        assert!(
+            driver.hal.has_cmd(0x8A, &[0x00]),
+            "GFSK packet type must be selected on switch-back"
+        );
+    }
+
+    #[test]
+    fn configure_for_wmbus_selects_gfsk_packet_type() {
+        // The init path must also select the GFSK modem explicitly.
+        let mut driver = Sx126xDriver::new(RecordingHal::default(), 32_000_000);
+        driver.configure_for_wmbus(868_950_000, 100_000).unwrap();
+        assert!(
+            driver.hal.has_cmd(0x8A, &[0x00]),
+            "configure_for_wmbus must select the GFSK packet type"
+        );
+    }
+
+    #[test]
+    fn packet_type_tracking_gates_lora_frequency_error() {
+        // Bug: current_packet_type was never written, so get_lora_frequency_error always
+        // returned None. After a LoRa profile it must be Some; after wM-Bus, None.
+        let mut driver = Sx126xDriver::new(RecordingHal::default(), 32_000_000);
+
+        driver
+            .switch_profile(&RadioProfile::LoRa(lora_profile()))
+            .unwrap();
+        assert!(
+            driver.get_lora_frequency_error().unwrap().is_some(),
+            "LoRa profile should expose a frequency-error reading"
+        );
+
+        driver
+            .switch_profile(&RadioProfile::Wmbus(WmbusProfile::mode_c(
+                868_950_000,
+                100_000,
+            )))
+            .unwrap();
+        assert!(
+            driver.get_lora_frequency_error().unwrap().is_none(),
+            "GFSK profile has no LoRa frequency-error register"
+        );
+    }
+
+    #[tokio::test]
+    async fn sx126x_ext_switches_profile_through_trait() {
+        // Drive the switch through the `Sx126xExt` bound a generic scheduler/dual-mode
+        // handle would use, and confirm `active_packet_type` reflects each switch.
+        async fn switch<D: Sx126xExt>(d: &mut D, p: &RadioProfile) {
+            d.switch_profile(p).await.unwrap();
+        }
+
+        let mut driver = Sx126xDriver::new(RecordingHal::default(), 32_000_000);
+        assert_eq!(driver.active_packet_type(), None);
+
+        switch(&mut driver, &RadioProfile::LoRa(lora_profile())).await;
+        assert_eq!(driver.active_packet_type(), Some(PacketType::LoRa));
+
+        switch(
+            &mut driver,
+            &RadioProfile::Wmbus(WmbusProfile::mode_c(868_950_000, 100_000)),
+        )
+        .await;
+        assert_eq!(driver.active_packet_type(), Some(PacketType::Gfsk));
+    }
+
+    #[test]
+    fn process_irqs_with_mode_none_before_any_profile() {
+        // No profile applied → current_packet_type is None → nothing to tag.
+        let mut driver = Sx126xDriver::new(RecordingHal::new(), 32_000_000);
+        assert!(driver.process_irqs_with_mode().unwrap().is_none());
+    }
+
+    #[test]
+    fn process_irqs_with_mode_none_when_no_packet_pending() {
+        // With a profile applied but no RxDone pending, it returns None (not an error) in
+        // both modes — the RecordingHal reports no IRQ.
+        let mut gfsk = Sx126xDriver::new(RecordingHal::new(), 32_000_000);
+        gfsk.configure_for_wmbus(868_950_000, 100_000).unwrap();
+        assert!(gfsk.process_irqs_with_mode().unwrap().is_none());
+
+        let mut lora = Sx126xDriver::new(RecordingHal::new(), 32_000_000);
+        lora.configure_for_lora(
+            868_100_000,
+            SpreadingFactor::SF7,
+            LoRaBandwidth::BW125,
+            CodingRate::CR4_5,
+            14,
+        )
+        .unwrap();
+        assert!(lora.process_irqs_with_mode().unwrap().is_none());
+    }
+
+    #[test]
+    fn process_irqs_with_mode_reports_lora_snr() {
+        // Deliver a LoRa packet with a scripted GetPacketStatus SNR byte (0x14 = 20 -> +5 dB)
+        // and confirm the signed SNR surfaces in the tagged packet's LoRa metadata.
+        let hal = RecordingHal::new();
+        let probe = hal.clone();
+        let mut driver = Sx126xDriver::new(hal, 32_000_000);
+        driver
+            .configure_for_lora(
+                868_100_000,
+                SpreadingFactor::SF7,
+                LoRaBandwidth::BW125,
+                CodingRate::CR4_5,
+                14,
+            )
+            .unwrap();
+        probe.set_packet_status([0x00, 0x14, 0x00]); // SnrPkt = 20 -> +5.0 dB
+        probe.queue_rx(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+
+        let packet = driver.process_irqs_with_mode().unwrap().expect("a packet");
+        assert_eq!(packet.mode, PacketType::LoRa);
+        let lora = packet.lora.expect("LoRa metadata present");
+        assert_eq!(lora.snr_db, 5.0);
     }
 }

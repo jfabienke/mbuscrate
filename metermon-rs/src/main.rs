@@ -17,6 +17,7 @@
 mod config;
 mod decode;
 mod devices;
+mod health;
 mod keystore;
 mod publish;
 mod source;
@@ -130,6 +131,11 @@ enum Cmd {
         /// Number of recent events to show.
         #[arg(long, default_value_t = 20)]
         events: usize,
+        /// Remove devices that never produced a CRC-valid frame (garbled-id ghosts),
+        /// together with their events, before printing the report. A real meter caught
+        /// by this re-registers on its first valid frame.
+        #[arg(long)]
+        prune_ghosts: bool,
     },
     /// Run one airwave discovery sweep now (C/T/S mode scan) and record it to the store.
     /// Run with the monitor stopped. (requires `radio` feature)
@@ -151,6 +157,29 @@ enum Cmd {
         /// JSON dump: {"devices":[...],"events":[...]} (e.g. exported from the old SQLite DB).
         #[arg(long)]
         from: String,
+    },
+    /// Import the `keys` map of a metermon.conf-format file into the redb store, so
+    /// the monitor holds them from startup without any broker. Keys are validated
+    /// before storage and their values are never printed. Run with the monitor
+    /// stopped (redb is single-writer).
+    ImportKeys {
+        /// redb store to write the keys into.
+        #[arg(long, default_value = "metermon-devices.redb")]
+        db: String,
+        /// metermon.conf-format JSON whose `keys` map to import (e.g. a retired
+        /// gateway config).
+        #[arg(long)]
+        from_config: String,
+    },
+    /// Remove a persisted AES key from the redb store (e.g. one bound to the wrong
+    /// meter id). Run with the monitor stopped (redb is single-writer).
+    RemoveKey {
+        /// redb store to remove the key from.
+        #[arg(long, default_value = "metermon-devices.redb")]
+        db: String,
+        /// Meter id (decimal device address) whose key to remove.
+        #[arg(long)]
+        meterid: u32,
     },
 }
 
@@ -185,13 +214,99 @@ fn main() -> Result<()> {
             db,
             sweep_hours,
         } => run_monitor(&config, report, keys.as_deref(), &db, sweep_hours),
-        Cmd::Devices { db, events } => run_devices(&db, events),
+        Cmd::Devices {
+            db,
+            events,
+            prune_ghosts,
+        } => run_devices(&db, events, prune_ghosts),
         Cmd::Sweep {
             config,
             db,
             seconds,
         } => run_sweep(&config, &db, seconds),
         Cmd::Import { db, from } => run_import(&db, &from),
+        Cmd::ImportKeys { db, from_config } => run_import_keys(&db, &from_config),
+        Cmd::RemoveKey { db, meterid } => {
+            let dm = devices::DeviceManager::open(&db, 20, 600)?;
+            if dm.remove_key(meterid)? {
+                println!("removed AES key for meter {meterid}");
+            } else {
+                println!("no AES key stored for meter {meterid}");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Import a config file's `keys` map into the redb store (monitor stopped). The
+/// monitor then loads them at startup like any control-topic-pulled key. Key values
+/// are never printed; malformed entries are rejected by `store_key`.
+fn run_import_keys(db: &str, from_config: &str) -> Result<()> {
+    let cfg = Config::load(from_config)?;
+    if cfg.keys.is_empty() {
+        anyhow::bail!("no `keys` map in {from_config}");
+    }
+    let dm = devices::DeviceManager::open(db, 20, 600)?;
+    let (mut stored, mut rejected) = (0u32, 0u32);
+    for (id_str, hexkey) in &cfg.keys {
+        let Ok(id) = id_str.parse::<u32>() else {
+            log::warn!("skipping non-numeric meterid {id_str:?}");
+            rejected += 1;
+            continue;
+        };
+        match dm.store_key(id, hexkey) {
+            Ok(()) => {
+                println!("stored AES key for meter {id}");
+                stored += 1;
+            }
+            Err(e) => {
+                log::warn!("rejected key for meter {id}: {e}");
+                rejected += 1;
+            }
+        }
+    }
+    println!("imported {stored} key(s) into {db} ({rejected} rejected)");
+    Ok(())
+}
+
+/// The `op:startup` announcement the C++ gateway publishes on its data topic at boot
+/// (metermon.cc:207). The upstream backend responds by pushing `op:key` control
+/// messages to the `control` topic named here. Unlike the C++ version, the raw config
+/// file is deliberately NOT included — it may contain a seeded `keys` map.
+#[cfg(feature = "radio")]
+fn startup_announcement(gwid: &str, control_topic: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "op": "startup",
+        "ts": devices::now_unix(),
+        "gw": gwid,
+        "app": "metermon-rs",
+        "version": env!("CARGO_PKG_VERSION"),
+        "control": control_topic,
+        "pid": std::process::id(),
+    })
+}
+
+/// Persist-then-install handler for `op:key` control messages, shared by the primary
+/// and the dedicated key broker. The redb write happens outside the keystore lock and
+/// the key only becomes usable after the write commits, so a key is never live before
+/// it is durable. Key values are never logged; `store_key` validates and rejects
+/// malformed keys.
+#[cfg(feature = "radio")]
+fn key_install_handler(
+    keys: std::sync::Arc<std::sync::Mutex<KeyStore>>,
+    dm: std::sync::Arc<devices::DeviceManager>,
+) -> impl Fn(&serde_json::Value) + Send + 'static {
+    move |msg| {
+        let Some((id, hexkey)) = KeyStore::parse_key_message(msg) else {
+            return;
+        };
+        match dm.store_key(id, &hexkey) {
+            Ok(()) => {
+                keys.lock().unwrap().install(id, hexkey);
+                log::info!("installed + persisted AES key for meter {id} (control topic)");
+            }
+            Err(e) => log::warn!("rejected AES key for meter {id}: {e}"),
+        }
     }
 }
 
@@ -220,8 +335,12 @@ fn run_sweep(_config_path: &str, _db: &str, _seconds: u64) -> Result<()> {
 }
 
 /// Show the device manager store (device table + recent events). Host-independent.
-fn run_devices(db: &str, events: usize) -> Result<()> {
+fn run_devices(db: &str, events: usize, prune_ghosts: bool) -> Result<()> {
     let dm = devices::DeviceManager::open_readonly(db)?;
+    if prune_ghosts {
+        let (d, e) = dm.prune_ghosts()?;
+        println!("pruned {d} ghost device(s) and {e} associated event(s)\n");
+    }
     dm.print_report(events)
 }
 
@@ -259,6 +378,7 @@ fn run_monitor(
     sweep_hours: u64,
 ) -> Result<()> {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -293,36 +413,150 @@ fn run_monitor(
     rt.block_on(async move {
         // Device manager (redb): persists device info + a significant-event log
         // (sample 1-in-20, flag a device silent after 10 min without an identified frame).
-        let dm = devices::DeviceManager::open(db_path, 20, 600)?;
+        let dm = Arc::new(devices::DeviceManager::open(db_path, 20, 600)?);
         log::info!("device store: {db_path}");
 
-        // AES key pull: subscribe to meter/control/<gwid> and install op:key messages
-        // live, mirroring metermon. Non-fatal if the broker is unreachable — the
-        // radio monitor keeps running on whatever keys were seeded.
-        let _publisher = match publish::Publisher::connect(&cfg.mqtt, None) {
-            Ok(mut p) => match &cfg.mqtt.control_topic {
-                Some(control) => {
-                    let keys_cb = keys.clone();
-                    match p.subscribe_control(control, move |msg| {
-                        if let Some(id) = keys_cb.lock().unwrap().handle_control(msg) {
-                            log::info!("installed AES key for meter {id} (from control topic)");
+        // Load durably-persisted AES keys locally, before MQTT/radio init, so the gateway has
+        // credentials immediately and never blocks on the control-topic pull for them. Fail
+        // startup clearly if the persisted keys cannot be read or installed.
+        match dm.load_keys() {
+            Ok(pairs) => {
+                let mut k = keys.lock().unwrap();
+                for (id, hexkey) in pairs {
+                    k.install(id, hexkey);
+                }
+                log::info!("keystore holds {} key(s) after loading from redb", k.len());
+            }
+            Err(e) => anyhow::bail!("failed to load persisted AES keys from redb: {e}"),
+        }
+
+        // Gateway self-instrumentation topics: retained online/offline status (offline is
+        // delivered by the broker via Last-Will) + a periodic health heartbeat, so the
+        // fleet is observable upstream without SSH.
+        let status_topic = cfg.gateway_status_topic();
+        let health_topic = cfg.gateway_health_topic();
+        let offline_payload =
+            serde_json::to_vec(&serde_json::json!({ "gwid": cfg.gwid, "status": "offline" }))
+                .unwrap_or_default();
+
+        // AES key pull + gateway status. Non-fatal if the broker is unreachable — the radio
+        // monitor keeps running on whatever keys were seeded (store-and-forward via redb).
+        let mut publisher = match publish::Publisher::connect(
+            &cfg.mqtt,
+            None,
+            Some((status_topic.clone(), offline_payload)),
+        ) {
+            Ok(mut p) => {
+                // Birth: retained "online" so a subscriber always sees the current state.
+                let online =
+                    serde_json::to_vec(&serde_json::json!({ "gwid": cfg.gwid, "status": "online" }))
+                        .unwrap_or_default();
+                if let Err(e) = p.publish_retained(&status_topic, &online) {
+                    log::warn!("gateway birth publish failed: {e}");
+                }
+                match &cfg.mqtt.control_topic {
+                    Some(control) => {
+                        match p.subscribe_control(
+                            control,
+                            key_install_handler(keys.clone(), dm.clone()),
+                        ) {
+                            Ok(()) => log::info!("pulling AES keys from control topic {control}"),
+                            Err(e) => log::warn!("control-topic subscribe failed: {e}"),
                         }
-                    }) {
-                        Ok(()) => log::info!("pulling AES keys from control topic {control}"),
-                        Err(e) => log::warn!("control-topic subscribe failed: {e}"),
                     }
-                    Some(p)
+                    None => log::warn!("no control-topic in config; live AES key pull disabled"),
                 }
-                None => {
-                    log::warn!("no control-topic in config; live AES key pull disabled");
-                    Some(p)
+                // Protocol-compatible startup announcement (metermon.cc:207): published on
+                // the data topic; the upstream backend pushes op:key messages to the
+                // announced control topic in response. Keys are not retained, so this
+                // announcement is what actually triggers key delivery.
+                if let Err(e) = p.publish_json(&startup_announcement(
+                    &cfg.gwid,
+                    cfg.mqtt.control_topic.as_deref(),
+                )) {
+                    log::warn!("startup announce failed: {e}");
                 }
-            },
+                log::info!("gateway status → {status_topic}, health → {health_topic}");
+                Some(p)
+            }
             Err(e) => {
-                log::warn!("MQTT connect failed ({e}); live key pull off, using seeded keys");
+                log::warn!("MQTT connect failed ({e}); key pull + health off, using seeded keys");
                 None
             }
         };
+
+        // Dedicated key broker: when the primary upstream has no AES key functionality,
+        // an optional `key-mqtt` broker carries the control topic instead. Subscription
+        // only — data/status/health stay on the primary. The handle must stay alive for
+        // the life of the monitor; rumqttc retries in the background if the broker is
+        // down, and the persistent session re-delivers keys missed while offline.
+        let _key_broker = cfg.key_mqtt.as_ref().and_then(|kb| {
+            let clientid = kb
+                .clientid
+                .clone()
+                .unwrap_or_else(|| format!("{}-keys", cfg.mqtt.clientid));
+            let Some(control) = kb
+                .control_topic
+                .clone()
+                .or_else(|| cfg.mqtt.control_topic.clone())
+            else {
+                log::warn!("key-mqtt configured but no control-topic to subscribe");
+                return None;
+            };
+            match publish::Publisher::connect_subscriber(&kb.host, kb.port, &clientid) {
+                Ok(mut p) => {
+                    match p.subscribe_control(
+                        &control,
+                        key_install_handler(keys.clone(), dm.clone()),
+                    ) {
+                        Ok(()) => log::info!(
+                            "pulling AES keys from key broker {}:{} topic {control}",
+                            kb.host,
+                            kb.port
+                        ),
+                        Err(e) => log::warn!("key-broker subscribe failed: {e}"),
+                    }
+                    // Announce under the (possibly legacy) gateway identity the keys were
+                    // provisioned for, so the backend pushes them to our control topic.
+                    let gw = kb.gwid.clone().unwrap_or_else(|| cfg.gwid.clone());
+                    match p.publish_to(
+                        &format!("meter/data/{gw}"),
+                        &startup_announcement(&gw, Some(&control)),
+                    ) {
+                        Ok(()) => log::info!("announced startup as gateway {gw} on key broker"),
+                        Err(e) => log::warn!("key-broker startup announce failed: {e}"),
+                    }
+                    Some(p)
+                }
+                Err(e) => {
+                    log::warn!("key-broker connect failed ({e}); keys from primary/seeded only");
+                    None
+                }
+            }
+        });
+
+        // SIGTERM (systemd stop) / SIGINT (^C) request a clean shutdown: the loop breaks
+        // and parks the radio instead of the process dying mid-SPI-transaction, which can
+        // wedge it in D-state holding the bus until reboot.
+        let shutdown = Arc::new(AtomicBool::new(false));
+        {
+            let flag = shutdown.clone();
+            tokio::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut term = match signal(SignalKind::terminate()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!("cannot listen for SIGTERM: {e}");
+                        return;
+                    }
+                };
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+                flag.store(true, Ordering::SeqCst);
+            });
+        }
 
         let mut radio = source::Rfm69Source::open(&spidev).await?;
         radio.start().await?;
@@ -338,8 +572,21 @@ fn run_monitor(
             log::info!("airwave discovery sweep enabled: every {sweep_hours}h");
         }
 
+        // Gateway watchdog: recover the radio if no frame arrives within the stall window
+        // (5 min vs the normal sub-minute cadence), escalating to a process restart after
+        // 3 failed in-process recoveries (systemd relaunches).
+        let mut watchdog = health::RadioWatchdog::new(300, 3);
+        let mut last_frame_at: Option<Instant> = None;
+        let mut radio_recoveries: u32 = 0;
+        // CRC-failed frames with unknown (untrustworthy) ids, contained by the store.
+        let mut contained: u64 = 0;
+
         loop {
-            if let Some((frame, rssi)) = radio.poll().await? {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Some((frame, rssi, freq_offset)) = radio.poll().await? {
+                last_frame_at = Some(Instant::now()); // any received frame proves RX is alive
                 let (v, has_key) = {
                     let k = keys.lock().unwrap();
                     let v = decode::decode_frame(&frame, &cfg, &k);
@@ -350,18 +597,11 @@ fn run_monitor(
                 let crc_ok = v["crc_ok"].as_bool().unwrap_or(false);
                 let ft = v["frame_type"].as_str().unwrap_or("?").to_string();
                 let ci = v["ci"].as_str().unwrap_or("-").to_string();
-                let e = stats.entry(meter).or_default();
-                e.total += 1;
-                e.last_rssi = rssi;
-                e.sum_rssi += rssi as i64;
-                e.has_key = has_key;
-                if crc_ok {
-                    e.ok += 1;
-                } else {
-                    e.fail += 1;
-                }
 
-                // Persist to the device manager (info + significant/sampled events).
+                // Persist to the device manager (info + significant/sampled events). The
+                // store decides attribution: a CRC-failed frame with an unknown id is
+                // contained (no device minted), and the in-memory stats follow suit so
+                // ghost ids never appear in the report either.
                 let obs = devices::Observation {
                     meter_id: meter,
                     manufacturer: v["manufacturer"].as_str().unwrap_or("?").to_string(),
@@ -376,13 +616,33 @@ fn run_monitor(
                     rssi,
                     has_key,
                     reading: None, // populated once ELL decrypt lands (Phase 1.4b)
+                    mode: radio.mode().to_string(),
+                    freq_offset_hz: freq_offset,
                 };
-                if let Err(err) = dm.record_frame(&obs) {
-                    log::warn!("device store write failed: {err}");
+                let attributed = match dm.record_frame(&obs) {
+                    Ok(a) => a,
+                    Err(err) => {
+                        log::warn!("device store write failed: {err}");
+                        true
+                    }
+                };
+                if attributed {
+                    let e = stats.entry(meter).or_default();
+                    e.total += 1;
+                    e.last_rssi = rssi;
+                    e.sum_rssi += rssi as i64;
+                    e.has_key = has_key;
+                    if crc_ok {
+                        e.ok += 1;
+                    } else {
+                        e.fail += 1;
+                    }
+                } else {
+                    contained += 1;
                 }
 
                 log::info!(
-                    "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm"
+                    "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz"
                 );
             } else {
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -393,12 +653,86 @@ fn run_monitor(
                     log::warn!("silence check failed: {err}");
                 }
                 let nkeys = keys.lock().unwrap().len();
-                print_stats(&stats, start.elapsed(), nkeys);
+                print_stats(&stats, start.elapsed(), nkeys, contained);
                 // redb is single-writer, so the standalone `devices` viewer can't open the
                 // store while we hold it — print the persisted device report here too.
                 if let Err(err) = dm.print_report(10) {
                     log::warn!("device report failed: {err}");
                 }
+
+                // --- gateway self-instrumentation: health heartbeat + radio watchdog ---
+                let opmode = radio.opmode().await;
+                let uptime = start.elapsed().as_secs();
+                let total: u64 = stats.values().map(|s| s.total).sum();
+                let ok: u64 = stats.values().map(|s| s.ok).sum();
+                // "no frame yet" counts its age as the uptime, so a radio that is dead from
+                // boot still trips the watchdog rather than waiting forever for a first frame.
+                let frame_age = last_frame_at.map(|t| t.elapsed().as_secs());
+                let stall_age = frame_age.unwrap_or(uptime);
+                let gw = health::GatewayHealth {
+                    gwid: cfg.gwid.clone(),
+                    status: "online",
+                    ts: devices::now_unix(),
+                    uptime_secs: uptime,
+                    radio_opmode: opmode,
+                    radio_state: opmode
+                        .map(|o| health::RadioState::from_opmode(o).as_str())
+                        .unwrap_or("unknown"),
+                    frames_per_min: if uptime > 0 {
+                        total as f64 * 60.0 / uptime as f64
+                    } else {
+                        0.0
+                    },
+                    last_frame_age_secs: frame_age,
+                    radio_recoveries,
+                    meters_seen: stats.len(),
+                    crc_pass_pct: (total > 0).then(|| (ok * 100 / total) as u8),
+                    keys_held: nkeys,
+                    cpu_temp_c: health::read_cpu_temp_c(),
+                    load_avg_1m: health::read_load_avg_1m(),
+                };
+                if let Some(p) = publisher.as_mut() {
+                    if let Err(e) = p.publish_to(&health_topic, &gw.to_json()) {
+                        log::warn!("gateway health publish failed: {e}");
+                    }
+                }
+
+                match watchdog.assess(stall_age) {
+                    health::WatchdogAction::Healthy => {}
+                    health::WatchdogAction::Recover { attempt } => {
+                        radio_recoveries += 1;
+                        log::warn!(
+                            "radio stalled ({stall_age}s no frame, opmode={opmode:?}) — recovery attempt {attempt}"
+                        );
+                        let _ = dm.record_discovery(&format!(
+                            "radio stall: {stall_age}s no frame, opmode={opmode:?}, recovery {attempt}"
+                        ));
+                        // Cheap in-process recovery (re-arm RX). If it works a frame arrives and
+                        // resets the stall; if not, the age keeps growing to the next attempt.
+                        if let Err(e) = radio.recover().await {
+                            log::error!("radio recover failed: {e}");
+                        }
+                    }
+                    health::WatchdogAction::Escalate => {
+                        log::error!(
+                            "radio unrecoverable after {} attempts — exiting for systemd restart",
+                            watchdog.attempts()
+                        );
+                        let _ = dm.record_discovery(&format!(
+                            "radio unrecoverable after {} attempts; restarting process",
+                            watchdog.attempts()
+                        ));
+                        if let Some(p) = publisher.as_mut() {
+                            let payload = serde_json::to_vec(&serde_json::json!({
+                                "gwid": cfg.gwid, "status": "offline", "reason": "radio_unrecoverable"
+                            }))
+                            .unwrap_or_default();
+                            let _ = p.publish_retained(&status_topic, &payload);
+                        }
+                        std::process::exit(1);
+                    }
+                }
+
                 last_report = Instant::now();
             }
 
@@ -422,6 +756,22 @@ fn run_monitor(
                 last_sweep = Instant::now();
             }
         }
+
+        // Clean shutdown: retained offline status (the LWT only covers ungraceful
+        // deaths), then park the radio before dropping the SPI handle.
+        log::info!("shutdown requested — parking radio");
+        if let Some(p) = publisher.as_mut() {
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "gwid": cfg.gwid, "status": "offline", "reason": "shutdown"
+            }))
+            .unwrap_or_default();
+            let _ = p.publish_retained(&status_topic, &payload);
+        }
+        if let Err(e) = radio.stop().await {
+            log::warn!("radio shutdown failed: {e}");
+        }
+        log::info!("metermon-rs monitor stopped cleanly");
+        Ok(())
     })
 }
 
@@ -430,6 +780,7 @@ fn print_stats(
     stats: &std::collections::BTreeMap<u32, MeterStat>,
     uptime: std::time::Duration,
     keys_held: usize,
+    contained: u64,
 ) {
     let mins = uptime.as_secs_f64() / 60.0;
     println!("\n=== metermon-rs stats (uptime {mins:.1} min, {keys_held} AES key(s) held) ===");
@@ -467,7 +818,9 @@ fn print_stats(
     } else {
         0.0
     };
-    println!("total frames={t}  ok={o}  overall pass={overall:.0}%\n");
+    println!(
+        "total frames={t}  ok={o}  overall pass={overall:.0}%  unattributed-contained={contained}\n"
+    );
 }
 
 #[cfg(not(feature = "radio"))]
@@ -670,7 +1023,7 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let mut radio = source::Rfm69Source::open(&spidev).await?;
-        let mut pub_ = publish::Publisher::connect(&cfg.mqtt, shadow_topic.as_deref())?;
+        let mut pub_ = publish::Publisher::connect(&cfg.mqtt, shadow_topic.as_deref(), None)?;
 
         // Subscribe to meter/control/<gwid> and install keys from op:key messages.
         if let Some(control) = &cfg.mqtt.control_topic {
@@ -689,7 +1042,7 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
         );
         radio.start().await?;
         loop {
-            if let Some((frame, _rssi)) = radio.poll().await? {
+            if let Some((frame, _rssi, _off)) = radio.poll().await? {
                 let decoded = {
                     let k = keys.lock().unwrap();
                     decode::decode_frame(&frame, &cfg, &k)
@@ -738,12 +1091,12 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
         while n < count && tokio::time::Instant::now() < deadline {
             let remaining = deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, radio.poll()).await {
-                Ok(Ok(Some((frame, rssi)))) => {
+                Ok(Ok(Some((frame, rssi, off)))) => {
                     writeln!(file, "{}", hex::encode(&frame))?;
                     file.flush()?;
                     n += 1;
                     log::info!(
-                        "frame {n}: {} bytes rssi={rssi}dBm  {}",
+                        "frame {n}: {} bytes rssi={rssi}dBm off={off}Hz  {}",
                         frame.len(),
                         hex::encode(&frame)
                     );

@@ -1,0 +1,26 @@
+[Unit]
+Description=metermon-rs wM-Bus Gateway (Rust)
+# The radio does not need the network, and MQTT connect failure is non-fatal in the
+# monitor, but ordering after the network avoids a pointless first MQTT backoff.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# jvindahl is in the spi/gpio groups; the service needs no root.
+User=jvindahl
+WorkingDirectory=/home/jvindahl
+ExecStart=/home/jvindahl/mbuscrate/metermon-rs/target/release/metermon-rs monitor \
+    --config /home/jvindahl/metermon.conf \
+    --db /home/jvindahl/metermon-devices.redb
+Environment=RUST_LOG=info
+Restart=always
+RestartSec=5
+# SIGTERM triggers the monitor's clean shutdown (park radio, quiesce SPI). Give it
+# time to finish before systemd escalates to SIGKILL — a process killed mid-SPI
+# transaction can wedge in D-state holding the bus until reboot.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
