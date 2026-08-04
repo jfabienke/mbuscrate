@@ -294,8 +294,22 @@ fn run_monitor(
     rt.block_on(async move {
         // Device manager (redb): persists device info + a significant-event log
         // (sample 1-in-20, flag a device silent after 10 min without an identified frame).
-        let dm = devices::DeviceManager::open(db_path, 20, 600)?;
+        let dm = Arc::new(devices::DeviceManager::open(db_path, 20, 600)?);
         log::info!("device store: {db_path}");
+
+        // Load durably-persisted AES keys locally, before MQTT/radio init, so the gateway has
+        // credentials immediately and never blocks on the control-topic pull for them. Fail
+        // startup clearly if the persisted keys cannot be read or installed.
+        match dm.load_keys() {
+            Ok(pairs) => {
+                let mut k = keys.lock().unwrap();
+                for (id, hexkey) in pairs {
+                    k.install(id, hexkey);
+                }
+                log::info!("keystore holds {} key(s) after loading from redb", k.len());
+            }
+            Err(e) => anyhow::bail!("failed to load persisted AES keys from redb: {e}"),
+        }
 
         // Gateway self-instrumentation topics: retained online/offline status (offline is
         // delivered by the broker via Last-Will) + a periodic health heartbeat, so the
@@ -324,9 +338,23 @@ fn run_monitor(
                 match &cfg.mqtt.control_topic {
                     Some(control) => {
                         let keys_cb = keys.clone();
+                        let dm_cb = dm.clone();
                         match p.subscribe_control(control, move |msg| {
-                            if let Some(id) = keys_cb.lock().unwrap().handle_control(msg) {
-                                log::info!("installed AES key for meter {id} (from control topic)");
+                            let Some((id, hexkey)) = KeyStore::parse_key_message(msg) else {
+                                return;
+                            };
+                            // Persist durably FIRST — outside the keystore lock — and only
+                            // install in memory (make the key usable) after the write commits,
+                            // so a key is never live before it is durable. The key value is
+                            // never logged; store_key validates it and rejects malformed keys.
+                            match dm_cb.store_key(id, &hexkey) {
+                                Ok(()) => {
+                                    keys_cb.lock().unwrap().install(id, hexkey);
+                                    log::info!(
+                                        "installed + persisted AES key for meter {id} (control topic)"
+                                    );
+                                }
+                                Err(e) => log::warn!("rejected AES key for meter {id}: {e}"),
                             }
                         }) {
                             Ok(()) => log::info!("pulling AES keys from control topic {control}"),

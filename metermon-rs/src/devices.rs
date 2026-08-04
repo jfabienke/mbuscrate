@@ -23,6 +23,16 @@ const DEVICES: TableDefinition<u32, &str> = TableDefinition::new("devices");
 const EVENTS: TableDefinition<u64, &str> = TableDefinition::new("events");
 /// Small key/value table for bookkeeping (e.g. the one-time SQLite import marker).
 const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
+/// Durable AES keys: meter id (decimal device address) -> 32-hex AES-128 key. Persisting
+/// keys here lets the gateway load credentials locally at startup — before, and independent
+/// of, the MQTT control-topic pull.
+const KEYS: TableDefinition<u32, &str> = TableDefinition::new("keys");
+
+/// A well-formed AES-128 key is exactly 32 hex chars (16 bytes). Validated before any key is
+/// stored; the key value itself is never logged.
+fn is_valid_aes128_hex(key: &str) -> bool {
+    key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit())
+}
 
 /// Persisted per-device record (JSON-encoded as the `devices` table value).
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -128,6 +138,7 @@ impl DeviceManager {
             w.open_table(DEVICES)?;
             w.open_table(EVENTS)?;
             w.open_table(META)?;
+            w.open_table(KEYS)?; // initialize the keys table on first database creation
         }
         w.commit()?;
         Ok(Self {
@@ -151,6 +162,42 @@ impl DeviceManager {
             sample_every: 1,
             silence_after: 0,
         })
+    }
+
+    /// Durably store an AES key for a meter (write-through when a key is pulled upstream).
+    ///
+    /// Validates the key is well-formed hex before writing (a malformed key is rejected, not
+    /// stored), and the key value itself is never logged. The write is a single committed redb
+    /// transaction, so persistence is atomic — a caller can treat success as durable.
+    pub fn store_key(&self, meterid: u32, hexkey: &str) -> Result<()> {
+        if meterid == 0 || !is_valid_aes128_hex(hexkey) {
+            anyhow::bail!("refusing to store malformed AES key for meter {meterid}");
+        }
+        let w = self.db.begin_write()?;
+        {
+            let mut t = w.open_table(KEYS)?;
+            t.insert(meterid, hexkey)?;
+        }
+        w.commit()?;
+        Ok(())
+    }
+
+    /// Load all persisted `(meterid, hexkey)` pairs, to seed the keystore at startup before
+    /// MQTT/radio initialization.
+    pub fn load_keys(&self) -> Result<Vec<(u32, String)>> {
+        let r = self.db.begin_read()?;
+        let t = match r.open_table(KEYS) {
+            Ok(t) => t,
+            // A store created before the keys table existed: nothing to load.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (k, v) = row?;
+            out.push((k.value(), v.value().to_string()));
+        }
+        Ok(out)
     }
 
     /// Append events under fresh monotonic ids within an existing write transaction.
@@ -677,6 +724,26 @@ mod tests {
         let dm = DeviceManager::open(&path, 20, 600).unwrap();
         dm.record_frame(&obs(63398862, true, false)).unwrap();
         assert_eq!(device_counts(&dm, 63398862).0, 2, "count survived reopen");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stores_and_loads_keys_rejecting_malformed_and_surviving_reopen() {
+        let path = tmp_db();
+        let key = "000102030405060708090a0b0c0d0e0f";
+        {
+            let dm = DeviceManager::open(&path, 20, 600).unwrap();
+            dm.store_key(74644444, key).unwrap();
+            // Malformed keys are refused, not stored.
+            assert!(dm.store_key(74644444, "abcd").is_err()); // too short
+            assert!(dm
+                .store_key(74644444, "zz0102030405060708090a0b0c0d0e0f")
+                .is_err()); // non-hex
+            assert!(dm.store_key(0, key).is_err()); // meter 0
+        } // drop -> releases the file
+          // Durable across reopen; the rejected writes left no trace.
+        let dm = DeviceManager::open(&path, 20, 600).unwrap();
+        assert_eq!(dm.load_keys().unwrap(), vec![(74644444, key.to_string())]);
         let _ = std::fs::remove_file(&path);
     }
 }
