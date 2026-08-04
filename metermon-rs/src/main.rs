@@ -260,6 +260,7 @@ fn run_monitor(
     sweep_hours: u64,
 ) -> Result<()> {
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -372,6 +373,29 @@ fn run_monitor(
             }
         };
 
+        // SIGTERM (systemd stop) / SIGINT (^C) request a clean shutdown: the loop breaks
+        // and parks the radio instead of the process dying mid-SPI-transaction, which can
+        // wedge it in D-state holding the bus until reboot.
+        let shutdown = Arc::new(AtomicBool::new(false));
+        {
+            let flag = shutdown.clone();
+            tokio::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut term = match signal(SignalKind::terminate()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!("cannot listen for SIGTERM: {e}");
+                        return;
+                    }
+                };
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+                flag.store(true, Ordering::SeqCst);
+            });
+        }
+
         let mut radio = source::Rfm69Source::open(&spidev).await?;
         radio.start().await?;
         log::info!("metermon-rs monitor on {spidev} — reporting every {report_secs}s");
@@ -394,6 +418,9 @@ fn run_monitor(
         let mut radio_recoveries: u32 = 0;
 
         loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
             if let Some((frame, rssi, freq_offset)) = radio.poll().await? {
                 last_frame_at = Some(Instant::now()); // any received frame proves RX is alive
                 let (v, has_key) = {
@@ -554,6 +581,22 @@ fn run_monitor(
                 last_sweep = Instant::now();
             }
         }
+
+        // Clean shutdown: retained offline status (the LWT only covers ungraceful
+        // deaths), then park the radio before dropping the SPI handle.
+        log::info!("shutdown requested — parking radio");
+        if let Some(p) = publisher.as_mut() {
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "gwid": cfg.gwid, "status": "offline", "reason": "shutdown"
+            }))
+            .unwrap_or_default();
+            let _ = p.publish_retained(&status_topic, &payload);
+        }
+        if let Err(e) = radio.stop().await {
+            log::warn!("radio shutdown failed: {e}");
+        }
+        log::info!("metermon-rs monitor stopped cleanly");
+        Ok(())
     })
 }
 

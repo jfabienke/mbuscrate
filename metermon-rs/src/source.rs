@@ -113,6 +113,15 @@ impl Rfm69Source {
         self.driver.start_receive().await?;
         Ok(())
     }
+
+    /// Park the radio for process shutdown: stop the interrupt task and put the chip
+    /// to sleep so the SPI bus is quiescent before the handle is dropped. A process
+    /// that dies mid-SPI-transaction can wedge in uninterruptible D-state holding the
+    /// bus until reboot.
+    pub async fn stop(&mut self) -> Result<()> {
+        self.driver.shutdown().await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
