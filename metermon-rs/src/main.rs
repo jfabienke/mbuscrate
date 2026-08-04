@@ -131,6 +131,11 @@ enum Cmd {
         /// Number of recent events to show.
         #[arg(long, default_value_t = 20)]
         events: usize,
+        /// Remove devices that never produced a CRC-valid frame (garbled-id ghosts),
+        /// together with their events, before printing the report. A real meter caught
+        /// by this re-registers on its first valid frame.
+        #[arg(long)]
+        prune_ghosts: bool,
     },
     /// Run one airwave discovery sweep now (C/T/S mode scan) and record it to the store.
     /// Run with the monitor stopped. (requires `radio` feature)
@@ -199,7 +204,11 @@ fn main() -> Result<()> {
             db,
             sweep_hours,
         } => run_monitor(&config, report, keys.as_deref(), &db, sweep_hours),
-        Cmd::Devices { db, events } => run_devices(&db, events),
+        Cmd::Devices {
+            db,
+            events,
+            prune_ghosts,
+        } => run_devices(&db, events, prune_ghosts),
         Cmd::Sweep {
             config,
             db,
@@ -307,8 +316,12 @@ fn run_sweep(_config_path: &str, _db: &str, _seconds: u64) -> Result<()> {
 }
 
 /// Show the device manager store (device table + recent events). Host-independent.
-fn run_devices(db: &str, events: usize) -> Result<()> {
+fn run_devices(db: &str, events: usize, prune_ghosts: bool) -> Result<()> {
     let dm = devices::DeviceManager::open_readonly(db)?;
+    if prune_ghosts {
+        let (d, e) = dm.prune_ghosts()?;
+        println!("pruned {d} ghost device(s) and {e} associated event(s)\n");
+    }
     dm.print_report(events)
 }
 
@@ -546,6 +559,8 @@ fn run_monitor(
         let mut watchdog = health::RadioWatchdog::new(300, 3);
         let mut last_frame_at: Option<Instant> = None;
         let mut radio_recoveries: u32 = 0;
+        // CRC-failed frames with unknown (untrustworthy) ids, contained by the store.
+        let mut contained: u64 = 0;
 
         loop {
             if shutdown.load(Ordering::SeqCst) {
@@ -563,18 +578,11 @@ fn run_monitor(
                 let crc_ok = v["crc_ok"].as_bool().unwrap_or(false);
                 let ft = v["frame_type"].as_str().unwrap_or("?").to_string();
                 let ci = v["ci"].as_str().unwrap_or("-").to_string();
-                let e = stats.entry(meter).or_default();
-                e.total += 1;
-                e.last_rssi = rssi;
-                e.sum_rssi += rssi as i64;
-                e.has_key = has_key;
-                if crc_ok {
-                    e.ok += 1;
-                } else {
-                    e.fail += 1;
-                }
 
-                // Persist to the device manager (info + significant/sampled events).
+                // Persist to the device manager (info + significant/sampled events). The
+                // store decides attribution: a CRC-failed frame with an unknown id is
+                // contained (no device minted), and the in-memory stats follow suit so
+                // ghost ids never appear in the report either.
                 let obs = devices::Observation {
                     meter_id: meter,
                     manufacturer: v["manufacturer"].as_str().unwrap_or("?").to_string(),
@@ -592,8 +600,26 @@ fn run_monitor(
                     mode: radio.mode().to_string(),
                     freq_offset_hz: freq_offset,
                 };
-                if let Err(err) = dm.record_frame(&obs) {
-                    log::warn!("device store write failed: {err}");
+                let attributed = match dm.record_frame(&obs) {
+                    Ok(a) => a,
+                    Err(err) => {
+                        log::warn!("device store write failed: {err}");
+                        true
+                    }
+                };
+                if attributed {
+                    let e = stats.entry(meter).or_default();
+                    e.total += 1;
+                    e.last_rssi = rssi;
+                    e.sum_rssi += rssi as i64;
+                    e.has_key = has_key;
+                    if crc_ok {
+                        e.ok += 1;
+                    } else {
+                        e.fail += 1;
+                    }
+                } else {
+                    contained += 1;
                 }
 
                 log::info!(
@@ -608,7 +634,7 @@ fn run_monitor(
                     log::warn!("silence check failed: {err}");
                 }
                 let nkeys = keys.lock().unwrap().len();
-                print_stats(&stats, start.elapsed(), nkeys);
+                print_stats(&stats, start.elapsed(), nkeys, contained);
                 // redb is single-writer, so the standalone `devices` viewer can't open the
                 // store while we hold it — print the persisted device report here too.
                 if let Err(err) = dm.print_report(10) {
@@ -735,6 +761,7 @@ fn print_stats(
     stats: &std::collections::BTreeMap<u32, MeterStat>,
     uptime: std::time::Duration,
     keys_held: usize,
+    contained: u64,
 ) {
     let mins = uptime.as_secs_f64() / 60.0;
     println!("\n=== metermon-rs stats (uptime {mins:.1} min, {keys_held} AES key(s) held) ===");
@@ -772,7 +799,9 @@ fn print_stats(
     } else {
         0.0
     };
-    println!("total frames={t}  ok={o}  overall pass={overall:.0}%\n");
+    println!(
+        "total frames={t}  ok={o}  overall pass={overall:.0}%  unattributed-contained={contained}\n"
+    );
 }
 
 #[cfg(not(feature = "radio"))]
