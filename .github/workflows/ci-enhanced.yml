@@ -2,9 +2,9 @@ name: Enhanced CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ master, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ master ]
   schedule:
     # Run intensive tests weekly
     - cron: '0 0 * * 0'
@@ -12,6 +12,11 @@ on:
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
+  # Portable enhanced-feature set for generic CI runners. We deliberately do NOT use
+  # `--all-features`: `raspberry-pi` pulls `rppal` (Linux-target GPIO only) and `rtt-logging`
+  # pulls `cortex-a` (bare-metal ARM, does not build on stable/x86_64). Those platform
+  # features are exercised by the dedicated `pi-hardware` job and an ARM cross-build, not here.
+  CI_FEATURES: crypto,cbor,lorawan,tracing
 
 jobs:
   # Basic CI remains fast for PRs
@@ -19,7 +24,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Linux only for the heavier enhanced build. Cross-platform coverage of the
+        # default feature set lives in ci.yml; the platform-specific features
+        # (raspberry-pi/rtt-logging) are covered by the pi-hardware job.
+        os: [ubuntu-latest]
         rust: [stable, beta]
     steps:
     - uses: actions/checkout@v4
@@ -35,16 +43,16 @@ jobs:
       run: cargo fmt --all -- --check
     
     - name: Clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
-    
+      run: cargo clippy --all-targets --features $CI_FEATURES -- -D warnings
+
     - name: Build
-      run: cargo build --verbose --all-features
-    
+      run: cargo build --verbose --features $CI_FEATURES
+
     - name: Test
-      run: cargo test --verbose --all-features
-    
+      run: cargo test --verbose --features $CI_FEATURES
+
     - name: Doc tests
-      run: cargo test --doc --all-features
+      run: cargo test --doc --features $CI_FEATURES
 
   # Fuzzing - runs on every PR but with limited iterations
   fuzz:
@@ -132,7 +140,7 @@ jobs:
       run: cargo test --test e2e_scenarios -- --test-threads=1 --nocapture
     
     - name: Run integration tests
-      run: cargo test --test '*_integration_*' --all-features
+      run: cargo test --test '*_integration_*' --features $CI_FEATURES
 
   # Coverage analysis
   coverage:
@@ -146,7 +154,7 @@ jobs:
       run: cargo install cargo-tarpaulin
     
     - name: Run coverage
-      run: cargo tarpaulin --out Lcov --all-features --ignore-tests --timeout 300
+      run: cargo tarpaulin --out Lcov --features $CI_FEATURES --ignore-tests --timeout 300
     
     - name: Upload to Codecov
       uses: codecov/codecov-action@v3

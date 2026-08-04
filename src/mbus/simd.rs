@@ -3,8 +3,8 @@
 //! This module provides runtime CPU feature detection to select the best
 //! available implementation for performance-critical operations.
 
-use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Once;
 
 // Feature detection flags
 static NEON_AVAILABLE: AtomicBool = AtomicBool::new(false);
@@ -313,8 +313,10 @@ mod tests {
         let scalar_result = calculate_checksum_scalar(&test_data);
         let optimized_result = calculate_checksum_optimized(&test_data);
 
-        assert_eq!(scalar_result, optimized_result,
-                   "SIMD implementation should match scalar implementation");
+        assert_eq!(
+            scalar_result, optimized_result,
+            "SIMD implementation should match scalar implementation"
+        );
     }
 
     #[test]

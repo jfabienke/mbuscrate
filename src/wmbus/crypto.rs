@@ -22,20 +22,31 @@
 //!
 //! ## Usage
 //!
-//! ```rust
-//! use mbus_rs::wmbus::crypto::{WMBusCrypto, EncryptionMode, AesKey};
+//! ```rust,no_run
+//! use mbus_rs::wmbus::crypto::{WMBusCrypto, AesKey, DeviceInfo};
 //!
-//! let key = AesKey::from_bytes(&[0; 16]);
-//! let crypto = WMBusCrypto::new(key);
+//! let key = AesKey::from_bytes(&[0; 16]).unwrap();
+//! let mut crypto = WMBusCrypto::new(key);
 //!
+//! # let encrypted_frame: Vec<u8> = Vec::new();
+//! # let device_info = DeviceInfo {
+//! #     device_id: 0x12345678,
+//! #     manufacturer: 0x2C2D,
+//! #     version: 0x01,
+//! #     device_type: 0x07,
+//! #     access_number: None,
+//! # };
 //! // Decrypt wM-Bus frame
-//! let decrypted = crypto.decrypt_frame(&encrypted_frame, &device_info)?;
+//! let decrypted = crypto.decrypt_frame(&encrypted_frame, &device_info).unwrap();
 //! ```
 
+use super::crypto_hardware::{get_aes_backend, AesBackend};
+// Only referenced from the `crypto`-gated calculate_hmac_sha1 below; gating the
+// import too keeps it from reading as unused under the default feature set.
+#[cfg(feature = "crypto")]
+use super::sha_hardware::calculate_hmac_sha1 as hw_calculate_hmac_sha1;
 use crate::util::{hex, logging};
 use crate::vendors;
-use super::crypto_hardware::{AesBackend, get_aes_backend};
-use super::sha_hardware::{calculate_hmac_sha1 as hw_calculate_hmac_sha1};
 use std::sync::Arc;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -203,7 +214,7 @@ impl WMBusCrypto {
             master_key,
             error_throttle: logging::LogThrottle::new(1000, 3), // 3 errors per second
             backend,
-            add_crc_mode9: false,                               // Default: no CRC for compatibility
+            add_crc_mode9: false, // Default: no CRC for compatibility
             verify_crc_mode9: false,
             full_tag_compatibility: true, // Default: use 16-byte tags for testing
         }
@@ -258,25 +269,22 @@ impl WMBusCrypto {
             };
 
             // Try to get vendor-provided key
-            if let Ok(Some(vendor_key)) = vendors::dispatch_key_hook(reg, mfr_id, &vendor_info, encrypted_frame) {
-                // Use vendor key instead of derived key
-                let device_key = AesKey::from_bytes(&vendor_key)
-                    .map_err(|_| CryptoError::InvalidKeyLength {
+            if let Ok(Some(vendor_key)) =
+                vendors::dispatch_key_hook(reg, mfr_id, &vendor_info, encrypted_frame)
+            {
+                // A vendor-provided key is already the effective device key: use it directly
+                // WITHOUT deriving again (the old code swapped it into master_key and let
+                // decrypt_frame derive from it, producing the wrong key).
+                let device_key =
+                    AesKey::from_bytes(&vendor_key).map_err(|_| CryptoError::InvalidKeyLength {
                         expected: 16,
                         actual: vendor_key.len(),
                     })?;
-
-                // Save current master key and temporarily replace with vendor key
-                let original_key = self.master_key.clone();
-                self.master_key = device_key;
-
-                // Decrypt with vendor key
-                let result = self.decrypt_frame(encrypted_frame, device_info);
-
-                // Restore original key
-                self.master_key = original_key;
-
-                return result;
+                return self.decrypt_frame_with_effective_key(
+                    encrypted_frame,
+                    device_info,
+                    &device_key,
+                );
             }
         }
 
@@ -284,11 +292,27 @@ impl WMBusCrypto {
         self.decrypt_frame(encrypted_frame, device_info)
     }
 
-    /// Decrypt wM-Bus frame with automatic mode detection
+    /// Decrypt wM-Bus frame with automatic mode detection, deriving the device key from the
+    /// master key (OMS key derivation).
     pub fn decrypt_frame(
         &mut self,
         encrypted_frame: &[u8],
         device_info: &DeviceInfo,
+    ) -> Result<Vec<u8>, CryptoError> {
+        let device_key = self
+            .master_key
+            .derive_device_key(device_info.device_id, device_info.manufacturer);
+        self.decrypt_frame_with_effective_key(encrypted_frame, device_info, &device_key)
+    }
+
+    /// Decrypt a wM-Bus frame using an explicit **effective** device key, performing NO
+    /// further derivation. Use this when the key is already the device key — e.g. a
+    /// vendor-provisioned key — so it is not derived a second time.
+    pub fn decrypt_frame_with_effective_key(
+        &mut self,
+        encrypted_frame: &[u8],
+        device_info: &DeviceInfo,
+        device_key: &AesKey,
     ) -> Result<Vec<u8>, CryptoError> {
         // Validate minimum frame size
         if encrypted_frame.len() < 11 {
@@ -306,11 +330,6 @@ impl WMBusCrypto {
             return Err(CryptoError::UnsupportedMode { mode: ci });
         }
 
-        // Derive device-specific key
-        let device_key = self
-            .master_key
-            .derive_device_key(device_info.device_id, device_info.manufacturer);
-
         // Extract encrypted payload (after CI field)
         let payload_start = ci_offset + 1;
         if payload_start >= encrypted_frame.len() {
@@ -321,18 +340,18 @@ impl WMBusCrypto {
 
         let encrypted_payload = &encrypted_frame[payload_start..];
 
-        // Decrypt based on mode
+        // Decrypt based on mode, using the supplied effective key as-is.
         let decrypted_payload = match mode {
             EncryptionMode::Mode5Ctr => {
-                self.decrypt_ctr_mode(&device_key, encrypted_payload, device_info)?
+                self.decrypt_ctr_mode(device_key, encrypted_payload, device_info)?
             }
             EncryptionMode::Mode7Cbc => {
-                self.decrypt_cbc_mode(&device_key, encrypted_payload, device_info)?
+                self.decrypt_cbc_mode(device_key, encrypted_payload, device_info)?
             }
             EncryptionMode::Mode9Gcm => {
-                self.decrypt_gcm_mode(&device_key, encrypted_payload, encrypted_frame, device_info)?
+                self.decrypt_gcm_mode(device_key, encrypted_payload, encrypted_frame, device_info)?
             }
-            EncryptionMode::EllEcb => self.decrypt_ecb_mode(&device_key, encrypted_payload)?,
+            EncryptionMode::EllEcb => self.decrypt_ecb_mode(device_key, encrypted_payload)?,
             EncryptionMode::None => unreachable!(),
         };
 
@@ -464,7 +483,7 @@ impl WMBusCrypto {
         ciphertext: &[u8],
         device_info: &DeviceInfo,
     ) -> Result<Vec<u8>, CryptoError> {
-        if ciphertext.len() % 16 != 0 {
+        if !ciphertext.len().is_multiple_of(16) {
             return Err(CryptoError::InvalidDataLength {
                 block_size: 16,
                 actual: ciphertext.len(),
@@ -501,7 +520,7 @@ impl WMBusCrypto {
         key: &AesKey,
         ciphertext: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        if ciphertext.len() % 16 != 0 {
+        if !ciphertext.len().is_multiple_of(16) {
             return Err(CryptoError::InvalidDataLength {
                 block_size: 16,
                 actual: ciphertext.len(),
@@ -727,7 +746,8 @@ impl WMBusCrypto {
         block: &[u8; 16],
     ) -> Result<[u8; 16], CryptoError> {
         let mut output = [0u8; 16];
-        self.backend.encrypt_block(block, key.as_bytes(), &mut output);
+        self.backend
+            .encrypt_block(block, key.as_bytes(), &mut output);
         Ok(output)
     }
 
@@ -738,7 +758,8 @@ impl WMBusCrypto {
         block: &[u8; 16],
     ) -> Result<[u8; 16], CryptoError> {
         let mut output = [0u8; 16];
-        self.backend.decrypt_block(block, key.as_bytes(), &mut output);
+        self.backend
+            .decrypt_block(block, key.as_bytes(), &mut output);
         Ok(output)
     }
 
@@ -1108,13 +1129,15 @@ impl WMBusCrypto {
     /// # Example
     ///
     /// ```rust
-    /// let mic = crypto.calculate_lorawan_mic(
-    ///     &nwk_s_key,
-    ///     &frame_data,
-    ///     0, // uplink
-    ///     0x12345678,
-    ///     42
-    /// )?;
+    /// use mbus_rs::wmbus::crypto::{AesKey, WMBusCrypto};
+    ///
+    /// let crypto = WMBusCrypto::new(AesKey::from_bytes(&[0x2B; 16]).unwrap());
+    /// let nwk_s_key = [0x2B; 16];
+    /// let frame_data = [0x40, 0x78, 0x56, 0x34, 0x12, 0x00, 0x2A, 0x00, 0x01];
+    /// let mic = crypto
+    ///     .calculate_lorawan_mic(&nwk_s_key, &frame_data, 0 /* uplink */, 0x12345678, 42)
+    ///     .unwrap();
+    /// assert_eq!(mic.len(), 4);
     /// ```
     #[cfg(feature = "crypto")]
     pub fn calculate_lorawan_mic(
@@ -1125,13 +1148,13 @@ impl WMBusCrypto {
         dev_addr: u32,
         fcnt: u32,
     ) -> Result<[u8; 4], CryptoError> {
-        use cmac::{Cmac, Mac};
         use aes::Aes128;
+        use cmac::{Cmac, Mac};
 
         // Build B0 block for MIC calculation
         let mut b0 = vec![
             0x49, // Fixed value for MIC calculation
-            0x00, 0x00, 0x00, 0x00, // 4 bytes reserved
+            0x00, 0x00, 0x00, 0x00,      // 4 bytes reserved
             direction, // Direction: 0=uplink, 1=downlink
         ];
 
@@ -1148,8 +1171,8 @@ impl WMBusCrypto {
         b0.push(msg.len() as u8);
 
         // Create CMAC instance
-        let mut mac = Cmac::<Aes128>::new_from_slice(key)
-            .map_err(|_| CryptoError::InvalidKeyLength {
+        let mut mac =
+            Cmac::<Aes128>::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength {
                 expected: 16,
                 actual: key.len(),
             })?;
@@ -1622,5 +1645,59 @@ mod tests {
         let short_frame = vec![0x10, 0x44];
         let access = WMBusCrypto::extract_access_number(&short_frame);
         assert_eq!(access, None);
+    }
+
+    #[test]
+    #[cfg(feature = "crypto")]
+    fn effective_key_path_uses_key_as_is_without_rederiving() {
+        // Regression for fix #6: `decrypt_frame_with_effective_key` must use the supplied key
+        // BYTE-FOR-BYTE (no OMS derivation). A vendor-provisioned key is already the device
+        // key; deriving from it again — as the old vendor path did — yields the wrong key.
+        let master_key = AesKey::from_hex("0123456789ABCDEF0123456789ABCDEF").unwrap();
+        let device_info = DeviceInfo {
+            device_id: 0x12345678,
+            manufacturer: 0xABCD,
+            version: 0x01,
+            device_type: 0x02,
+            access_number: None,
+        };
+        // The device key `decrypt_frame` derives internally.
+        let derived = master_key.derive_device_key(device_info.device_id, device_info.manufacturer);
+        // XOR-based derivation must actually change the key, or the test proves nothing.
+        assert_ne!(derived.as_bytes(), master_key.as_bytes());
+
+        let mut crypto = WMBusCrypto::new(master_key.clone());
+        let test_data = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10,
+        ];
+        let mut test_frame = vec![
+            0x10, 0x44, 0xCD, 0xAB, 0x78, 0x56, 0x34, 0x12, 0x01, 0x02, 0x72,
+        ];
+        test_frame.extend_from_slice(&test_data);
+        let encrypted = crypto
+            .encrypt_frame(&test_frame, &device_info, EncryptionMode::Mode5Ctr)
+            .unwrap();
+
+        // Baseline: the standard path derives the device key internally.
+        let via_decrypt = crypto.decrypt_frame(&encrypted, &device_info).unwrap();
+        // Supplying the derived device key as the effective key must reproduce the baseline
+        // exactly — i.e. the effective-key path does NOT derive a second time.
+        let via_derived = crypto
+            .decrypt_frame_with_effective_key(&encrypted, &device_info, &derived)
+            .unwrap();
+        assert_eq!(
+            via_derived, via_decrypt,
+            "effective key == derived device key must match decrypt_frame (no double-derive)"
+        );
+        // Supplying the raw master key must NOT reproduce it: proof the key is used as-is
+        // rather than re-derived (re-deriving the master would have matched the baseline).
+        let via_master = crypto
+            .decrypt_frame_with_effective_key(&encrypted, &device_info, &master_key)
+            .unwrap();
+        assert_ne!(
+            via_master, via_decrypt,
+            "raw master key used as-is must differ from the derived device key"
+        );
     }
 }

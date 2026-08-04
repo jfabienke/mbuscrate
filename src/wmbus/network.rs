@@ -16,11 +16,13 @@
 //!
 //! ```rust,no_run
 //! use mbus_rs::wmbus::network::{WMBusNetwork, NetworkConfig};
+//! // WMBusNetwork is generic over the HAL; substitute your platform's implementation.
+//! use mbus_rs::wmbus::radio::hal::MockHal;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let config = NetworkConfig::default();
-//!     let mut network = WMBusNetwork::new(config);
+//!     let mut network = WMBusNetwork::<MockHal>::new(config);
 //!     
 //!     // Discover all devices in the area
 //!     let topology = network.discover_topology().await?;

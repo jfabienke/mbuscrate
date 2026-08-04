@@ -6,16 +6,12 @@
 
 #[cfg(feature = "pio-irq")]
 use mbus_rs::wmbus::radio::pio_irq::{
-    get_pio_irq_backend, PioIrqBackend, SoftwareBackend,
-    DIO0_TX_DONE, DIO1_RX_DONE, DIO2_MASK, DIO3_MASK,
-    DIO_PINS, MAX_DEBOUNCE_US,
+    get_pio_irq_backend, PioIrqBackend, SoftwareBackend, DIO0_TX_DONE, DIO1_RX_DONE, DIO2_MASK,
+    DIO3_MASK, DIO_PINS, MAX_DEBOUNCE_US,
 };
 
 #[cfg(feature = "pio-irq")]
-use mbus_rs::wmbus::radio::lora::sx1262::{Sx1262Driver, LoRaConfig};
-
-use std::time::{Duration, Instant};
-use std::thread;
+use mbus_rs::wmbus::radio::lora::sx1262::{LoRaConfig, Sx1262Driver};
 
 /// Test basic PIO IRQ backend functionality
 #[cfg(feature = "pio-irq")]
@@ -64,10 +60,10 @@ fn test_software_backend() {
 
     // Test debouncing with various parameters
     let test_cases = [
-        (DIO1_RX_DONE, 1),   // Minimum debounce
-        (DIO0_TX_DONE, 10),  // Typical debounce
-        (0x0F, 50),          // All pins, longer debounce
-        (0x00, 100),         // No pins
+        (DIO1_RX_DONE, 1),  // Minimum debounce
+        (DIO0_TX_DONE, 10), // Typical debounce
+        (0x0F, 50),         // All pins, longer debounce
+        (0x00, 100),        // No pins
     ];
 
     for (mask, debounce_us) in test_cases {
@@ -89,7 +85,12 @@ fn test_debounce_parameter_validation() {
     // Test normal range
     for debounce_us in [1, 5, 10, 25, 50, 100] {
         let result = backend.debounce_irq(DIO1_RX_DONE, debounce_us);
-        assert_eq!(result & 0xF0, 0, "Upper bits should be clear for {}μs", debounce_us);
+        assert_eq!(
+            result & 0xF0,
+            0,
+            "Upper bits should be clear for {}μs",
+            debounce_us
+        );
     }
 
     // Test boundary conditions
@@ -146,7 +147,12 @@ fn test_concurrent_irq_handling() {
 
     // Verify no corruption occurred
     for (thread_id, result) in results.iter() {
-        assert_eq!(result & 0xF0, 0, "Thread {} result should have clean upper bits", thread_id);
+        assert_eq!(
+            result & 0xF0,
+            0,
+            "Thread {} result should have clean upper bits",
+            thread_id
+        );
     }
 }
 
@@ -188,18 +194,25 @@ fn test_irq_performance() {
     let elapsed = start.elapsed();
     let avg_latency = elapsed.as_nanos() / iterations;
 
-    println!("Average debounce latency: {} ns ({} operations)", avg_latency, iterations);
+    println!(
+        "Average debounce latency: {} ns ({} operations)",
+        avg_latency, iterations
+    );
 
     // Performance targets (adjusted for software vs hardware)
     let max_latency_ns = if backend.name().contains("Hardware") {
-        50_000  // 50μs for hardware (including mmap overhead)
+        50_000 // 50μs for hardware (including mmap overhead)
     } else {
         200_000 // 200μs for software fallback
     };
 
-    assert!(avg_latency < max_latency_ns,
-            "Average latency {} ns exceeds target {} ns for {}",
-            avg_latency, max_latency_ns, backend.name());
+    assert!(
+        avg_latency < max_latency_ns,
+        "Average latency {} ns exceeds target {} ns for {}",
+        avg_latency,
+        max_latency_ns,
+        backend.name()
+    );
 }
 
 /// Test IRQ storm handling
@@ -226,19 +239,26 @@ fn test_irq_storm_handling() {
     let elapsed = start.elapsed();
     let throughput = storm_iterations as f64 / elapsed.as_secs_f64();
 
-    println!("IRQ storm throughput: {:.0} ops/sec ({} backend)",
-             throughput, backend.name());
+    println!(
+        "IRQ storm throughput: {:.0} ops/sec ({} backend)",
+        throughput,
+        backend.name()
+    );
 
     // Throughput targets
     let min_throughput = if backend.name().contains("Hardware") {
-        1000.0  // 1k ops/sec for hardware PIO
+        1000.0 // 1k ops/sec for hardware PIO
     } else {
-        100.0   // 100 ops/sec for software (limited by GPIO access)
+        100.0 // 100 ops/sec for software (limited by GPIO access)
     };
 
-    assert!(throughput > min_throughput,
-            "Throughput {:.0} ops/sec below target {:.0} for {}",
-            throughput, min_throughput, backend.name());
+    assert!(
+        throughput > min_throughput,
+        "Throughput {:.0} ops/sec below target {:.0} for {}",
+        throughput,
+        min_throughput,
+        backend.name()
+    );
 }
 
 /// Test SX1262 driver integration
@@ -328,7 +348,9 @@ fn test_error_handling() {
     }
 
     for handle in handles {
-        handle.join().expect("Backend selection should be thread-safe");
+        handle
+            .join()
+            .expect("Backend selection should be thread-safe");
     }
 }
 
@@ -354,8 +376,12 @@ fn test_debounce_window_performance() {
         println!("Debounce {}μs: {} ns/op", debounce_us, avg_time);
 
         // Longer debounce windows may take slightly longer, but not proportionally
-        assert!(avg_time < 1_000_000, // 1ms max per operation
-                "Debounce {}μs took too long: {} ns", debounce_us, avg_time);
+        assert!(
+            avg_time < 1_000_000, // 1ms max per operation
+            "Debounce {}μs took too long: {} ns",
+            debounce_us,
+            avg_time
+        );
     }
 }
 
@@ -368,16 +394,17 @@ fn test_realistic_usage_pattern() {
             // Simulate typical wM-Bus receiver workflow
 
             // 1. Configure for EU band
-            driver.configure_for_wmbus(868_950_000, 125_000)
+            driver
+                .configure_for_wmbus(868_950_000, 125_000)
                 .expect("Configuration should succeed");
 
             // 2. Start receiving
-            driver.set_rx_continuous()
-                .expect("RX start should succeed");
+            driver.set_rx_continuous().expect("RX start should succeed");
 
             // 3. Poll for packets (simulating main loop)
             for i in 0..10 {
-                let packet_ready = driver.is_packet_ready()
+                let packet_ready = driver
+                    .is_packet_ready()
                     .expect("Packet check should succeed");
 
                 if packet_ready {
@@ -396,10 +423,8 @@ fn test_realistic_usage_pattern() {
             assert!(tx_result.is_ok(), "Transmission should succeed");
 
             // 5. Wait for TX completion
-            let tx_done = driver.wait_tx_done(1000)
-                .expect("TX wait should succeed");
+            let tx_done = driver.wait_tx_done(1000).expect("TX wait should succeed");
             println!("TX completed: {}", tx_done);
-
         }
         Err(_) => {
             println!("Skipping realistic test - no SX1262 hardware available");
@@ -502,12 +527,20 @@ fn test_reset_performance() {
         let duration = start.elapsed();
         let avg_reset_time = duration / RESET_COUNT as u32;
 
-        println!("Reset performance for {}: {} resets in {:?} (avg: {:?})",
-                backend.name(), RESET_COUNT, duration, avg_reset_time);
+        println!(
+            "Reset performance for {}: {} resets in {:?} (avg: {:?})",
+            backend.name(),
+            RESET_COUNT,
+            duration,
+            avg_reset_time
+        );
 
         // Reset should be fast (< 1ms each on average)
-        assert!(avg_reset_time.as_millis() < 1,
-               "Reset should be fast, got: {:?}", avg_reset_time);
+        assert!(
+            avg_reset_time.as_millis() < 1,
+            "Reset should be fast, got: {:?}",
+            avg_reset_time
+        );
     }
 
     #[cfg(not(feature = "pio-irq"))]

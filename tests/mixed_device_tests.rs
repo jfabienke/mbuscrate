@@ -280,5 +280,4 @@ async fn test_complete_workflow() {
     manager.disconnect_all().await.unwrap();
 
     // Test passes if no panics occurred
-    assert!(true, "Complete workflow executed successfully");
 }

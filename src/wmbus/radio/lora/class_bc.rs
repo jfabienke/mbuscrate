@@ -3,11 +3,11 @@
 //! Implements ping-slot timing for Class B and continuous reception
 //! for Class C devices, enabling server-initiated downlinks.
 
+use log::{debug, info, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{interval, sleep};
-use log::{debug, info, warn};
 
 /// LoRaWAN device class
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -46,7 +46,7 @@ impl Default for BeaconConfig {
         Self {
             period: Duration::from_secs(128),
             ping_nb: 3, // 8 ping slots per beacon
-            ping_dr: 3,  // SF9/125kHz
+            ping_dr: 3, // SF9/125kHz
             ping_freq: 869_525_000,
             next_beacon: Instant::now() + Duration::from_secs(128),
         }
@@ -192,9 +192,7 @@ impl ClassBCController {
         let slots = self.ping_slots.lock().await;
         let now = Instant::now();
 
-        slots.iter()
-            .find(|&&slot| slot > now)
-            .copied()
+        slots.iter().find(|&&slot| slot > now).copied()
     }
 
     /// Add multicast session
@@ -216,8 +214,11 @@ impl ClassBCController {
 
         let config = self.beacon_config.read().await;
 
-        debug!("Opening ping slot: DR{} @ {} MHz",
-               config.ping_dr, config.ping_freq as f64 / 1_000_000.0);
+        debug!(
+            "Opening ping slot: DR{} @ {} MHz",
+            config.ping_dr,
+            config.ping_freq as f64 / 1_000_000.0
+        );
 
         // In real implementation, configure radio for reception
         // Window duration depends on data rate
@@ -316,7 +317,10 @@ mod tests {
         assert_eq!(*controller.device_class.read().await, DeviceClass::ClassA);
 
         // Switch to Class B
-        controller.set_device_class(DeviceClass::ClassB).await.unwrap();
+        controller
+            .set_device_class(DeviceClass::ClassB)
+            .await
+            .unwrap();
         assert_eq!(*controller.device_class.read().await, DeviceClass::ClassB);
 
         // Should have beacon lock after search

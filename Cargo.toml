@@ -13,16 +13,16 @@ anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
-nom = "7.1"
-proptest = "1.7.0"
-tokio = { version = "1.0", features = ["full"] }
-tokio-serial = "5.4"
-bytes = "1.5"
-thiserror = "1.0"
+nom = "8.0"
+proptest = "1.11"
+tokio = { version = "1.53", features = ["full"] }
+tokio-serial = "5.5"
+bytes = "1.12"
+thiserror = "2.0"
 async-trait = "0.1"
-bitflags = "2.4"
-once_cell = "1.19"
-zeroize = { version = "1.7", features = ["derive"] }
+bitflags = "2.13"
+once_cell = "1.21"
+zeroize = { version = "1.9", features = ["derive"] }
 
 # Enhanced crypto dependencies
 aes = { version = "0.8", optional = true }
@@ -33,10 +33,10 @@ hmac = { version = "0.12", optional = true }
 sha1 = { version = "0.10", optional = true }
 
 # Raspberry Pi HAL dependencies (optional)
-rppal = { version = "0.17", optional = true }
+rppal = { version = "0.22", optional = true }
 
 # PIO IRQ dependencies for Pi 5
-nix = { version = "0.28", optional = true }
+nix = { version = "0.31", optional = true }
 libc = { version = "0.2", optional = true }
 
 # RFM69 driver dependencies (optional)
@@ -47,10 +47,10 @@ tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 # RTT + defmt logging dependencies for Pi
-defmt = { version = "0.3", optional = true }
-defmt-rtt = { version = "0.4", optional = true }
+defmt = { version = "1.1", optional = true }
+defmt-rtt = { version = "1.3", optional = true }
 cortex-a = { version = "8.1", optional = true }
-tock-registers = { version = "0.8", optional = true }
+tock-registers = { version = "0.10", optional = true }
 critical-section = { version = "1.2", features = ["std"], optional = true }
 
 # Serialization for cache persistence
@@ -64,15 +64,15 @@ ciborium = "0.2"
 lazy_static = "1.4"
 
 # For random channel selection in LoRa
-rand = "0.8"
+rand = "0.10"
 
 # For QUNDIS date/time handling
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
 
 [dev-dependencies]
-criterion = "0.5"
-tokio-test = "0.4.4"
-tempfile = "3.8"
+criterion = "0.8"
+tokio-test = "0.4.5"
+tempfile = "3.27"
 
 [[bench]]
 name = "parsing_benchmark"
@@ -86,13 +86,49 @@ harness = false
 name = "sha_benchmark"
 harness = false
 
-# Cargo aliases for development
-[alias]
-bench-sha = "bench --bench sha_benchmark --features crypto"
-bench-crypto = "bench --bench crypto_benchmark --features crypto"
-bench-all = "bench --features crypto"
-pio-demo = "run --example pio_irq_demo --features pio-irq"
-pio-test = "test --test pio_irq_tests --features pio-irq"
+# Criterion benches must declare `harness = false` (they provide their own main via
+# criterion_main!); otherwise the default libtest harness rejects Criterion CLI args like
+# `--save-baseline` (as the enhanced-CI benchmark job hit for vif_benchmark).
+[[bench]]
+name = "vif_benchmark"
+harness = false
+
+[[bench]]
+name = "edge_cases_benchmark"
+harness = false
+
+[[bench]]
+name = "simd_benchmark"
+harness = false
+
+[[bench]]
+name = "aes_hardware_benchmark"
+harness = false
+
+# Targets that depend on feature-gated symbols. Without these, `cargo test` and
+# `cargo build --examples` fail on the default feature set because the RTT logging
+# API only exists under `rtt-logging` (see src/logging.rs).
+[[test]]
+name = "lora_enhancements_test"
+required-features = ["rtt-logging"]
+
+[[example]]
+name = "rtt_logging_demo"
+required-features = ["rtt-logging"]
+
+[[example]]
+name = "pio_irq_demo"
+required-features = ["pio-irq"]
+
+# Its helpers (and inline #[test]s) are all `#[cfg(feature = "raspberry-pi")]`, so gate the
+# whole example behind that feature — otherwise `cargo test --all-targets` fails to compile
+# the example's tests on the default feature set.
+[[example]]
+name = "raspberry_pi_wmbus"
+required-features = ["raspberry-pi"]
+
+# NOTE: cargo aliases live in .cargo/config.toml, not here. An [alias] table in
+# Cargo.toml is silently ignored ("unused manifest key: alias").
 
 # Feature flags for platform support
 [features]

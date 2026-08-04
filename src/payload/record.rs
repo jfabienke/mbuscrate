@@ -280,9 +280,15 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
 }
 
 /// Parses a variable-length M-Bus data record.
-pub fn parse_variable_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
+/// Parse one variable-data record AND report the exact number of input bytes it consumed
+/// (DRH incl. any DIFE/VIFE chain, the optional variable-length byte, and the data). Use
+/// this — not an estimate — to walk a multi-record payload without misaligning on records
+/// with DIFE/VIFE chains or variable-length data.
+pub fn parse_variable_record_consumed(input: &[u8]) -> Result<(MBusRecord, usize), MBusError> {
     let (mut remaining, mut record) = parse_variable_record_inner(input)
         .map_err(|e| MBusError::FrameParseError(format!("Nom error: {e:?}")))?;
+    // The nom parser already consumed the DRH (DIF + DIFEs + VIF + VIFEs).
+    let mut consumed = input.len() - remaining.len();
 
     // For manufacturer-specific or more-records-follow, data is already populated
     if record.drh.dib.dif != MBUS_DIB_DIF_MANUFACTURER_SPECIFIC
@@ -292,6 +298,7 @@ pub fn parse_variable_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
         if (record.drh.dib.dif & MBUS_DATA_RECORD_DIF_MASK_DATA) == 0x0D {
             record.data_len = parse_variable_data_length(*remaining.first().unwrap_or(&0))?;
             remaining = &remaining[1..];
+            consumed += 1; // the variable-length byte
         }
 
         if record.data_len > remaining.len() {
@@ -301,9 +308,16 @@ pub fn parse_variable_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
         for j in 0..record.data_len {
             record.data[j] = *remaining.get(j).unwrap_or(&0);
         }
+        consumed += record.data_len; // the data bytes
     }
 
-    Ok(record)
+    Ok((record, consumed))
+}
+
+/// Parse one variable-data record. See [`parse_variable_record_consumed`] when you need the
+/// exact bytes consumed (e.g. to advance through a multi-record payload).
+pub fn parse_variable_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
+    parse_variable_record_consumed(input).map(|(record, _)| record)
 }
 
 fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
@@ -384,7 +398,10 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
     let (i, vif) = be_u8(i)?;
     record.drh.vib.vif = vif;
 
-    if (record.drh.vib.vif & MBUS_DIB_VIF_WITHOUT_EXTENSION) == 0x7C {
+    // Custom (plain-text) VIF 0x7C: length byte + ASCII text. Advance the cursor PAST the
+    // length and text — previously the cursor from `take()` was discarded, so parsing
+    // resumed at the length byte and every downstream offset (data + next record) was wrong.
+    let i = if (vif & MBUS_DIB_VIF_WITHOUT_EXTENSION) == 0x7C {
         let (i, var_vif_len) = be_u8(i)?;
         if var_vif_len > MBUS_VALUE_INFO_BLOCK_CUSTOM_VIF_SIZE {
             return Err(nom::Err::Error(nom::error::Error::new(
@@ -392,10 +409,12 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
                 nom::error::ErrorKind::Tag,
             )));
         }
-
-        let (_i, custom_vif) = take(var_vif_len)(i)?;
+        let (i, custom_vif) = take(var_vif_len)(i)?;
         mbus_data_str_decode(&mut record.drh.vib.custom_vif, custom_vif, custom_vif.len());
-    }
+        i
+    } else {
+        i
+    };
 
     // Parse VIF extensions if VIF has extension bit set
     let mut i_temp = i;
@@ -497,7 +516,12 @@ pub fn parse_variable_record_with_vendor(
     // Check for vendor-specific DIF handling (0x0F or 0x1F)
     if let (Some(mfr_id), Some(reg)) = (manufacturer_id, registry) {
         if record.drh.dib.dif == 0x0F || record.drh.dib.dif == 0x1F {
-            if let Some(vendor_records) = vendors::dispatch_dif_hook(reg, mfr_id, record.drh.dib.dif, &record.data[..record.data_len])? {
+            if let Some(vendor_records) = vendors::dispatch_dif_hook(
+                reg,
+                mfr_id,
+                record.drh.dib.dif,
+                &record.data[..record.data_len],
+            )? {
                 // Convert first vendor record to MBusRecord (simplified)
                 if let Some(first) = vendor_records.first() {
                     record.unit = first.unit.clone();
@@ -513,7 +537,12 @@ pub fn parse_variable_record_with_vendor(
 
         // Check for vendor-specific VIF handling (0x7F or 0xFF)
         if record.drh.vib.vif == 0x7F || record.drh.vib.vif == 0xFF {
-            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(reg, mfr_id, record.drh.vib.vif, &record.data[..record.data_len])? {
+            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(
+                reg,
+                mfr_id,
+                record.drh.vib.vif,
+                &record.data[..record.data_len],
+            )? {
                 record.unit = unit;
                 record.quantity = qty;
                 record.value = match var {
@@ -521,7 +550,7 @@ pub fn parse_variable_record_with_vendor(
                         // Apply exponent
                         let scaled = n * 10_f64.powi(exp as i32);
                         MBusRecordValue::Numeric(scaled)
-                    },
+                    }
                     vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
                     _ => MBusRecordValue::String("Vendor specific".to_string()),
                 };
@@ -530,7 +559,12 @@ pub fn parse_variable_record_with_vendor(
 
         // Check for QUNDIS-specific VIF 0x04 date handling
         if mfr_id == "QDS" && record.drh.vib.vif == 0x04 {
-            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(reg, mfr_id, record.drh.vib.vif, &record.data[..record.data_len])? {
+            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(
+                reg,
+                mfr_id,
+                record.drh.vib.vif,
+                &record.data[..record.data_len],
+            )? {
                 record.unit = unit;
                 record.quantity = qty;
                 record.value = match var {
@@ -538,7 +572,7 @@ pub fn parse_variable_record_with_vendor(
                         // Apply exponent
                         let scaled = n * 10_f64.powi(exp as i32);
                         MBusRecordValue::Numeric(scaled)
-                    },
+                    }
                     vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
                     _ => MBusRecordValue::String("Vendor specific".to_string()),
                 };
@@ -549,13 +583,18 @@ pub fn parse_variable_record_with_vendor(
         if record.data_len > 0 {
             // Status byte is often at the end of fixed data structures
             let status_byte = record.data[record.data_len - 1];
-            if (status_byte & 0xE0) != 0 {  // Check bits [7:5]
-                if let Some(status_vars) = vendors::dispatch_status_hook(reg, mfr_id, status_byte)? {
+            if (status_byte & 0xE0) != 0 {
+                // Check bits [7:5]
+                if let Some(status_vars) = vendors::dispatch_status_hook(reg, mfr_id, status_byte)?
+                {
                     // Add status to quantity/unit for visibility
-                    let status_str = status_vars.iter()
+                    let status_str = status_vars
+                        .iter()
                         .filter_map(|v| match v {
                             vendors::VendorVariable::Boolean(true) => Some("ALARM"),
-                            vendors::VendorVariable::ErrorFlags { flags } if *flags != 0 => Some("ERROR"),
+                            vendors::VendorVariable::ErrorFlags { flags } if *flags != 0 => {
+                                Some("ERROR")
+                            }
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -770,5 +809,22 @@ mod tests {
         record.drh.dib.dif = MBUS_DIB_DIF_MORE_RECORDS_FOLLOW;
         mbus_data_record_append(&mut record);
         assert_eq!(record.more_records_follow, 1);
+    }
+
+    #[test]
+    fn custom_vif_record_reports_exact_consumption() {
+        // Regression for fix #8: DIF=0x01 (1-byte int), VIF=0x7C (plain text) len=5 "Test1",
+        // data=0x42, then a following record byte 0xEE. Consumption must be 9 (DIF+VIF+len+
+        // 5 text + 1 data) and the data byte must be 0x42 — previously the custom-VIF cursor
+        // was discarded, so consumption was ~3 and 0x05 was mistaken for the data.
+        let data = [0x01, 0x7C, 0x05, b'T', b'e', b's', b't', b'1', 0x42, 0xEE];
+        let (record, consumed) = parse_variable_record_consumed(&data).unwrap();
+        assert_eq!(consumed, 9, "DIF+VIF+len+5 text+1 data = 9 bytes");
+        assert_eq!(record.data_len, 1);
+        assert_eq!(
+            record.data[0], 0x42,
+            "data must be 0x42, not the VIF length byte"
+        );
+        assert_eq!(&data[consumed..], &[0xEE], "next record stays aligned");
     }
 }

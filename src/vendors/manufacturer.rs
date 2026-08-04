@@ -16,21 +16,23 @@
 //! ## Usage Example
 //!
 //! ```rust
-//! use mbus_rs::vendors::manufacturer::{manufacturer_to_id, id_to_manufacturer};
+//! use mbus_rs::vendors::manufacturer::{
+//!     manufacturer_to_id, id_to_manufacturer, get_manufacturer_info,
+//! };
 //!
 //! // Convert manufacturer code to ID
-//! let id = manufacturer_to_id("QDS").unwrap(); // 0x5153
+//! let id = manufacturer_to_id("QDS").unwrap(); // 0x4493
 //!
 //! // Convert ID back to code
-//! let code = id_to_manufacturer(0x5153); // "QDS"
+//! let code = id_to_manufacturer(0x4493); // "QDS"
 //!
 //! // Get manufacturer info
-//! let info = get_manufacturer_info(0x5153).unwrap();
+//! let info = get_manufacturer_info(0x4493).unwrap();
 //! println!("Manufacturer: {} ({})", info.name, info.code);
 //! ```
 
-use std::collections::HashMap;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 
 /// Information about a known M-Bus manufacturer
 #[derive(Debug, Clone, PartialEq)]
@@ -77,22 +79,49 @@ pub static KNOWN_MANUFACTURERS: Lazy<HashMap<u16, ManufacturerInfo>> = Lazy::new
     // ===== HEAT COST ALLOCATOR MANUFACTURERS =====
 
     // Qundis - Major HCA manufacturer with proprietary extensions
-    map.insert(0x4493, ManufacturerInfo::with_description(
-        "QDS", "Qundis GmbH", true,
-        "HCA manufacturer with proprietary VIF 0x04 date encoding"
-    ));
+    map.insert(
+        0x4493,
+        ManufacturerInfo::with_description(
+            "QDS",
+            "Qundis GmbH",
+            true,
+            "HCA manufacturer with proprietary VIF 0x04 date encoding",
+        ),
+    );
 
     // Other HCA manufacturers
     map.insert(0x0907, ManufacturerInfo::new("BHG", "Brunata Hürth", false));
-    map.insert(0x2674, ManufacturerInfo::new("IST", "ista International", false));
+    map.insert(
+        0x2674,
+        ManufacturerInfo::new("IST", "ista International", false),
+    );
     map.insert(0x5068, ManufacturerInfo::new("TCH", "Techem GmbH", false));
-    map.insert(0x6A4D, ManufacturerInfo::new("ZRM", "Minol Zenner Group", false));
+    map.insert(
+        0x6A4D,
+        ManufacturerInfo::new("ZRM", "Minol Zenner Group", false),
+    );
 
     // ===== WATER METER MANUFACTURERS =====
 
     map.insert(0x05B4, ManufacturerInfo::new("AMT", "Aquametro AG", false));
-    map.insert(0x2324, ManufacturerInfo::new("HYD", "Diehl Metering (Hydrometer)", false));
-    map.insert(0x68AE, ManufacturerInfo::new("ZEN", "Zenner International", false));
+    map.insert(
+        0x2324,
+        ManufacturerInfo::new("HYD", "Diehl Metering (Hydrometer)", false),
+    );
+    map.insert(
+        0x68AE,
+        ManufacturerInfo::new("ZEN", "Zenner International", false),
+    );
+    map.insert(
+        0x6A49,
+        ManufacturerInfo::with_description(
+            "ZRI",
+            "Zenner International",
+            false,
+            "Observed on Zenner water meters over the optical interface; \
+             distinct from the ZEN (0x68AE) and ZRM (0x6A4D) codes",
+        ),
+    );
     map.insert(0x1596, ManufacturerInfo::new("ELV", "Elvaco", false));
     map.insert(0x34B4, ManufacturerInfo::new("MET", "Metrix", false));
 
@@ -106,31 +135,61 @@ pub static KNOWN_MANUFACTURERS: Lazy<HashMap<u16, ManufacturerInfo>> = Lazy::new
 
     // ===== MULTI-UTILITY MANUFACTURERS =====
 
-    map.insert(0x0442, ManufacturerInfo::new("ABB", "ABB (Asea Brown Boveri)", false));
-    map.insert(0x0477, ManufacturerInfo::new("ACW", "Actaris (Itron)", false));
-    map.insert(0x15A8, ManufacturerInfo::new("EMH", "EMH Energie-Messtechnik", false));
-    map.insert(0x15B5, ManufacturerInfo::new("EMU", "EMU Electronic AG", false));
+    map.insert(
+        0x0442,
+        ManufacturerInfo::new("ABB", "ABB (Asea Brown Boveri)", false),
+    );
+    map.insert(
+        0x0477,
+        ManufacturerInfo::new("ACW", "Actaris (Itron)", false),
+    );
+    map.insert(
+        0x15A8,
+        ManufacturerInfo::new("EMH", "EMH Energie-Messtechnik", false),
+    );
+    map.insert(
+        0x15B5,
+        ManufacturerInfo::new("EMU", "EMU Electronic AG", false),
+    );
     map.insert(0x2697, ManufacturerInfo::new("ITW", "Itron", false));
     map.insert(0x2C2D, ManufacturerInfo::new("KAM", "Kamstrup", false));
     map.insert(0x32A7, ManufacturerInfo::new("LUG", "Landis+Gyr", false));
-    map.insert(0x3B52, ManufacturerInfo::new("NZR", "Neue Zählerwerke", false));
-    map.insert(0x4CAE, ManufacturerInfo::new("SEN", "Sensus Metering Systems", false));
+    map.insert(
+        0x3B52,
+        ManufacturerInfo::new("NZR", "Neue Zählerwerke", false),
+    );
+    map.insert(
+        0x4CAE,
+        ManufacturerInfo::new("SEN", "Sensus Metering Systems", false),
+    );
     map.insert(0x4D25, ManufacturerInfo::new("SIE", "Siemens", false));
 
     // ===== GAS METER MANUFACTURERS =====
 
-    map.insert(0x1593, ManufacturerInfo::new("ELS", "Elster (Honeywell)", false));
-    map.insert(0x4965, ManufacturerInfo::new("RKE", "Raiffeisen Leasing", false));
+    map.insert(
+        0x1593,
+        ManufacturerInfo::new("ELS", "Elster (Honeywell)", false),
+    );
+    map.insert(
+        0x4965,
+        ManufacturerInfo::new("RKE", "Raiffeisen Leasing", false),
+    );
 
     // ===== OTHER/SPECIALIZED MANUFACTURERS =====
 
     map.insert(0x1347, ManufacturerInfo::new("DZG", "DZG Metering", false));
-    map.insert(0x3265, ManufacturerInfo::new("LSE", "LSE Industrie-Elektronik", false));
+    map.insert(
+        0x3265,
+        ManufacturerInfo::new("LSE", "LSE Industrie-Elektronik", false),
+    );
 
     // ===== REFERENCE/TEST MANUFACTURERS =====
 
     // CEN is used as example in M-Bus documentation
-    map.insert(0x0CAE, ManufacturerInfo::new("CEN", "Example Manufacturer", false));
+    map.insert(
+        0x0CAE,
+        ManufacturerInfo::new("CEN", "Example Manufacturer", false),
+    );
 
     map
 });
@@ -149,6 +208,8 @@ pub static KNOWN_MANUFACTURERS: Lazy<HashMap<u16, ManufacturerInfo>> = Lazy::new
 ///
 /// # Examples
 /// ```rust
+/// use mbus_rs::vendors::manufacturer::manufacturer_to_id;
+///
 /// assert_eq!(manufacturer_to_id("CEN"), Some(0x0CAE)); // 3246
 /// assert_eq!(manufacturer_to_id("KAM"), Some(0x2C2D)); // 11309
 /// assert_eq!(manufacturer_to_id("kam"), Some(0x2C2D)); // Case insensitive
@@ -163,7 +224,10 @@ pub fn manufacturer_to_id(manufacturer: &str) -> Option<u16> {
     let chars: Vec<char> = code.chars().collect();
 
     // All characters must be ASCII alphabetic (A-Z)
-    if !chars.iter().all(|c| c.is_ascii_alphabetic() && c.is_uppercase()) {
+    if !chars
+        .iter()
+        .all(|c| c.is_ascii_alphabetic() && c.is_uppercase())
+    {
         return None;
     }
 
@@ -199,6 +263,8 @@ pub fn manufacturer_to_id(manufacturer: &str) -> Option<u16> {
 ///
 /// # Examples
 /// ```rust
+/// use mbus_rs::vendors::manufacturer::id_to_manufacturer;
+///
 /// assert_eq!(id_to_manufacturer(0x0CAE), "CEN"); // 3246
 /// assert_eq!(id_to_manufacturer(0x2C2D), "KAM"); // 11309
 /// assert_eq!(id_to_manufacturer(0x8CAE), "CEN"); // With MSB set (soft address)
@@ -295,6 +361,8 @@ pub fn is_valid_id(id: u16) -> bool {
 ///
 /// # Examples
 /// ```rust
+/// use mbus_rs::vendors::manufacturer::is_soft_address;
+///
 /// assert!(!is_soft_address(0x0CAE)); // Hard address (MSB = 0)
 /// assert!(is_soft_address(0x8CAE));  // Soft address (MSB = 1)
 /// ```
@@ -306,14 +374,16 @@ pub fn is_soft_address(id: u16) -> bool {
 ///
 /// # Examples
 /// ```rust
+/// use mbus_rs::vendors::manufacturer::set_soft_address;
+///
 /// assert_eq!(set_soft_address(0x0CAE, true), 0x8CAE);  // Set MSB
 /// assert_eq!(set_soft_address(0x8CAE, false), 0x0CAE); // Clear MSB
 /// ```
 pub fn set_soft_address(id: u16, soft: bool) -> u16 {
     if soft {
-        id | 0x8000  // Set MSB
+        id | 0x8000 // Set MSB
     } else {
-        id & 0x7FFF  // Clear MSB
+        id & 0x7FFF // Clear MSB
     }
 }
 
@@ -350,6 +420,28 @@ mod tests {
         assert_eq!(id_to_manufacturer(0x0442), "ABB");
     }
 
+    /// ZRI is the code a physical Zenner water meter reports over the optical
+    /// interface. Zenner uses three distinct FLAG codes, so a lookup that only
+    /// knows ZEN will fail to resolve real hardware.
+    #[test]
+    fn test_zenner_codes() {
+        assert_eq!(manufacturer_to_id("ZRI"), Some(0x6A49));
+        assert_eq!(id_to_manufacturer(0x6A49), "ZRI");
+
+        let info = get_manufacturer_info(0x6A49).expect("ZRI must be in the database");
+        assert_eq!(info.code, "ZRI");
+        assert_eq!(info.name, "Zenner International");
+
+        // The three Zenner-family codes are distinct and all resolvable.
+        for (code, id) in [("ZEN", 0x68AEu16), ("ZRI", 0x6A49), ("ZRM", 0x6A4D)] {
+            assert_eq!(manufacturer_to_id(code), Some(id));
+            assert!(
+                get_manufacturer_info(id).is_some(),
+                "{code} ({id:#06X}) missing from the database"
+            );
+        }
+    }
+
     #[test]
     fn test_msb_handling() {
         // Test that MSB (soft address flag) is properly handled in decoding
@@ -382,11 +474,11 @@ mod tests {
     fn test_invalid_inputs() {
         // Test invalid manufacturer codes
         assert_eq!(manufacturer_to_id(""), None);
-        assert_eq!(manufacturer_to_id("AB"), None);      // Too short
-        assert_eq!(manufacturer_to_id("ABCD"), None);   // Too long
-        assert_eq!(manufacturer_to_id("123"), None);    // Non-alphabetic
-        assert_eq!(manufacturer_to_id("A1B"), None);    // Mixed alphanumeric
-        assert_eq!(manufacturer_to_id("A-B"), None);    // Special characters
+        assert_eq!(manufacturer_to_id("AB"), None); // Too short
+        assert_eq!(manufacturer_to_id("ABCD"), None); // Too long
+        assert_eq!(manufacturer_to_id("123"), None); // Non-alphabetic
+        assert_eq!(manufacturer_to_id("A1B"), None); // Mixed alphanumeric
+        assert_eq!(manufacturer_to_id("A-B"), None); // Special characters
 
         // Test invalid IDs
         assert_eq!(id_to_manufacturer(0x0000), "UNK"); // All zeros
@@ -400,10 +492,17 @@ mod tests {
         let test_codes = ["CEN", "QDS", "ZEN", "KAM", "AAA", "ZZZ", "ABC", "XYZ"];
 
         for code in &test_codes {
-            let id = manufacturer_to_id(code).expect(&format!("Failed to encode {}", code));
+            let id =
+                manufacturer_to_id(code).unwrap_or_else(|| panic!("Failed to encode {}", code));
             let decoded = id_to_manufacturer(id);
-            assert_eq!(decoded, code.to_uppercase(),
-                "Round-trip failed for {}: 0x{:04X} -> {}", code, id, decoded);
+            assert_eq!(
+                decoded,
+                code.to_uppercase(),
+                "Round-trip failed for {}: 0x{:04X} -> {}",
+                code,
+                id,
+                decoded
+            );
         }
     }
 
@@ -432,7 +531,7 @@ mod tests {
     #[test]
     fn test_utility_functions() {
         // Test has_quirks
-        assert!(has_quirks(0x4493));  // Qundis has quirks
+        assert!(has_quirks(0x4493)); // Qundis has quirks
         assert!(!has_quirks(0x68AE)); // Zenner no quirks
         assert!(!has_quirks(0x0000)); // Unknown no quirks
 
@@ -458,18 +557,32 @@ mod tests {
         // Ensure all entries in database have valid IDs and match encoding
         for (&id, info) in KNOWN_MANUFACTURERS.iter() {
             // ID should be valid
-            assert!(is_valid_id(id),
-                "Invalid ID 0x{:04X} for manufacturer {}", id, info.code);
+            assert!(
+                is_valid_id(id),
+                "Invalid ID 0x{:04X} for manufacturer {}",
+                id,
+                info.code
+            );
 
             // Encoding should produce the stored ID
             let encoded_id = manufacturer_to_id(info.code);
-            assert_eq!(encoded_id, Some(id),
+            assert_eq!(
+                encoded_id,
+                Some(id),
                 "Encoding mismatch for {}: expected 0x{:04X}, got {:?}",
-                info.code, id, encoded_id);
+                info.code,
+                id,
+                encoded_id
+            );
 
             // Decoding should produce the stored code
-            assert_eq!(id_to_manufacturer(id), info.code,
-                "Decoding mismatch for 0x{:04X}: expected {}", id, info.code);
+            assert_eq!(
+                id_to_manufacturer(id),
+                info.code,
+                "Decoding mismatch for 0x{:04X}: expected {}",
+                id,
+                info.code
+            );
         }
     }
 
@@ -479,8 +592,11 @@ mod tests {
         let manufacturers: Vec<_> = all_manufacturers().collect();
 
         // Should have 30+ manufacturers after expansion
-        assert!(manufacturers.len() >= 30,
-            "Expected at least 30 manufacturers, found {}", manufacturers.len());
+        assert!(
+            manufacturers.len() >= 30,
+            "Expected at least 30 manufacturers, found {}",
+            manufacturers.len()
+        );
 
         // Verify specific manufacturers are present by category
 
@@ -505,7 +621,8 @@ mod tests {
         assert!(manufacturers.iter().any(|(_, info)| info.code == "CEN"));
 
         // Only QUNDIS should have quirks
-        let quirky_count = manufacturers.iter()
+        let quirky_count = manufacturers
+            .iter()
             .filter(|(_, info)| info.has_quirks)
             .count();
         assert_eq!(quirky_count, 1, "Only QUNDIS should have quirks");
@@ -515,29 +632,36 @@ mod tests {
     fn test_new_manufacturers_encoding() {
         // Test newly added manufacturers have correct encoding
         let test_cases = [
-            ("ACW", 0x0477),  // Actaris
-            ("AMT", 0x05B4),  // Aquametro
-            ("BHG", 0x0907),  // Brunata
-            ("EMH", 0x15A8),  // EMH
-            ("EMU", 0x15B5),  // EMU Electronic
-            ("HYD", 0x2324),  // Hydrometer
-            ("IST", 0x2674),  // ista
-            ("NZR", 0x3B52),  // NZR
-            ("PAD", 0x4024),  // PadMess
-            ("REL", 0x48AC),  // Relay
-            ("ZRM", 0x6A4D),  // Minol Zenner
+            ("ACW", 0x0477), // Actaris
+            ("AMT", 0x05B4), // Aquametro
+            ("BHG", 0x0907), // Brunata
+            ("EMH", 0x15A8), // EMH
+            ("EMU", 0x15B5), // EMU Electronic
+            ("HYD", 0x2324), // Hydrometer
+            ("IST", 0x2674), // ista
+            ("NZR", 0x3B52), // NZR
+            ("PAD", 0x4024), // PadMess
+            ("REL", 0x48AC), // Relay
+            ("ZRM", 0x6A4D), // Minol Zenner
         ];
 
         for (code, expected_id) in &test_cases {
             let encoded = manufacturer_to_id(code);
-            assert_eq!(encoded, Some(*expected_id),
+            assert_eq!(
+                encoded,
+                Some(*expected_id),
                 "Encoding mismatch for {}: expected 0x{:04X}, got {:?}",
-                code, expected_id, encoded);
+                code,
+                expected_id,
+                encoded
+            );
 
             let decoded = id_to_manufacturer(*expected_id);
-            assert_eq!(decoded, *code,
+            assert_eq!(
+                decoded, *code,
                 "Decoding mismatch for 0x{:04X}: expected {}, got {}",
-                expected_id, code, decoded);
+                expected_id, code, decoded
+            );
         }
     }
 }

@@ -153,15 +153,18 @@ async fn test_frame_handler_send_frame() {
         checksum: 0,
         more_records_follow: false,
     };
+    // FrameHandler has no transport wired: send_frame now reports that honestly rather
+    // than pretending success.
     let result = handler.send_frame(&frame).await;
-    assert!(result.is_ok());
+    assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_frame_handler_receive_frame() {
     let mut handler = mbus_rs::mbus::mbus_protocol::FrameHandler::new();
+    // No transport wired -> error, not a fabricated dummy frame.
     let result = handler.receive_frame().await;
-    assert!(result.is_ok()); // Returns dummy
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -176,10 +179,10 @@ async fn test_device_discovery_manager_scan_secondary_addresses() {
 #[tokio::test]
 async fn test_data_retrieval_manager_retrieve_data() {
     let mut manager = mbus_rs::mbus::mbus_protocol::DataRetrievalManager::new();
+    // retrieve_data drives FrameHandler, which has no transport wired: it now reports that
+    // honestly (error) instead of returning a fabricated empty result.
     let result = manager.retrieve_data(1).await;
-    assert!(result.is_ok());
-    let records = result.unwrap();
-    assert!(records.is_empty());
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -197,8 +200,8 @@ async fn test_record_parser_parse_records_variable() {
     let result = parser.parse_records(&frame);
     assert!(result.is_ok());
     let _records = result.unwrap();
-    // Since parse may fail or return empty due to mock, check for no panic
-    assert!(true);
+    // Reaching this point without a panic is the assertion; parse may legitimately
+    // return empty for the mock transport.
 }
 
 #[tokio::test]

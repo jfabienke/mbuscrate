@@ -112,37 +112,27 @@ impl StateMachine {
         &mut self,
         secondary_address: &[u8; 8],
     ) -> Result<(), MBusError> {
-        self.state = MBusProtocolState::Selecting;
-
-        if secondary_address.len() != 8 {
-            return Err(MBusError::Other(
-                "Secondary address must be exactly 8 bytes".to_string(),
-            ));
-        }
-
-        // Create SND_UD frame for device selection
-        // Frame structure: [68h] [0Bh] [0Bh] [68h] [53h] [FDh] [52h] [Secondary Address...] [CS] [16h]
+        // Build (and validate) the SND_UD Mode-1 selection frame:
+        // [68h][0Bh][0Bh][68h][53h][FDh][52h][Secondary Address...][CS][16h]
         let selection_frame = MBusFrame {
             frame_type: MBusFrameType::Long,
             control: 0x53,                    // SND_UD control field
             address: 0xFD,                    // Selection address (253)
             control_information: 0x52,        // CI for Mode 1 selection
             data: secondary_address.to_vec(), // 8-byte secondary address
-            checksum: 0,                      // Will be calculated by pack_frame
+            checksum: 0,                      // computed by pack_frame
             more_records_follow: false,
         };
-
-        // TODO: This will be connected to actual serial transmission in integration
-        // For now, we just validate the frame can be created correctly
         let _frame_bytes = frame::pack_frame(&selection_frame);
 
-        // After successful selection, device responds to address 253
-        // The serial layer would need to:
-        // 1. Send the selection frame
-        // 2. Wait for E5h acknowledgment
-        // 3. If ACK received, device is selected
-
-        Ok(())
+        // Selection requires sending this frame and awaiting an E5h ACK, which this
+        // StateMachine has no transport for. Report that honestly rather than returning
+        // Ok(()) and falsely claiming the device is now selected (address 253).
+        Err(MBusError::Other(
+            "select_device_by_secondary_address not implemented: StateMachine has no transport \
+             (send + await E5h ACK); use the serial MBusDeviceHandle"
+                .to_string(),
+        ))
     }
 
     /// Requests Class 2 data from the currently selected device using REQ_UD2.
@@ -433,18 +423,9 @@ impl StateMachine {
     /// * `Ok((MBusRecord, usize))` - Parsed record and bytes consumed
     /// * `Err(MBusError)` - Parsing failed
     fn try_parse_variable_record(&self, data: &[u8]) -> Result<(MBusRecord, usize), MBusError> {
-        use crate::payload::record::parse_variable_record;
-
-        let _initial_len = data.len();
-
-        // Parse variable record - this function already handles the complex DIF/VIF parsing
-        let record = parse_variable_record(data)?;
-
-        // Calculate consumed bytes (this is a simplification - in practice, we'd need
-        // more sophisticated tracking of how many bytes were consumed)
-        let consumed_bytes = self.calculate_record_size(&record);
-
-        Ok((record, consumed_bytes))
+        // Use the parser's exact consumed-byte count so multi-record walking stays aligned
+        // through DIFE/VIFE chains and variable-length data (was previously estimated).
+        crate::payload::record::parse_variable_record_consumed(data)
     }
 
     /// Attempts to parse data as a fixed-length M-Bus record.
@@ -517,11 +498,11 @@ impl StateMachine {
 
         // Validate value is reasonable (not NaN, not infinite) for numeric values
         match &mut record.value {
-            crate::payload::record::MBusRecordValue::Numeric(value) => {
-                if value.is_nan() || value.is_infinite() {
-                    // Set to 0 and log the issue rather than failing
-                    *value = 0.0;
-                }
+            crate::payload::record::MBusRecordValue::Numeric(value)
+                if (value.is_nan() || value.is_infinite()) =>
+            {
+                // Set to 0 and log the issue rather than failing
+                *value = 0.0;
             }
             _ => {
                 // String values don't need this validation
@@ -677,23 +658,23 @@ impl FrameHandler {
         Ok(())
     }
 
-    /// Sends a frame (stub).
+    /// Send a frame. NOTE: [`FrameHandler`] has no transport wired — the working serial
+    /// path is `MBusDeviceHandle` in `serial.rs`. This returns an error rather than
+    /// silently pretending the send succeeded.
     pub async fn send_frame(&mut self, _frame: &MBusFrame) -> Result<(), MBusError> {
-        Ok(())
+        Err(MBusError::Other(
+            "FrameHandler::send_frame is not implemented (no transport wired); use MBusDeviceHandle"
+                .into(),
+        ))
     }
 
-    /// Receives a frame (stub).
+    /// Receive a frame. See [`FrameHandler::send_frame`] — no transport is wired, so this
+    /// errors instead of returning a fabricated dummy frame.
     pub async fn receive_frame(&mut self) -> Result<MBusFrame, MBusError> {
-        // Return a dummy short frame for stubs
-        Ok(MBusFrame {
-            frame_type: MBusFrameType::Short,
-            control: 0,
-            address: 0,
-            control_information: 0,
-            data: vec![],
-            checksum: 0,
-            more_records_follow: false,
-        })
+        Err(MBusError::Other(
+            "FrameHandler::receive_frame is not implemented (no transport wired); use MBusDeviceHandle"
+                .into(),
+        ))
     }
 }
 

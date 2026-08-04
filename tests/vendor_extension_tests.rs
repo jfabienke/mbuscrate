@@ -1,9 +1,9 @@
 //! Comprehensive tests for the vendor extension system
 
 use mbus_rs::{
-    VendorExtension, VendorRegistry, VendorDataRecord, VendorVariable, VendorDeviceInfo,
-    MBusError, MBusFrame, MBusRecord, MBusRecordValue, DeviceType, ProtocolType,
-    from_mbus_frame, from_vendor_device_info,
+    from_mbus_frame, from_vendor_device_info, DeviceType, MBusError, MBusFrame, MBusRecord,
+    MBusRecordValue, ProtocolType, VendorDataRecord, VendorDeviceInfo, VendorExtension,
+    VendorRegistry, VendorVariable,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,14 +99,15 @@ impl VendorExtension for KamstrupExtension {
         let vendor_bits = (status_byte >> 5) & 0x07;
         let mut vars = Vec::new();
 
-        if vendor_bits & 0x01 != 0 {
-            vars.push(VendorVariable::Boolean(true));
-        }
-        if vendor_bits & 0x02 != 0 {
-            vars.push(VendorVariable::Boolean(true));
-        }
-        if vendor_bits & 0x04 != 0 {
-            vars.push(VendorVariable::Boolean(true));
+        // Emit *named* alerts so callers can tell the three vendor bits apart.
+        // Plain Boolean(true) values are indistinguishable once collected.
+        for bit in 0..3u8 {
+            if vendor_bits & (1 << bit) != 0 {
+                vars.push(VendorVariable::Custom {
+                    name: format!("Kamstrup Alert {}", bit + 1),
+                    value: serde_json::Value::Bool(true),
+                });
+            }
         }
 
         if vars.is_empty() {
@@ -132,7 +133,8 @@ impl VendorExtension for KamstrupExtension {
             _ => "MULTICAL".to_string(),
         });
 
-        basic_info.firmware_version = Some(format!("v{}.{}",
+        basic_info.firmware_version = Some(format!(
+            "v{}.{}",
             basic_info.version >> 4,
             basic_info.version & 0x0F
         ));
@@ -160,10 +162,13 @@ impl VendorExtension for KamstrupExtension {
         let device_bytes = device_info.device_id.to_be_bytes();
         let mfr_bytes = device_info.manufacturer_id.to_be_bytes();
 
-        // Simple key derivation for testing
+        // Simple key derivation for testing.
+        // The layout is an 8-byte device-ID field followed by manufacturer bytes.
+        // device_id is a u32, so it occupies key[0..4] and key[4..8] stays zero-padded —
+        // the original `device_bytes[i + 4]` indexed past the end of a 4-byte array.
         for i in 0..4 {
             key[i] = device_bytes[i];
-            key[i + 4] = device_bytes[i + 4];
+            key[i + 4] = 0; // zero-extension of the u32 device ID to 8 bytes
             key[i + 8] = mfr_bytes[0];
             key[i + 12] = mfr_bytes[1];
         }
@@ -175,12 +180,16 @@ impl VendorExtension for KamstrupExtension {
 #[test]
 fn test_kamstrup_dif_manufacturer_block() {
     let registry = VendorRegistry::new();
-    registry.register("KAM", Arc::new(KamstrupExtension)).unwrap();
+    registry
+        .register("KAM", Arc::new(KamstrupExtension))
+        .unwrap();
 
     // Test DIF 0x0F with manufacturer data
     let payload = vec![0x12, 0x34, 0x56, 0x78, 0xAB, 0xCD];
     let extension = registry.get("KAM").unwrap();
-    let result = extension.handle_dif_manufacturer_block("KAM", 0x0F, &payload).unwrap();
+    let result = extension
+        .handle_dif_manufacturer_block("KAM", 0x0F, &payload)
+        .unwrap();
 
     assert!(result.is_some());
     let records = result.unwrap();
@@ -197,10 +206,14 @@ fn test_kamstrup_dif_manufacturer_block() {
 #[test]
 fn test_kamstrup_vif_parsing() {
     let registry = VendorRegistry::new();
-    registry.register("KAM", Arc::new(KamstrupExtension)).unwrap();
+    registry
+        .register("KAM", Arc::new(KamstrupExtension))
+        .unwrap();
 
     let extension = registry.get("KAM").unwrap();
-    let result = extension.parse_vif_manufacturer_specific("KAM", 0xFF, &[]).unwrap();
+    let result = extension
+        .parse_vif_manufacturer_specific("KAM", 0xFF, &[])
+        .unwrap();
 
     assert!(result.is_some());
     let (quantity, exp, unit, var) = result.unwrap();
@@ -218,11 +231,15 @@ fn test_kamstrup_vif_parsing() {
 #[test]
 fn test_kamstrup_ci_commands() {
     let registry = VendorRegistry::new();
-    registry.register("KAM", Arc::new(KamstrupExtension)).unwrap();
+    registry
+        .register("KAM", Arc::new(KamstrupExtension))
+        .unwrap();
 
     let extension = registry.get("KAM").unwrap();
     let payload = vec![0x01, 0x02, 0x03];
-    let result = extension.handle_ci_manufacturer_range("KAM", 0xA5, &payload).unwrap();
+    let result = extension
+        .handle_ci_manufacturer_range("KAM", 0xA5, &payload)
+        .unwrap();
 
     assert!(result.is_some());
     let record = result.unwrap();
@@ -238,7 +255,9 @@ fn test_kamstrup_ci_commands() {
 #[test]
 fn test_kamstrup_status_bits() {
     let registry = VendorRegistry::new();
-    registry.register("KAM", Arc::new(KamstrupExtension)).unwrap();
+    registry
+        .register("KAM", Arc::new(KamstrupExtension))
+        .unwrap();
 
     let extension = registry.get("KAM").unwrap();
 
@@ -251,13 +270,16 @@ fn test_kamstrup_status_bits() {
     assert_eq!(vars.len(), 3);
 
     // Verify all alerts are present
-    let alert_names: Vec<String> = vars.iter().map(|v| {
-        if let VendorVariable::Boolean(_) = v {
-            "Alert".to_string() // Generic alert name
-        } else {
-            String::new()
-        }
-    }).collect();
+    let alert_names: Vec<String> = vars
+        .iter()
+        .map(|v| {
+            if let VendorVariable::Custom { name, .. } = v {
+                name.clone()
+            } else {
+                String::new()
+            }
+        })
+        .collect();
 
     assert!(alert_names.contains(&"Kamstrup Alert 1".to_string()));
     assert!(alert_names.contains(&"Kamstrup Alert 2".to_string()));
@@ -267,14 +289,16 @@ fn test_kamstrup_status_bits() {
 #[test]
 fn test_kamstrup_device_enrichment() {
     let registry = VendorRegistry::new();
-    registry.register("KAM", Arc::new(KamstrupExtension)).unwrap();
+    registry
+        .register("KAM", Arc::new(KamstrupExtension))
+        .unwrap();
 
     let extension = registry.get("KAM").unwrap();
 
     let basic_info = VendorDeviceInfo {
         manufacturer_id: 0x2C2D, // KAM
         device_id: 0x12345678,
-        version: 0x15, // Version 1.5
+        version: 0x15,     // Version 1.5
         device_type: 0x07, // Water meter
         model: None,
         serial_number: Some("12345678".to_string()),
@@ -297,7 +321,9 @@ fn test_kamstrup_device_enrichment() {
 #[test]
 fn test_kamstrup_key_provisioning() {
     let registry = VendorRegistry::new();
-    registry.register("KAM", Arc::new(KamstrupExtension)).unwrap();
+    registry
+        .register("KAM", Arc::new(KamstrupExtension))
+        .unwrap();
 
     let extension = registry.get("KAM").unwrap();
 
@@ -345,15 +371,17 @@ fn test_unified_instrumentation_from_vendor() {
 
 #[test]
 fn test_registry_thread_safety() {
-    use std::thread;
     use std::sync::Arc;
+    use std::thread;
 
     let registry = Arc::new(VendorRegistry::new());
 
     // Register from one thread
     let reg_clone = registry.clone();
     let handle1 = thread::spawn(move || {
-        reg_clone.register("KAM", Arc::new(KamstrupExtension)).unwrap();
+        reg_clone
+            .register("KAM", Arc::new(KamstrupExtension))
+            .unwrap();
     });
 
     handle1.join().unwrap();
@@ -372,7 +400,9 @@ fn test_registry_thread_safety() {
 
             // Test a hook
             if let Some(extension) = ext {
-                let result = extension.decode_status_bits("KAM", 0x20 * i).unwrap();
+                // status_byte is u8; 0x20 * i overflows once i >= 8.
+                let status_byte = 0x20u8.wrapping_mul(i as u8);
+                let result = extension.decode_status_bits("KAM", status_byte).unwrap();
                 // Just verify it doesn't crash
                 let _ = result;
             }
@@ -399,23 +429,21 @@ fn test_integration_with_mbus_frame() {
     };
 
     // Create some records with vendor-specific data
-    let records = vec![
-        MBusRecord {
-            timestamp: SystemTime::now(),
-            storage_number: 0,
-            tariff: -1,
-            device: -1,
-            is_numeric: true,
-            value: MBusRecordValue::Numeric(1234.56),
-            unit: "m³".to_string(),
-            function_medium: String::new(),
-            quantity: "Volume".to_string(),
-            drh: Default::default(),
-            data_len: 0,
-            data: [0; 256],
-            more_records_follow: 0,
-        },
-    ];
+    let records = vec![MBusRecord {
+        timestamp: SystemTime::now(),
+        storage_number: 0,
+        tariff: -1,
+        device: -1,
+        is_numeric: true,
+        value: MBusRecordValue::Numeric(1234.56),
+        unit: "m³".to_string(),
+        function_medium: String::new(),
+        quantity: "Volume".to_string(),
+        drh: Default::default(),
+        data_len: 0,
+        data: [0; 256],
+        more_records_follow: 0,
+    }];
 
     // Convert to unified instrumentation
     let inst = from_mbus_frame(&frame, &records, None);

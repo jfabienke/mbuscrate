@@ -14,24 +14,25 @@
 //! ## Usage
 //!
 //! ```rust
-//! use instrumentation::stats::{DeviceStats, get_device_stats, update_device_error};
+//! use mbus_rs::instrumentation::stats::{get_device_stats, update_device_error, ErrorType};
 //!
 //! // Track CRC error for a device
 //! update_device_error("12345678", ErrorType::Crc);
 //!
 //! // Get statistics for monitoring
 //! let stats = get_device_stats("12345678");
+//! let mut stats = stats.lock().unwrap();
 //! if stats.get_error_rate(ErrorType::Crc) > 5.0 {
 //!     // Alert: High CRC error rate
 //! }
 //! ```
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 lazy_static! {
     /// Global registry of per-device statistics
@@ -119,9 +120,8 @@ impl WindowedCounter {
     fn cleanup_old_windows(&mut self, now: Instant) {
         // Remove windows older than max_windows * window_duration
         let cutoff = self.window_duration * self.max_windows as u32;
-        self.windows.retain(|(time, _)| {
-            now.duration_since(*time) < cutoff
-        });
+        self.windows
+            .retain(|(time, _)| now.duration_since(*time) < cutoff);
 
         // Keep only max_windows
         if self.windows.len() > self.max_windows {
@@ -182,7 +182,8 @@ impl DeviceStats {
 
     /// Increment error counter for specific type
     pub fn increment_error(&mut self, error_type: ErrorType) {
-        let counter = self.error_counters
+        let counter = self
+            .error_counters
             .entry(error_type)
             .or_insert_with(|| WindowedCounter::new(Duration::from_secs(60), 10));
         counter.increment();
@@ -263,7 +264,8 @@ impl DeviceStats {
             frames_received: self.frames_received,
             frames_valid: self.frames_valid,
             success_rate: self.get_success_rate(),
-            error_counts: self.error_counters
+            error_counts: self
+                .error_counters
                 .iter()
                 .map(|(k, v)| (*k, v.get_total()))
                 .collect(),
@@ -570,13 +572,17 @@ mod tests {
 
         stats.increment_received(); // Frame 1: received but failed
         stats.increment_received(); // Frame 2: received but failed
-        stats.increment_success();  // Frame 3: received and successful
+        stats.increment_success(); // Frame 3: received and successful
 
         assert_eq!(stats.frames_received, 3); // 2 failed + 1 successful
-        assert_eq!(stats.frames_valid, 1);    // 1 successful
+        assert_eq!(stats.frames_valid, 1); // 1 successful
 
         let success_rate = stats.get_success_rate();
-        assert!((success_rate - 33.333333).abs() < 0.001, "Success rate should be ~33.33%, got {}", success_rate);
+        assert!(
+            (success_rate - 33.333333).abs() < 0.001,
+            "Success rate should be ~33.33%, got {}",
+            success_rate
+        );
     }
 
     #[test]

@@ -2,15 +2,15 @@ use log::{debug, error, info, log_enabled, warn, Level};
 
 // RTT + defmt logging modules
 #[cfg(feature = "rtt-logging")]
-pub mod rtt_init;
-#[cfg(feature = "rtt-logging")]
 pub mod defmt_writer;
+#[cfg(feature = "rtt-logging")]
+pub mod rtt_init;
 
 // Re-export RTT functionality when available
 #[cfg(feature = "rtt-logging")]
-pub use rtt_init::{init_rtt_logging, is_rtt_available, get_rtt_stats, RttStats};
+pub use defmt_writer::{encoders, init_defmt_tracing, structured};
 #[cfg(feature = "rtt-logging")]
-pub use defmt_writer::{init_defmt_tracing, structured, encoders};
+pub use rtt_init::{get_rtt_stats, init_rtt_logging, is_rtt_available, RttStats};
 
 /// Initializes the logger with the `env_logger` crate.
 ///
@@ -32,8 +32,8 @@ pub fn init_logger() {
 /// // Initialize enhanced logging at startup
 /// init_enhanced_logging().expect("Failed to initialize logging");
 ///
-/// // Use standard tracing macros
-/// tracing::info!("System initialized");
+/// // Use standard logging macros
+/// log::info!("System initialized");
 /// ```
 pub fn init_enhanced_logging() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(feature = "rtt-logging")]

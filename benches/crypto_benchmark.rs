@@ -3,11 +3,13 @@
 //! This benchmark suite measures the performance of all crypto operations
 //! including checksums, CRCs, block validation, and LoRaWAN MIC calculations.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use mbus_rs::mbus::frame::calculate_mbus_checksum;
-use mbus_rs::wmbus::frame::{calculate_wmbus_crc, verify_wmbus_crc};
 use mbus_rs::wmbus::block::{calculate_block_crc, verify_blocks};
-use mbus_rs::wmbus::crypto::{WMBusCrypto, AesKey};
+#[cfg(feature = "crypto")]
+use mbus_rs::wmbus::crypto::{AesKey, WMBusCrypto};
+use mbus_rs::wmbus::frame::{calculate_wmbus_crc, verify_wmbus_crc};
+use std::hint::black_box;
 use std::time::Duration;
 
 /// Test data sizes for throughput testing
@@ -30,15 +32,9 @@ fn bench_mbus_checksum(c: &mut Criterion) {
         let data = generate_test_data(*size);
 
         group.throughput(Throughput::Bytes(*size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &data,
-            |b, data| {
-                b.iter(|| {
-                    calculate_mbus_checksum(black_box(data))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, data| {
+            b.iter(|| calculate_mbus_checksum(black_box(data)))
+        });
     }
 
     group.finish();
@@ -53,15 +49,9 @@ fn bench_wmbus_crc(c: &mut Criterion) {
         let data = generate_test_data(*size);
 
         group.throughput(Throughput::Bytes(*size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &data,
-            |b, data| {
-                b.iter(|| {
-                    calculate_wmbus_crc(black_box(data))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, data| {
+            b.iter(|| calculate_wmbus_crc(black_box(data)))
+        });
     }
 
     group.finish();
@@ -75,9 +65,7 @@ fn bench_block_crc(c: &mut Criterion) {
     // Test single block (16 bytes)
     let block_data = generate_test_data(14); // 14 data bytes for block
     group.bench_function("single_block", |b| {
-        b.iter(|| {
-            calculate_block_crc(black_box(&block_data))
-        })
+        b.iter(|| calculate_block_crc(black_box(&block_data)))
     });
 
     // Test multi-block validation
@@ -85,15 +73,11 @@ fn bench_block_crc(c: &mut Criterion) {
     for size in multi_block_sizes {
         let data = generate_test_data(size);
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(
-            BenchmarkId::new("multi_block", size),
-            &data,
-            |b, data| {
-                b.iter(|| {
-                    let _ = verify_blocks(black_box(data), false);
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("multi_block", size), &data, |b, data| {
+            b.iter(|| {
+                let _ = verify_blocks(black_box(data), false);
+            })
+        });
     }
 
     group.finish();
@@ -117,21 +101,17 @@ fn bench_lorawan_mic(c: &mut Criterion) {
         let fcnt = 42u32;
 
         group.throughput(Throughput::Bytes(*size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &payload,
-            |b, payload| {
-                b.iter(|| {
-                    let _ = crypto.calculate_lorawan_mic(
-                        black_box(&key_bytes),
-                        black_box(payload),
-                        black_box(0), // uplink
-                        black_box(dev_addr),
-                        black_box(fcnt),
-                    );
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &payload, |b, payload| {
+            b.iter(|| {
+                let _ = crypto.calculate_lorawan_mic(
+                    black_box(&key_bytes),
+                    black_box(payload),
+                    black_box(0), // uplink
+                    black_box(dev_addr),
+                    black_box(fcnt),
+                );
+            })
+        });
     }
 
     group.finish();
@@ -153,18 +133,9 @@ fn bench_hmac_sha1(c: &mut Criterion) {
         let message = generate_test_data(*size);
 
         group.throughput(Throughput::Bytes(*size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &message,
-            |b, message| {
-                b.iter(|| {
-                    crypto.calculate_hmac_sha1(
-                        black_box(&key_bytes),
-                        black_box(message),
-                    )
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &message, |b, message| {
+            b.iter(|| crypto.calculate_hmac_sha1(black_box(&key_bytes), black_box(message)))
+        });
     }
 
     group.finish();
@@ -190,9 +161,7 @@ fn bench_frame_validation_pipeline(c: &mut Criterion) {
     };
 
     group.bench_function("wmbus_frame_validation", |b| {
-        b.iter(|| {
-            verify_wmbus_crc(black_box(&wmbus_frame))
-        })
+        b.iter(|| verify_wmbus_crc(black_box(&wmbus_frame)))
     });
 
     // Multi-block frame (Type A)
@@ -207,7 +176,7 @@ fn bench_frame_validation_pipeline(c: &mut Criterion) {
             let block_data = generate_test_data(14);
             let block_crc = calculate_block_crc(&block_data);
             frame.extend_from_slice(&block_data);
-            frame.extend_from_slice(&block_crc.to_le_bytes());
+            frame.extend_from_slice(&block_crc.to_be_bytes()); // big-endian, as transmitted
         }
 
         let crc = calculate_wmbus_crc(&frame);
@@ -289,28 +258,18 @@ fn bench_optimization_comparison(c: &mut Criterion) {
     for (size, data) in &[(256, &data_256), (1024, &data_1k), (4096, &data_4k)] {
         group.throughput(Throughput::Bytes(*size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("current", size),
-            data,
-            |b, data| {
-                b.iter(|| {
-                    calculate_mbus_checksum(black_box(data))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("current", size), data, |b, data| {
+            b.iter(|| calculate_mbus_checksum(black_box(data)))
+        });
 
         // Placeholder for SIMD implementation
         // Will be replaced with actual SIMD when implemented
-        group.bench_with_input(
-            BenchmarkId::new("future_simd", size),
-            data,
-            |b, data| {
-                b.iter(|| {
-                    // For now, same as current
-                    calculate_mbus_checksum(black_box(data))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("future_simd", size), data, |b, data| {
+            b.iter(|| {
+                // For now, same as current
+                calculate_mbus_checksum(black_box(data))
+            })
+        });
     }
 
     group.finish();

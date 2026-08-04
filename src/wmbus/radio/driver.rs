@@ -33,12 +33,15 @@
 //!
 //! ## Usage Example
 //!
-//! ```rust,no_run
-//! use crate::wmbus::radio::driver::Sx126xDriver;
-//! use crate::wmbus::radio::hal::YourHalImpl;
+//! ```rust
+//! use mbus_rs::wmbus::radio::driver::Sx126xDriver;
+//! # use mbus_rs::wmbus::radio::driver::DriverError;
+//! // Substitute your own `Hal` implementation for `MockHal` on real hardware.
+//! use mbus_rs::wmbus::radio::hal::MockHal;
 //!
+//! # fn main() -> Result<(), DriverError> {
 //! // Initialize with your HAL implementation
-//! let hal = YourHalImpl::new(/* SPI, GPIO pins */);
+//! let hal = MockHal::new();
 //! let mut driver = Sx126xDriver::new(hal, 32_000_000); // 32MHz crystal
 //!
 //! // Configure for wM-Bus operation
@@ -51,13 +54,15 @@
 //! if let Some(payload) = driver.process_irqs()? {
 //!     println!("Received: {:?}", payload);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::wmbus::radio::hal::{Hal, HalError};
 use crate::wmbus::radio::irq::{IrqMaskBit, IrqStatus};
 use crate::wmbus::radio::modulation::{
-    CrcType, GfskModParams, HeaderType, LoRaBandwidth, LoRaModParams, LoRaPacketParams,
-    ModulationParams, PacketParams, PacketType, SpreadingFactor, CodingRate,
+    CodingRate, CrcType, GfskModParams, HeaderType, LoRaBandwidth, LoRaModParams, LoRaPacketParams,
+    ModulationParams, PacketParams, PacketType, SpreadingFactor,
 };
 use log;
 use std::time::{Duration, Instant};
@@ -289,8 +294,12 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
-    /// let hal = YourHalImpl::new(/* your SPI and GPIO setup */);
+    /// ```rust
+    /// # use mbus_rs::wmbus::radio::driver::Sx126xDriver;
+    /// // Substitute your own `Hal` implementation for `MockHal` on real hardware.
+    /// use mbus_rs::wmbus::radio::hal::MockHal;
+    ///
+    /// let hal = MockHal::new();
     /// let driver = Sx126xDriver::new(hal, 32_000_000);
     /// ```
     pub fn new(hal: H, xtal_freq: u32) -> Self {
@@ -325,9 +334,15 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust
+    /// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+    /// # use mbus_rs::wmbus::radio::hal::MockHal;
+    /// # fn main() -> Result<(), DriverError> {
+    /// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
     /// // Set frequency to 868.95 MHz (EU wM-Bus S-mode)
     /// driver.set_rf_frequency(868_950_000)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn set_rf_frequency(&mut self, frequency_hz: u32) -> Result<(), DriverError> {
         // Calculate frequency step based on crystal frequency
@@ -382,9 +397,13 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
-    /// use crate::wmbus::radio::modulation::*;
+    /// ```rust
+    /// use mbus_rs::wmbus::radio::modulation::*;
+    /// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+    /// # use mbus_rs::wmbus::radio::hal::MockHal;
     ///
+    /// # fn main() -> Result<(), DriverError> {
+    /// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
     /// // GFSK for wM-Bus
     /// let gfsk_packet = PacketParams::Gfsk {
     ///     preamble_len: 48,                    // 48-bit preamble
@@ -407,6 +426,8 @@ impl<H: Hal> Sx126xDriver<H> {
     ///     }
     /// };
     /// driver.set_packet_params(lora_packet)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn set_packet_params(&mut self, packet_params: PacketParams) -> Result<(), DriverError> {
         match packet_params {
@@ -491,7 +512,10 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// * `Ok(())` on success
     /// * `Err(DriverError::Hal)` if SPI communication fails
-    pub fn set_modulation_params(&mut self, mod_params: ModulationParams) -> Result<(), DriverError> {
+    pub fn set_modulation_params(
+        &mut self,
+        mod_params: ModulationParams,
+    ) -> Result<(), DriverError> {
         match mod_params {
             ModulationParams::Gfsk { params } => {
                 let mut buf = [0u8; 8];
@@ -529,7 +553,11 @@ impl<H: Hal> Sx126xDriver<H> {
                 buf[2] = params.cr as u8;
 
                 // Low Data Rate Optimize
-                buf[3] = if params.low_data_rate_optimize { 0x01 } else { 0x00 };
+                buf[3] = if params.low_data_rate_optimize {
+                    0x01
+                } else {
+                    0x00
+                };
 
                 self.hal.write_command(0x8B, &buf)?; // SetModulationParams command for LoRa
             }
@@ -694,6 +722,10 @@ impl<H: Hal> Sx126xDriver<H> {
     /// # Examples
     ///
     /// ```rust,no_run
+    /// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+    /// # use mbus_rs::wmbus::radio::hal::MockHal;
+    /// # fn main() -> Result<(), DriverError> {
+    /// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
     /// // Polling loop for received data (GFSK or LoRa)
     /// loop {
     ///     if let Some(payload) = driver.process_irqs()? {
@@ -702,6 +734,7 @@ impl<H: Hal> Sx126xDriver<H> {
     ///     }
     ///     std::thread::sleep(std::time::Duration::from_millis(10));
     /// }
+    /// # }
     /// ```
     pub fn process_irqs(&mut self) -> Result<Option<Vec<u8>>, DriverError> {
         // Read current interrupt status
@@ -781,12 +814,18 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
+    /// ```rust
+    /// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+    /// # use mbus_rs::wmbus::radio::hal::MockHal;
+    /// # fn main() -> Result<(), DriverError> {
+    /// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
     /// // Configure for EU wM-Bus S-mode
     /// driver.configure_for_wmbus(868_950_000, 100_000)?;
     ///
     /// // Start receiving
     /// driver.set_rx_continuous()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn configure_for_wmbus(
         &mut self,
@@ -979,11 +1018,18 @@ impl<H: Hal> Sx126xDriver<H> {
     /// # Examples
     ///
     /// ```rust,no_run
+    /// use mbus_rs::wmbus::radio::driver::StandbyMode;
+    /// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+    /// # use mbus_rs::wmbus::radio::hal::MockHal;
+    /// # fn main() -> Result<(), DriverError> {
+    /// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
     /// // Use RC oscillator for faster wake-up
     /// driver.set_standby(StandbyMode::RC)?;
     ///
     /// // Use crystal oscillator for lower power
     /// driver.set_standby(StandbyMode::XOSC)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn set_standby(&mut self, mode: StandbyMode) -> Result<(), DriverError> {
         let target_state = match mode {
@@ -1027,11 +1073,18 @@ impl<H: Hal> Sx126xDriver<H> {
     /// # Examples
     ///
     /// ```rust,no_run
+    /// use mbus_rs::wmbus::radio::driver::SleepConfig;
+    /// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+    /// # use mbus_rs::wmbus::radio::hal::MockHal;
+    /// # fn main() -> Result<(), DriverError> {
+    /// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
     /// // Warm start (faster wake-up, slightly higher power)
     /// driver.set_sleep(SleepConfig::default())?;
     ///
     /// // Cold start (ultra-low power, slower wake-up)
     /// driver.set_sleep(SleepConfig { warm_start: false, rtc_wake: false })?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn set_sleep(&mut self, config: SleepConfig) -> Result<(), DriverError> {
         // Validate transition - can only sleep from standby modes
@@ -1178,9 +1231,16 @@ impl<H: Hal> Sx126xDriver<H> {
     /// # Examples
     ///
     /// ```rust,no_run
+    /// use mbus_rs::wmbus::radio::driver::LbtConfig;
+    /// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+    /// # use mbus_rs::wmbus::radio::hal::MockHal;
+    /// # fn main() -> Result<(), DriverError> {
+    /// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
     /// let lbt_config = LbtConfig::default(); // EU compliant settings
     /// let wmbus_frame = [0x44, 0x12, 0x34, 0x56, 0x78]; // Example frame
     /// driver.transmit(&wmbus_frame, &lbt_config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn transmit(&mut self, data: &[u8], lbt_config: &LbtConfig) -> Result<(), DriverError> {
         if data.len() > 255 {
@@ -1321,8 +1381,16 @@ impl<H: Hal> Sx126xDriver<H> {
     /// # Examples
     ///
     /// ```rust,no_run
+    /// use mbus_rs::wmbus::radio::driver::LbtConfig;
+    /// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+    /// # use mbus_rs::wmbus::radio::hal::MockHal;
+    /// # fn main() -> Result<(), DriverError> {
+    /// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
+    /// # let wmbus_frame = [0x44, 0x12, 0x34, 0x56, 0x78];
     /// let lbt_config = LbtConfig::default(); // EU compliant settings
     /// driver.lbt_transmit(&wmbus_frame, lbt_config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn lbt_transmit(&mut self, data: &[u8], lbt_config: LbtConfig) -> Result<(), DriverError> {
         for attempt in 0..=lbt_config.max_retries {
@@ -1428,9 +1496,13 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// # Examples
     ///
-    /// ```rust,no_run
-    /// use crate::wmbus::radio::modulation::{SpreadingFactor, LoRaBandwidth, CodingRate};
+    /// ```rust
+    /// use mbus_rs::wmbus::radio::modulation::{SpreadingFactor, LoRaBandwidth, CodingRate};
+    /// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+    /// # use mbus_rs::wmbus::radio::hal::MockHal;
     ///
+    /// # fn main() -> Result<(), DriverError> {
+    /// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
     /// // Long range LoRa (SF12, 125kHz BW, 4/5 CR)
     /// driver.configure_for_lora(
     ///     868_100_000,   // EU 868.1 MHz
@@ -1439,6 +1511,8 @@ impl<H: Hal> Sx126xDriver<H> {
     ///     CodingRate::CR4_5,
     ///     14,            // 14 dBm TX power
     /// )?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn configure_for_lora(
         &mut self,
@@ -1457,10 +1531,17 @@ impl<H: Hal> Sx126xDriver<H> {
         // Configure LoRa modulation parameters
         // Per AN1200.22: Enable LDRO for SF11/SF12 when BW <= 125kHz
         let ldro_needed = matches!(sf, SpreadingFactor::SF11 | SpreadingFactor::SF12)
-            && matches!(bw, LoRaBandwidth::BW7_8 | LoRaBandwidth::BW10_4 |
-                           LoRaBandwidth::BW15_6 | LoRaBandwidth::BW20_8 |
-                           LoRaBandwidth::BW31_2 | LoRaBandwidth::BW41_7 |
-                           LoRaBandwidth::BW62_5 | LoRaBandwidth::BW125);
+            && matches!(
+                bw,
+                LoRaBandwidth::BW7_8
+                    | LoRaBandwidth::BW10_4
+                    | LoRaBandwidth::BW15_6
+                    | LoRaBandwidth::BW20_8
+                    | LoRaBandwidth::BW31_2
+                    | LoRaBandwidth::BW41_7
+                    | LoRaBandwidth::BW62_5
+                    | LoRaBandwidth::BW125
+            );
 
         let mod_params = ModulationParams::LoRa {
             params: LoRaModParams {
@@ -1468,19 +1549,19 @@ impl<H: Hal> Sx126xDriver<H> {
                 bw,
                 cr,
                 low_data_rate_optimize: ldro_needed,
-            }
+            },
         };
         self.set_modulation_params(mod_params)?;
 
         // Configure LoRa packet parameters (explicit header, CRC on, standard preamble)
         let packet_params = PacketParams::LoRa {
             params: LoRaPacketParams {
-                preamble_len: 8,       // Standard 8-symbol preamble
+                preamble_len: 8,        // Standard 8-symbol preamble
                 implicit_header: false, // Explicit header for non-WAN
-                payload_len: 255,      // Max payload
+                payload_len: 255,       // Max payload
                 crc_on: true,           // Enable CRC
                 iq_inverted: false,     // Standard IQ
-            }
+            },
         };
         self.set_packet_params(packet_params)?;
 
@@ -1499,8 +1580,8 @@ impl<H: Hal> Sx126xDriver<H> {
                 | IrqMaskBit::CrcErr as u16
                 | IrqMaskBit::Timeout as u16,
             IrqMaskBit::RxDone as u16 | IrqMaskBit::HeaderValid as u16, // DIO1: Rx events
-            0, // DIO2: unused for LoRa
-            0, // DIO3: unused
+            0,                                                          // DIO2: unused for LoRa
+            0,                                                          // DIO3: unused
         )?;
 
         log::info!("LoRa configured: SF{sf:?}, BW{bw:?}, CR{cr:?}, Power {power_dbm} dBm");
@@ -1602,7 +1683,11 @@ impl<H: Hal> Sx126xDriver<H> {
 
         log::info!(
             "Regulator mode: {}",
-            if use_dcdc { "DC-DC (efficient, lower drift)" } else { "LDO (low noise)" }
+            if use_dcdc {
+                "DC-DC (efficient, lower drift)"
+            } else {
+                "LDO (low noise)"
+            }
         );
         Ok(())
     }
@@ -1626,10 +1711,20 @@ impl<H: Hal> Sx126xDriver<H> {
     /// # Examples
     ///
     /// ```rust,no_run
+    /// # use mbus_rs::wmbus::radio::driver::{Sx126xDriver, DriverError};
+    /// # use mbus_rs::wmbus::radio::hal::MockHal;
+    /// # fn main() -> Result<(), DriverError> {
+    /// # let mut driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
     /// // Configure for 3.3V TCXO with 1ms startup time
     /// driver.configure_tcxo(3300, 1000)?;
+    /// # Ok(())
+    /// # }
     /// ```
-    pub fn configure_tcxo(&mut self, voltage_mv: u16, startup_time_us: u16) -> Result<(), DriverError> {
+    pub fn configure_tcxo(
+        &mut self,
+        voltage_mv: u16,
+        startup_time_us: u16,
+    ) -> Result<(), DriverError> {
         if !(1600..=3600).contains(&voltage_mv) {
             return Err(DriverError::InvalidParams);
         }
@@ -1652,9 +1747,7 @@ impl<H: Hal> Sx126xDriver<H> {
         // SetDio3AsTcxoCtrl command (0x97)
         self.hal.write_command(0x97, &buf)?;
 
-        log::info!(
-            "TCXO configured: {voltage_mv}mV supply, {startup_time_us}µs startup"
-        );
+        log::info!("TCXO configured: {voltage_mv}mV supply, {startup_time_us}µs startup");
         Ok(())
     }
 
@@ -1686,23 +1779,30 @@ impl<H: Hal> Sx126xDriver<H> {
         tx_power_dbm: i8,
         auto_optimize: bool,
     ) -> Result<(), DriverError> {
-        use crate::wmbus::radio::modulation::{ModulationParams, PacketParams, LoRaPacketParams, LoRaModParams};
+        use crate::wmbus::radio::modulation::{
+            LoRaModParams, LoRaPacketParams, ModulationParams, PacketParams,
+        };
 
         // Set packet type to LoRa
         self.set_packet_type(PacketType::LoRa)?;
 
         // Configure modulation parameters
         // Check if LDRO is needed (SF11/SF12 with BW <= 125kHz)
-        let ldro = matches!(sf, crate::wmbus::radio::modulation::SpreadingFactor::SF11 |
-                                crate::wmbus::radio::modulation::SpreadingFactor::SF12)
-            && matches!(bw, crate::wmbus::radio::modulation::LoRaBandwidth::BW7_8 |
-                           crate::wmbus::radio::modulation::LoRaBandwidth::BW10_4 |
-                           crate::wmbus::radio::modulation::LoRaBandwidth::BW15_6 |
-                           crate::wmbus::radio::modulation::LoRaBandwidth::BW20_8 |
-                           crate::wmbus::radio::modulation::LoRaBandwidth::BW31_2 |
-                           crate::wmbus::radio::modulation::LoRaBandwidth::BW41_7 |
-                           crate::wmbus::radio::modulation::LoRaBandwidth::BW62_5 |
-                           crate::wmbus::radio::modulation::LoRaBandwidth::BW125);
+        let ldro = matches!(
+            sf,
+            crate::wmbus::radio::modulation::SpreadingFactor::SF11
+                | crate::wmbus::radio::modulation::SpreadingFactor::SF12
+        ) && matches!(
+            bw,
+            crate::wmbus::radio::modulation::LoRaBandwidth::BW7_8
+                | crate::wmbus::radio::modulation::LoRaBandwidth::BW10_4
+                | crate::wmbus::radio::modulation::LoRaBandwidth::BW15_6
+                | crate::wmbus::radio::modulation::LoRaBandwidth::BW20_8
+                | crate::wmbus::radio::modulation::LoRaBandwidth::BW31_2
+                | crate::wmbus::radio::modulation::LoRaBandwidth::BW41_7
+                | crate::wmbus::radio::modulation::LoRaBandwidth::BW62_5
+                | crate::wmbus::radio::modulation::LoRaBandwidth::BW125
+        );
 
         let lora_mod_params = LoRaModParams {
             sf,
@@ -1777,7 +1877,10 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// * `Ok(())` - CAD parameters set successfully
     /// * `Err(DriverError)` - Configuration failed
-    pub fn set_cad_params(&mut self, params: &crate::wmbus::radio::lora::LoRaCadParams) -> Result<(), DriverError> {
+    pub fn set_cad_params(
+        &mut self,
+        params: &crate::wmbus::radio::lora::LoRaCadParams,
+    ) -> Result<(), DriverError> {
         self.set_standby(StandbyMode::RC)?;
 
         // SetCadParams command (0x88)
@@ -1787,14 +1890,19 @@ impl<H: Hal> Sx126xDriver<H> {
             params.det_peak,
             params.det_min,
             params.exit_mode as u8,
-            0x00, 0x00, 0x00,  // 24-bit timeout (0 = indefinite)
+            0x00,
+            0x00,
+            0x00, // 24-bit timeout (0 = indefinite)
         ];
 
         self.hal.write_command(0x88, &buf)?;
 
         log::debug!(
             "CAD configured: {} symbols, peak={}, min={}, mode={:?}",
-            params.symbol_num, params.det_peak, params.det_min, params.exit_mode
+            params.symbol_num,
+            params.det_peak,
+            params.det_min,
+            params.exit_mode
         );
         Ok(())
     }
@@ -1826,7 +1934,11 @@ impl<H: Hal> Sx126xDriver<H> {
 
                 log::debug!(
                     "CAD complete: {} ({}ms)",
-                    if detected { "activity detected" } else { "channel clear" },
+                    if detected {
+                        "activity detected"
+                    } else {
+                        "channel clear"
+                    },
                     start.elapsed().as_millis()
                 );
                 return Ok(detected);

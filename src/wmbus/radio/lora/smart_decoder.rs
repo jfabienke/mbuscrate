@@ -75,7 +75,11 @@ impl SmartDecoder {
     ) -> Result<MeteringData, LoRaDecodeError> {
         // Try registered decoder first
         if let Some(decoder_type) = self.manager.decoders.get(device_addr) {
-            match crate::wmbus::radio::lora::decoder::decode_with_type(decoder_type, payload, f_port) {
+            match crate::wmbus::radio::lora::decoder::decode_with_type(
+                decoder_type,
+                payload,
+                f_port,
+            ) {
                 Ok(data) => {
                     self.record_success(device_addr, &data.decoder_type);
                     return Ok(data);
@@ -110,7 +114,11 @@ impl SmartDecoder {
 
         // Try to decode with detected format
         if let Some(decoder_type) = detection.decoder_type {
-            match crate::wmbus::radio::lora::decoder::decode_with_type(&decoder_type, payload, f_port) {
+            match crate::wmbus::radio::lora::decoder::decode_with_type(
+                &decoder_type,
+                payload,
+                f_port,
+            ) {
                 Ok(mut data) => {
                     // Add detection info to the result
                     data.decoder_type = format!(

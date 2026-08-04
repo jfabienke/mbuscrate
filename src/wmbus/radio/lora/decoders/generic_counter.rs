@@ -273,8 +273,10 @@ mod tests {
 
     #[test]
     fn test_with_timestamp() {
-        let mut config = GenericCounterConfig::default();
-        config.has_timestamp = true;
+        let config = GenericCounterConfig {
+            has_timestamp: true,
+            ..Default::default()
+        };
         let decoder = GenericCounterDecoder::new(config);
 
         // Unix timestamp (2024-01-01 00:00:00 = 1704067200)

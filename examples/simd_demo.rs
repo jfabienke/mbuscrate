@@ -52,7 +52,8 @@ fn main() {
             let _ = calculate_mbus_checksum(&data);
         }
         let elapsed = start.elapsed();
-        let throughput_mbps = (size as f64 * iterations as f64 * 8.0) / elapsed.as_secs_f64() / 1_000_000.0;
+        let throughput_mbps =
+            (size as f64 * iterations as f64 * 8.0) / elapsed.as_secs_f64() / 1_000_000.0;
 
         println!("{} Checksum:", name);
         println!("  Time: {:?} for {} iterations", elapsed, iterations);
@@ -65,7 +66,8 @@ fn main() {
             let _ = calculate_wmbus_crc_enhanced(&data);
         }
         let elapsed = start.elapsed();
-        let throughput_mbps = (size as f64 * iterations as f64 * 8.0) / elapsed.as_secs_f64() / 1_000_000.0;
+        let throughput_mbps =
+            (size as f64 * iterations as f64 * 8.0) / elapsed.as_secs_f64() / 1_000_000.0;
 
         println!("{} CRC:", name);
         println!("  Time: {:?} for {} iterations", elapsed, iterations);
@@ -98,7 +100,10 @@ fn main() {
         println!("{} ({} bytes):", name, frame.len());
         println!("  Processing time: {:?} for {} frames", elapsed, iterations);
         println!("  Frames/second: {:.0}", frames_per_sec);
-        println!("  Latency per frame: {:.2} µs\n", elapsed.as_micros() as f64 / iterations as f64);
+        println!(
+            "  Latency per frame: {:.2} µs\n",
+            elapsed.as_micros() as f64 / iterations as f64
+        );
     }
 
     println!("=== Summary ===");

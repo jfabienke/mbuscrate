@@ -138,6 +138,8 @@ mod tests {
         // Test incomplete data
         let short_payload = vec![0x10, 0x00];
         let err = adapter.decode(&short_payload, 1);
-        assert!(matches!(err, Err(LoRaDecodeError::InvalidData { reason, .. }) if reason.contains("Eof")));
+        assert!(
+            matches!(err, Err(LoRaDecodeError::InvalidData { reason, .. }) if reason.contains("Eof"))
+        );
     }
 }

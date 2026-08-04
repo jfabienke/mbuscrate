@@ -6,11 +6,11 @@
 
 use crate::wmbus::radio::driver::{RadioState, Sx126xDriver};
 use crate::wmbus::radio::hal::Hal;
+use log::{debug, info, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::{interval, sleep};
-use log::{debug, info, warn};
 
 /// Power modes for the radio
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,7 +102,8 @@ impl TransmissionWindow {
         self.transmissions.retain(|(time, _)| *time > cutoff);
 
         // Sum transmission times
-        let total_tx_time: Duration = self.transmissions
+        let total_tx_time: Duration = self
+            .transmissions
             .iter()
             .map(|(_, duration)| *duration)
             .sum();
@@ -117,8 +118,8 @@ impl TransmissionWindow {
     /// Check if transmission is allowed
     fn can_transmit(&mut self, duration: Duration, limit: f32) -> bool {
         let current_duty = self.calculate_duty_cycle();
-        let projected_duty = current_duty +
-            (duration.as_millis() as f32 / self.window_duration.as_millis() as f32) * 100.0;
+        let projected_duty = current_duty
+            + (duration.as_millis() as f32 / self.window_duration.as_millis() as f32) * 100.0;
 
         projected_duty <= limit
     }
@@ -168,10 +169,10 @@ impl PowerEstimator {
     fn new() -> Self {
         Self {
             // Typical SX126x currents
-            sleep_current_ma: 0.0002,    // 200 nA
-            standby_current_ma: 0.6,     // 600 µA
-            rx_current_ma: 11.0,          // 11 mA
-            tx_current_ma: 45.0,          // 45 mA at +14 dBm
+            sleep_current_ma: 0.0002, // 200 nA
+            standby_current_ma: 0.6,  // 600 µA
+            rx_current_ma: 11.0,      // 11 mA
+            tx_current_ma: 45.0,      // 45 mA at +14 dBm
 
             sleep_time: Duration::ZERO,
             standby_time: Duration::ZERO,
@@ -202,8 +203,10 @@ impl PowerEstimator {
 
         let total_ms = total_recorded_time.as_millis() as f32;
 
-        let sleep_contribution = (self.sleep_time.as_millis() as f32 / total_ms) * self.sleep_current_ma;
-        let standby_contribution = (self.standby_time.as_millis() as f32 / total_ms) * self.standby_current_ma;
+        let sleep_contribution =
+            (self.sleep_time.as_millis() as f32 / total_ms) * self.sleep_current_ma;
+        let standby_contribution =
+            (self.standby_time.as_millis() as f32 / total_ms) * self.standby_current_ma;
         let rx_contribution = (self.rx_time.as_millis() as f32 / total_ms) * self.rx_current_ma;
         let tx_contribution = (self.tx_time.as_millis() as f32 / total_ms) * self.tx_current_ma;
 
@@ -228,7 +231,9 @@ impl<H: Hal> DutyCycleManager<H> {
             driver,
             power_mode: Arc::new(Mutex::new(PowerMode::Active)),
             duty_cycle_percent,
-            tx_time_window: Arc::new(Mutex::new(TransmissionWindow::new(Duration::from_secs(3600)))),
+            tx_time_window: Arc::new(Mutex::new(TransmissionWindow::new(Duration::from_secs(
+                3600,
+            )))),
             wake_source: Arc::new(Mutex::new(WakeSource::Unknown)),
             power_estimator: PowerEstimator::new(),
         }
@@ -292,58 +297,73 @@ impl<H: Hal> DutyCycleManager<H> {
         match mode {
             PowerMode::Active => {
                 // Always active, just track power consumption
-                self.power_estimator.record_state(RadioState::Rx, Duration::from_millis(100));
+                self.power_estimator
+                    .record_state(RadioState::Rx, Duration::from_millis(100));
             }
 
-            PowerMode::LowPower { active_duration, sleep_duration } => {
+            PowerMode::LowPower {
+                active_duration,
+                sleep_duration,
+            } => {
                 // Implement sleep/wake cycling
                 let mut driver = self.driver.lock().await;
 
                 // Active period
-                driver.set_rx_continuous()
+                driver
+                    .set_rx_continuous()
                     .map_err(|e| format!("Failed to enter RX: {e:?}"))?;
-                self.power_estimator.record_state(RadioState::Rx, active_duration);
+                self.power_estimator
+                    .record_state(RadioState::Rx, active_duration);
                 sleep(active_duration).await;
 
                 // Check duty cycle before sleeping
                 let mut tx_window = self.tx_time_window.lock().await;
                 if tx_window.calculate_duty_cycle() < self.duty_cycle_percent {
                     // Sleep period
-                    driver.set_sleep(crate::wmbus::radio::driver::SleepConfig {
-                        warm_start: true,
-                        rtc_wake: false,
-                    })
+                    driver
+                        .set_sleep(crate::wmbus::radio::driver::SleepConfig {
+                            warm_start: true,
+                            rtc_wake: false,
+                        })
                         .map_err(|e| format!("Failed to enter sleep: {e:?}"))?;
-                    self.power_estimator.record_state(RadioState::Sleep, sleep_duration);
+                    self.power_estimator
+                        .record_state(RadioState::Sleep, sleep_duration);
                     sleep(sleep_duration).await;
                 }
             }
 
-            PowerMode::UltraLowPower { min_sleep, max_sleep } => {
+            PowerMode::UltraLowPower {
+                min_sleep,
+                max_sleep,
+            } => {
                 // Sleep until IRQ or timeout
                 let mut driver = self.driver.lock().await;
 
                 // Configure wake on IRQ
-                driver.set_sleep(crate::wmbus::radio::driver::SleepConfig {
-                    warm_start: true,
-                    rtc_wake: true,  // Enable RTC wake for periodic check
-                })
+                driver
+                    .set_sleep(crate::wmbus::radio::driver::SleepConfig {
+                        warm_start: true,
+                        rtc_wake: true, // Enable RTC wake for periodic check
+                    })
                     .map_err(|e| format!("Failed to enter ultra-low power: {e:?}"))?;
 
                 // Sleep for calculated duration
                 let sleep_time = self.calculate_adaptive_sleep(min_sleep, max_sleep).await;
-                self.power_estimator.record_state(RadioState::Sleep, sleep_time);
+                self.power_estimator
+                    .record_state(RadioState::Sleep, sleep_time);
                 sleep(sleep_time).await;
 
                 // Wake and check for packets
                 *self.wake_source.lock().await = WakeSource::Timer;
-                driver.set_rx(10) // 10ms timeout
+                driver
+                    .set_rx(10) // 10ms timeout
                     .map_err(|e| format!("Failed to wake for RX: {e:?}"))?;
             }
 
             PowerMode::DeepSleep => {
                 // Stay in deep sleep
-                self.power_estimator.record_state(RadioState::Sleep, Duration::from_millis(100));
+                self.power_estimator
+                    .record_state(RadioState::Sleep, Duration::from_millis(100));
             }
         }
 
@@ -383,9 +403,11 @@ impl<H: Hal> DutyCycleManager<H> {
         // Perform transmission
         let mut driver = self.driver.lock().await;
         // Write data to buffer and start transmission
-        driver.write_buffer(0, data)
+        driver
+            .write_buffer(0, data)
             .map_err(|e| format!("Failed to write buffer: {e:?}"))?;
-        driver.set_tx(1000) // 1 second timeout
+        driver
+            .set_tx(1000) // 1 second timeout
             .map_err(|e| format!("Transmission failed: {e:?}"))?;
 
         // Record transmission
@@ -410,7 +432,8 @@ impl<H: Hal> DutyCycleManager<H> {
         *self.wake_source.lock().await = WakeSource::Manual;
 
         let mut driver = self.driver.lock().await;
-        driver.set_standby(crate::wmbus::radio::driver::StandbyMode::RC)
+        driver
+            .set_standby(crate::wmbus::radio::driver::StandbyMode::RC)
             .map_err(|e| format!("Failed to wake: {e:?}"))?;
 
         info!("Radio woken manually");

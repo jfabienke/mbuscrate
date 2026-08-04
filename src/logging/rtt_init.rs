@@ -32,8 +32,8 @@
 //! defmt::info!("IRQ debounced: mask=0x{:02X}", 0x02);
 //! ```
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "rtt-logging")]
 use defmt_rtt as _;
@@ -151,7 +151,6 @@ fn platform_name() -> &'static str {
 /// Initialize ARM CoreSight ITM and SWO for RTT
 #[cfg(feature = "rtt-logging")]
 fn init_arm_coresight() -> io::Result<()> {
-
     // This is a simplified initialization - in practice you'd need proper
     // memory mapping and privilege checks for direct register access
     log::debug!("Initializing ARM CoreSight ITM for RTT");
@@ -269,7 +268,10 @@ mod tests {
         let platform = detect_platform();
         println!("Detected platform: {:?}", platform);
         // Should not panic
-        assert!(matches!(platform, Platform::Pi4 | Platform::Pi5 | Platform::Other));
+        assert!(matches!(
+            platform,
+            Platform::Pi4 | Platform::Pi5 | Platform::Other
+        ));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! Listen Before Talk (LBT) functionality. CAD provides faster and more
 //! accurate LoRa signal detection compared to RSSI-based methods.
 
-use crate::wmbus::radio::modulation::{SpreadingFactor, LoRaBandwidth};
+use crate::wmbus::radio::modulation::{LoRaBandwidth, SpreadingFactor};
 use serde::{Deserialize, Serialize};
 
 /// CAD exit modes determining radio behavior after detection
@@ -99,14 +99,15 @@ impl LoRaCadParams {
             },
 
             // Very narrow bandwidths: Maximum symbols for reliability
-            LoRaBandwidth::BW20_8 | LoRaBandwidth::BW15_6 | LoRaBandwidth::BW10_4 | LoRaBandwidth::BW7_8 => {
-                match sf {
-                    SpreadingFactor::SF5 | SpreadingFactor::SF6 | SpreadingFactor::SF7 => (8, 22, 10),
-                    SpreadingFactor::SF8 | SpreadingFactor::SF9 => (8, 22, 10),
-                    SpreadingFactor::SF10 | SpreadingFactor::SF11 => (16, 21, 10),
-                    SpreadingFactor::SF12 => (16, 20, 10),
-                }
-            }
+            LoRaBandwidth::BW20_8
+            | LoRaBandwidth::BW15_6
+            | LoRaBandwidth::BW10_4
+            | LoRaBandwidth::BW7_8 => match sf {
+                SpreadingFactor::SF5 | SpreadingFactor::SF6 | SpreadingFactor::SF7 => (8, 22, 10),
+                SpreadingFactor::SF8 | SpreadingFactor::SF9 => (8, 22, 10),
+                SpreadingFactor::SF10 | SpreadingFactor::SF11 => (16, 21, 10),
+                SpreadingFactor::SF12 => (16, 20, 10),
+            },
         };
 
         Self {
@@ -211,8 +212,7 @@ impl CadStats {
 
         // Update average duration (running average)
         let n = self.total_cad_operations as f32;
-        self.avg_duration_ms =
-            (self.avg_duration_ms * (n - 1.0) + duration_ms as f32) / n;
+        self.avg_duration_ms = (self.avg_duration_ms * (n - 1.0) + duration_ms as f32) / n;
     }
 
     /// Gets the detection rate (0.0 to 1.0)
@@ -259,14 +259,14 @@ mod tests {
 
         // SF7, BW125: T_sym = 128/125000 * 1000 = ~1ms
         // 2 symbols = ~2ms
-        assert!(duration >= 1 && duration <= 3);
+        assert!((1..=3).contains(&duration));
 
         let params_sf12 = LoRaCadParams::optimal(SpreadingFactor::SF12, LoRaBandwidth::BW125);
         let duration_sf12 = params_sf12.duration_ms(SpreadingFactor::SF12, LoRaBandwidth::BW125);
 
         // SF12, BW125: T_sym = 4096/125000 * 1000 = ~33ms
         // 8 symbols = ~264ms
-        assert!(duration_sf12 >= 200 && duration_sf12 <= 300);
+        assert!((200..=300).contains(&duration_sf12));
     }
 
     #[test]

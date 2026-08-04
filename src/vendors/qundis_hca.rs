@@ -18,26 +18,29 @@
 //! ## Usage Example
 //!
 //! ```rust
-//! use mbus_rs::{VendorRegistry, parse_variable_record_with_vendor};
+//! use mbus_rs::VendorRegistry;
+//! use mbus_rs::payload::record::parse_variable_record_with_vendor;
 //!
 //! // Create registry with QUNDIS extension
 //! let registry = VendorRegistry::with_defaults().unwrap();
 //!
 //! // Parse M-Bus record with QUNDIS support
 //! let manufacturer_id = "QDS";
+//! let mbus_data = [0x04u8, 0x6D, 0x17, 0x2E, 0xCC, 0x13];
 //! let record = parse_variable_record_with_vendor(
 //!     &mbus_data,
 //!     Some(manufacturer_id),
-//!     Some(&registry)
-//! )?;
+//!     Some(&registry),
+//! );
 //!
 //! // QUNDIS VIF 0x04 dates will now be decoded correctly
 //! // instead of having 10-year offsets
+//! assert!(record.is_ok());
 //! ```
 
 use crate::error::MBusError;
-use crate::vendors::{VendorExtension, VendorVariable, VendorDeviceInfo};
-use chrono::{DateTime, Utc, NaiveDate};
+use crate::vendors::{VendorDeviceInfo, VendorExtension, VendorVariable};
+use chrono::{DateTime, NaiveDate, Utc};
 use log::{debug, warn};
 use std::collections::HashMap;
 
@@ -45,7 +48,7 @@ use std::collections::HashMap;
 pub const QUNDIS_MANUFACTURER_ID: &str = "QDS";
 
 /// VIF codes that QUNDIS handles with special encoding
-pub const QUNDIS_VIF_DATE: u8 = 0x04;  // Date field with custom bit packing
+pub const QUNDIS_VIF_DATE: u8 = 0x04; // Date field with custom bit packing
 
 /// QUNDIS HCA vendor extension implementation
 pub struct QundisHcaExtension;
@@ -89,10 +92,17 @@ impl QundisHcaExtension {
     /// # Examples
     ///
     /// ```rust
-    /// // Sample data that would decode incorrectly with standard M-Bus
-    /// let raw = 0xA3E0; // Example QUNDIS date encoding
-    /// let date = decode_mbus_value_date_g(raw as u32)?;
-    /// // Should produce correct year (e.g., 2015) not offset by 10 years
+    /// use mbus_rs::QundisHcaExtension;
+    ///
+    /// use chrono::Datelike;
+    ///
+    /// // Sample data that would decode incorrectly with standard M-Bus.
+    /// // Year bits: (0x1000 >> 9) | (0x00E0 >> 5) = 8 | 7 = 15 => 2015. Month bits => 6.
+    /// let raw = 0x10ECu32; // Example QUNDIS date encoding
+    /// let date = QundisHcaExtension::decode_mbus_value_date_g(raw).unwrap();
+    /// // Produces the correct year, not one offset by 10 years
+    /// assert_eq!(date.year(), 2015);
+    /// assert_eq!(date.month(), 6);
     /// ```
     pub fn decode_mbus_value_date_g(raw_data: u32) -> Result<DateTime<Utc>, MBusError> {
         debug!("Decoding QUNDIS MbusValueDateG: 0x{:08X}", raw_data);
@@ -120,21 +130,21 @@ impl QundisHcaExtension {
         );
 
         // Validate components
-        if year < 2000 || year > 2099 {
+        if !(2000..=2099).contains(&year) {
             return Err(MBusError::Other(format!(
                 "Invalid QUNDIS year: {} (expected 2000-2099)",
                 year
             )));
         }
 
-        if month < 1 || month > 12 {
+        if !(1..=12).contains(&month) {
             return Err(MBusError::Other(format!(
                 "Invalid QUNDIS month: {} (expected 1-12)",
                 month
             )));
         }
 
-        if day < 1 || day > 31 {
+        if !(1..=31).contains(&day) {
             return Err(MBusError::Other(format!(
                 "Invalid QUNDIS day: {} (expected 1-31)",
                 day
@@ -142,18 +152,16 @@ impl QundisHcaExtension {
         }
 
         // Create NaiveDate and convert to DateTime<Utc>
-        let naive_date = NaiveDate::from_ymd_opt(year as i32, month, day)
-            .ok_or_else(|| {
-                MBusError::Other(format!(
-                    "Invalid QUNDIS date: {}-{:02}-{:02}",
-                    year, month, day
-                ))
-            })?;
+        let naive_date = NaiveDate::from_ymd_opt(year as i32, month, day).ok_or_else(|| {
+            MBusError::Other(format!(
+                "Invalid QUNDIS date: {}-{:02}-{:02}",
+                year, month, day
+            ))
+        })?;
 
-        let naive_datetime = naive_date.and_hms_opt(0, 0, 0)
-            .ok_or_else(|| {
-                MBusError::Other("Failed to create datetime from QUNDIS date".to_string())
-            })?;
+        let naive_datetime = naive_date.and_hms_opt(0, 0, 0).ok_or_else(|| {
+            MBusError::Other("Failed to create datetime from QUNDIS date".to_string())
+        })?;
 
         Ok(DateTime::from_naive_utc_and_offset(naive_datetime, Utc))
     }
@@ -170,8 +178,8 @@ impl QundisHcaExtension {
         let month = (raw_data & 0x001E) >> 1;
 
         // Extract time components from upper bits
-        let hour = (raw_data & 0x1F000000) >> 24;       // Bits 24-28
-        let minute = (raw_data & 0x00FC0000) >> 18;     // Bits 18-23
+        let hour = (raw_data & 0x1F000000) >> 24; // Bits 24-28
+        let minute = (raw_data & 0x00FC0000) >> 18; // Bits 18-23
         let day = ((raw_data & 0x003E0000) >> 17).max(1); // Bits 17-21
 
         debug!(
@@ -180,13 +188,13 @@ impl QundisHcaExtension {
         );
 
         // Validate all components
-        if year < 2000 || year > 2099 {
+        if !(2000..=2099).contains(&year) {
             return Err(MBusError::Other(format!("Invalid year: {}", year)));
         }
-        if month < 1 || month > 12 {
+        if !(1..=12).contains(&month) {
             return Err(MBusError::Other(format!("Invalid month: {}", month)));
         }
-        if day < 1 || day > 31 {
+        if !(1..=31).contains(&day) {
             return Err(MBusError::Other(format!("Invalid day: {}", day)));
         }
         if hour > 23 {
@@ -200,7 +208,8 @@ impl QundisHcaExtension {
         let naive_date = NaiveDate::from_ymd_opt(year as i32, month, day)
             .ok_or_else(|| MBusError::Other(format!("Invalid date: {}-{}-{}", year, month, day)))?;
 
-        let naive_datetime = naive_date.and_hms_opt(hour, minute, 0)
+        let naive_datetime = naive_date
+            .and_hms_opt(hour, minute, 0)
             .ok_or_else(|| MBusError::Other("Failed to create datetime".to_string()))?;
 
         Ok(DateTime::from_naive_utc_and_offset(naive_datetime, Utc))
@@ -253,12 +262,15 @@ impl VendorExtension for QundisHcaExtension {
                     Self::decode_mbus_value_date_g(raw_value)?
                 };
 
-                debug!("QUNDIS date decoded: {}", datetime.format("%Y-%m-%d %H:%M:%S"));
+                debug!(
+                    "QUNDIS date decoded: {}",
+                    datetime.format("%Y-%m-%d %H:%M:%S")
+                );
 
                 Ok(Some((
-                    "Date".to_string(),                              // unit
-                    0,                                               // exponent
-                    "QUNDIS Date".to_string(),                      // quantity
+                    "Date".to_string(),        // unit
+                    0,                         // exponent
+                    "QUNDIS Date".to_string(), // quantity
                     VendorVariable::String(datetime.format("%Y-%m-%d %H:%M:%S").to_string()),
                 )))
             }
@@ -290,7 +302,10 @@ impl VendorExtension for QundisHcaExtension {
             serde_json::Value::String("QUNDIS_proprietary".to_string()),
         );
 
-        debug!("Enriched QUNDIS device info for ID: 0x{:08X}", basic_info.device_id);
+        debug!(
+            "Enriched QUNDIS device info for ID: 0x{:08X}",
+            basic_info.device_id
+        );
 
         Ok(Some(basic_info))
     }
@@ -319,8 +334,8 @@ impl VendorExtension for QundisHcaExtension {
                 let value = u16::from_le_bytes([chunk[0], chunk[1]]);
 
                 // Heuristic: check if high nibble suggests year 2000-2099
-                let year_candidate = ((value & 0xF000) >> 9) | ((value & 0x00E0) >> 5) + 2000;
-                if year_candidate >= 2000 && year_candidate <= 2099 {
+                let year_candidate = ((value & 0xF000) >> 9) | (((value & 0x00E0) >> 5) + 2000);
+                if (2000..=2099).contains(&year_candidate) {
                     date_field_count += 1.0;
                 }
             }
@@ -355,8 +370,10 @@ mod tests {
         let year = year_parts + 2000;
         let month = (raw_data & 0x001E) >> 1;
 
-        println!("Extracted: year_parts=0x{:X}, year={}, month={}",
-                year_parts, year, month);
+        println!(
+            "Extracted: year_parts=0x{:X}, year={}, month={}",
+            year_parts, year, month
+        );
 
         let result = QundisHcaExtension::decode_mbus_value_date_g(raw_data);
         if let Err(e) = &result {
@@ -439,17 +456,15 @@ mod tests {
         let basic_info = VendorDeviceInfo {
             manufacturer_id: 0x1234,
             device_id: 0x39186386, // From user's sample
-            version: 54,            // FW54
-            device_type: 0x08,      // HCA type
+            version: 54,           // FW54
+            device_type: 0x08,     // HCA type
             model: None,
             serial_number: None,
             firmware_version: None,
             additional_info: HashMap::new(),
         };
 
-        let result = extension
-            .enrich_device_header("QDS", basic_info)
-            .unwrap();
+        let result = extension.enrich_device_header("QDS", basic_info).unwrap();
 
         assert!(result.is_some());
         let enriched = result.unwrap();
@@ -553,18 +568,16 @@ mod tests {
         // This simulates a real HCA device response
         let mock_record_data = vec![
             // DIF: 2 bytes of data
-            0x02,
-            // VIF: 0x04 (QUNDIS date field)
-            0x04,
-            // Data: December 2015 in QUNDIS encoding (0x10F8)
-            0xF8, 0x10
+            0x02, // VIF: 0x04 (QUNDIS date field)
+            0x04, // Data: December 2015 in QUNDIS encoding (0x10F8)
+            0xF8, 0x10,
         ];
 
         // Parse using the vendor-aware function
         let result = crate::payload::record::parse_variable_record_with_vendor(
             &mock_record_data,
             Some("QDS"),
-            Some(&registry)
+            Some(&registry),
         );
 
         assert!(result.is_ok());

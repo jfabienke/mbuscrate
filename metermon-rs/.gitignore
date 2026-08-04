@@ -1,0 +1,6 @@
+# AES keys are secrets — never commit them. Keys are provisioned at runtime over
+# the control topic, or supplied via a local key file for offline replay.
+*.keys
+*key*.json
+keys.jsonl
+/target

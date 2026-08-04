@@ -5,11 +5,11 @@
 //! SWL2001's event-driven patterns.
 
 use crate::wmbus::radio::irq::IrqStatus;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::sync::Mutex;
+use log::{debug, error, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use log::{debug, warn, error};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::Mutex;
 
 /// IRQ event types that can be queued
 #[derive(Debug, Clone)]
@@ -22,9 +22,7 @@ pub enum IrqEvent {
     },
 
     /// Transmission completed
-    TxDone {
-        timestamp: Instant,
-    },
+    TxDone { timestamp: Instant },
 
     /// CRC error in received packet
     CrcError {
@@ -33,19 +31,13 @@ pub enum IrqEvent {
     },
 
     /// Reception timeout
-    RxTimeout {
-        timestamp: Instant,
-    },
+    RxTimeout { timestamp: Instant },
 
     /// Preamble detected (start of reception)
-    PreambleDetected {
-        timestamp: Instant,
-    },
+    PreambleDetected { timestamp: Instant },
 
     /// Header validation failed
-    HeaderError {
-        timestamp: Instant,
-    },
+    HeaderError { timestamp: Instant },
 
     /// Channel activity detected
     CadDetected {
@@ -162,7 +154,6 @@ impl IrqEventQueue {
         }
     }
 
-
     /// Queue an IRQ event for processing
     ///
     /// This is non-blocking and returns immediately.
@@ -223,7 +214,7 @@ impl IrqEventQueue {
         if status.crc_err() {
             self.queue_event(IrqEvent::CrcError {
                 timestamp,
-                partial_data: None,  // Could be enhanced to include partial frame
+                partial_data: None, // Could be enhanced to include partial frame
             })
             .await?;
         }
@@ -238,7 +229,8 @@ impl IrqEventQueue {
         }
 
         if status.header_error() {
-            self.queue_event(IrqEvent::HeaderError { timestamp }).await?;
+            self.queue_event(IrqEvent::HeaderError { timestamp })
+                .await?;
         }
 
         if status.cad_detected() {
@@ -279,9 +271,7 @@ impl IrqEventQueue {
         while let Some(event) = self.try_get_next_event().await {
             // Check for timeout
             if start_time.elapsed() > self.processing_timeout {
-                warn!(
-                    "Event processing timeout after {processed} events"
-                );
+                warn!("Event processing timeout after {processed} events");
                 break;
             }
 
@@ -293,8 +283,8 @@ impl IrqEventQueue {
             // Update statistics
             let mut stats = self.stats.lock().await;
             let processing_us = processing_time.as_micros() as u64;
-            stats.avg_processing_time_us =
-                (stats.avg_processing_time_us * processed as u64 + processing_us)
+            stats.avg_processing_time_us = (stats.avg_processing_time_us * processed as u64
+                + processing_us)
                 / (processed as u64 + 1);
             stats.max_processing_time_us = stats.max_processing_time_us.max(processing_us);
 
@@ -375,7 +365,7 @@ pub async fn irq_processor_task<F>(
 
 impl Default for IrqEventQueue {
     fn default() -> Self {
-        Self::new(64)  // Default to 64 events queue depth
+        Self::new(64) // Default to 64 events queue depth
     }
 }
 
@@ -429,11 +419,12 @@ mod tests {
         let queue = IrqEventQueue::new(10);
 
         // Create a status with multiple bits set
-        let status = IrqStatus::from(
-            IrqMaskBit::RxDone as u16 | IrqMaskBit::CrcErr as u16
-        );
+        let status = IrqStatus::from(IrqMaskBit::RxDone as u16 | IrqMaskBit::CrcErr as u16);
 
-        queue.process_irq_status(status, Some(-85), Some(12.0)).await.unwrap();
+        queue
+            .process_irq_status(status, Some(-85), Some(12.0))
+            .await
+            .unwrap();
 
         // Should have queued 2 events
         let stats = queue.get_stats().await;

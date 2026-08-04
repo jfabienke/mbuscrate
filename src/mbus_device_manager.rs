@@ -129,10 +129,7 @@ impl MBusDeviceManager {
 
         // Scan for available wM-Bus devices
         for (_, handle) in self.wmbus_handles.iter_mut() {
-            let wmbus_devices = handle
-                .scan_devices()
-                .await
-                .map_err(MBusError::from)?;
+            let wmbus_devices = handle.scan_devices().await.map_err(MBusError::from)?;
             // Convert DeviceInfo to String addresses
             addresses.extend(
                 wmbus_devices
@@ -155,6 +152,13 @@ impl MBusDeviceManager {
         for (_, handle) in self.wmbus_handles.iter_mut() {
             handle.stop_receiver().await;
         }
+
+        // Drop the handles so the serial ports / receivers are actually released.
+        // `MBusDeviceHandle::disconnect` can't close the port through `&mut self` (the
+        // port closes on drop), so retaining the handles would leave them open despite
+        // reporting a successful disconnect.
+        self.mbus_handles.clear();
+        self.wmbus_handles.clear();
 
         Ok(())
     }
@@ -314,20 +318,16 @@ impl MBusDeviceManager {
         Self::query_specific_secondary_impl(pattern).await
     }
 
-    /// Static implementation for counting responses
+    /// Count bus responses to a wildcard selection within a timeout (collision detection).
+    ///
+    /// NOT IMPLEMENTED: this requires live bus monitoring (E5h ACK / collision detection)
+    /// that isn't wired. It returns an error rather than a simulated `0`, so
+    /// [`Self::discover_secondary_devices`] fails honestly instead of silently reporting
+    /// "no devices" without ever scanning the bus.
     async fn count_responses_with_timeout_impl() -> Result<usize, MBusError> {
-        // This is a simplified implementation
-        // In reality, this would monitor the bus for E5h responses or similar
-
-        // For now, simulate based on device availability
-        // In a real implementation, this would:
-        // 1. Send the selection frame
-        // 2. Wait for responses (E5h ACK frames)
-        // 3. Count unique responses within timeout period
-        // 4. Detect collisions by monitoring bus activity
-
-        // Placeholder implementation returns 0 (no devices found)
-        Ok(0)
+        Err(MBusError::DeviceDiscoveryError(
+            "secondary wildcard scan not implemented (no bus response counting wired)".into(),
+        ))
     }
 
     /// Count responses within timeout period (collision detection)
@@ -347,21 +347,17 @@ impl MBusDeviceManager {
         secondary_addr: &SecondaryAddress,
     ) -> Result<Vec<crate::payload::record::MBusRecord>, MBusError> {
         let _handle = self.mbus_handles.get_mut(port_name).ok_or_else(|| {
-            MBusError::DeviceDiscoveryError(format!(
-                "M-Bus handle not found for port: {port_name}"
-            ))
+            MBusError::DeviceDiscoveryError(format!("M-Bus handle not found for port: {port_name}"))
         })?;
 
         // Build secondary selection frame
         let _selection_frame = build_secondary_selection_frame(&secondary_addr.to_bytes());
 
-        // In a complete implementation, this would:
-        // 1. Send the secondary selection frame
-        // 2. Wait for device response
-        // 3. Parse the response into MBusRecord structures
-        // 4. Return the parsed records
-
-        // For now, return empty vector as placeholder
-        Ok(Vec::new())
+        // NOT IMPLEMENTED: sending the selection frame, awaiting the response, and parsing
+        // records requires transport wiring that isn't in place. Return an error rather than
+        // an empty vector that would look like a successful (but empty) read.
+        Err(MBusError::DeviceDiscoveryError(
+            "send_request_to_secondary is not implemented (no transport wired)".into(),
+        ))
     }
 }

@@ -48,16 +48,16 @@ mod packet_tests {
     #[test]
     fn test_packet_size_detection() {
         // Test Case 1: Type A, S format (CD xx) → length + 3
-        let data1 = [0xCD, 0x10]; // 16 byte length + 3 = 19 total
-        assert_eq!(packet_size(&data1), 19);
+        let data1 = [0xCD, 0x10]; // Type A L=16 → 2+16+2 CRCs = 22
+        assert_eq!(packet_size(&data1), 22);
 
         // Test Case 2: Type B, S format (3D xx) → length + 2
         let data2 = [0x3D, 0x10]; // 16 byte length + 2 = 18 total
         assert_eq!(packet_size(&data2), 18);
 
         // Test Case 3: Reversed byte order (xx CD) → length + 3
-        let data3 = [0x10, 0xCD]; // 16 byte length + 3 = 19 total
-        assert_eq!(packet_size(&data3), 19);
+        let data3 = [0x10, 0xCD]; // Type A L=16 → 2+16+2 CRCs = 22
+        assert_eq!(packet_size(&data3), 22);
 
         // Test Case 4: Reversed byte order (xx 3D) → length + 2
         let data4 = [0x10, 0x3D]; // 16 byte length + 2 = 18 total
@@ -129,20 +129,19 @@ mod packet_tests {
         buffer.push_byte(10); // Will be bit-reversed to 0x50 (80) internally
 
         // Check packet size determination
-        // 0xCD (Type A) + 0x50 (80) → 80 + 3 = 83 total bytes
+        // 0xCD (Type A) L=80 → 2 + 80 + 6 CRCs*2 = 94 total bytes
         let size = buffer.determine_packet_size();
         assert!(size.is_some());
-        assert_eq!(size.unwrap(), 83);
+        assert_eq!(size.unwrap(), 94);
 
-        // Add remaining bytes to reach total of 83
-        for i in 0..81 {
-            // 81 more bytes to reach total of 83
+        // Add remaining bytes to reach total of 94
+        for i in 0..92 {
             buffer.push_byte(i as u8);
         }
 
         assert!(buffer.is_complete());
         let packet = buffer.extract_packet().unwrap();
-        assert_eq!(packet.len(), 83);
+        assert_eq!(packet.len(), 94);
         assert_eq!(packet[0], 0xCD); // Bit-reversed sync word
         assert_eq!(packet[1], 0x50); // Bit-reversed length byte (80)
     }
@@ -194,16 +193,16 @@ mod rfm69_hardware_tests {
     #[test]
     fn test_packet_size_detection() {
         // Test Case 1: Type A, S format (CD xx) → length + 3
-        let data1 = [0xCD, 0x10]; // 16 byte length + 3 = 19 total
-        assert_eq!(packet_size(&data1), 19);
+        let data1 = [0xCD, 0x10]; // Type A L=16 → 2+16+2 CRCs = 22
+        assert_eq!(packet_size(&data1), 22);
 
         // Test Case 2: Type B, S format (3D xx) → length + 2
         let data2 = [0x3D, 0x10]; // 16 byte length + 2 = 18 total
         assert_eq!(packet_size(&data2), 18);
 
         // Test Case 3: Reversed byte order (xx CD) → length + 3
-        let data3 = [0x10, 0xCD]; // 16 byte length + 3 = 19 total
-        assert_eq!(packet_size(&data3), 19);
+        let data3 = [0x10, 0xCD]; // Type A L=16 → 2+16+2 CRCs = 22
+        assert_eq!(packet_size(&data3), 22);
 
         // Test Case 4: Reversed byte order (xx 3D) → length + 2
         let data4 = [0x10, 0x3D]; // 16 byte length + 2 = 18 total

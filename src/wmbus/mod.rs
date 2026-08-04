@@ -6,17 +6,18 @@
 //!
 pub mod block;
 pub mod compact_cache;
+pub mod crc;
 pub mod crypto;
 pub mod crypto_hardware;
 pub mod encryption;
 pub mod frame;
 pub mod frame_decode;
 pub mod handle;
+pub mod mode_c;
 pub mod mode_switching;
 pub mod network;
 pub mod radio;
 pub mod sha_hardware;
-pub mod simd_crc;
 
 pub use radio::{
     driver::Sx126xDriver,
@@ -42,5 +43,6 @@ pub use frame_decode::{
     calculate_wmbus_crc_enhanced, DecodeError, DecodeStats, FrameDecoder, FrameType,
 };
 pub use handle::WMBusHandle;
+pub use mode_c::{decode_mode_c, WMBusLinkFrame};
 pub use mode_switching::{ModeNegotiator, ModeSwitcher, SwitchingStats, WMBusMode};
 pub use network::WMBusNetwork;

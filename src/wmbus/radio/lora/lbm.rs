@@ -4,12 +4,12 @@
 //! enabling mesh networking for distant devices (e.g., Kamstrup meters).
 //! Inspired by LoRaWAN Private Network Server (LNS) concepts.
 
+use log::{debug, info, warn};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, RwLock};
-use serde::{Serialize, Deserialize};
-use log::{debug, info, warn};
 
 /// Quality of Service levels for mesh messages
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -165,11 +165,14 @@ impl LbmCore {
         // Store for retry if QoS > 0
         if qos != QoS::AtMostOnce {
             let mut pending = self.pending_acks.lock().await;
-            pending.insert(msg_id, PendingAck {
-                message: message.clone(),
-                retry_count: 0,
-                next_retry: Instant::now() + Duration::from_secs(5),
-            });
+            pending.insert(
+                msg_id,
+                PendingAck {
+                    message: message.clone(),
+                    retry_count: 0,
+                    next_retry: Instant::now() + Duration::from_secs(5),
+                },
+            );
         }
 
         // Send to mesh
@@ -202,7 +205,9 @@ impl LbmCore {
         for hop in next_hops {
             debug!("Routing message {} to {}", message.id, hop);
             // In real implementation, this would send via LoRa
-            self.tx.send(message.clone()).await
+            self.tx
+                .send(message.clone())
+                .await
                 .map_err(|e| format!("Failed to route: {e}"))?;
         }
 
@@ -322,7 +327,8 @@ impl LbmCore {
 
         let link_quality = ((rssi + 120) as f32 / 70.0).clamp(0.0, 1.0);
 
-        nodes.entry(address.clone())
+        nodes
+            .entry(address.clone())
             .and_modify(|info| {
                 info.last_seen = Instant::now();
                 info.link_quality = link_quality;
@@ -339,8 +345,8 @@ impl LbmCore {
 
     /// Generate unique message ID
     fn generate_message_id(&self) -> u64 {
-        use rand::Rng;
-        rand::thread_rng().gen()
+        use rand::RngExt;
+        rand::rng().random()
     }
 
     /// Get mesh statistics
@@ -382,11 +388,10 @@ mod tests {
         lbm.subscribe("sensors/temperature").await.unwrap();
 
         // Publish message
-        let msg_id = lbm.publish(
-            "sensors/temperature",
-            b"25.5".to_vec(),
-            QoS::AtLeastOnce
-        ).await.unwrap();
+        let msg_id = lbm
+            .publish("sensors/temperature", b"25.5".to_vec(), QoS::AtLeastOnce)
+            .await
+            .unwrap();
 
         assert!(msg_id > 0);
     }

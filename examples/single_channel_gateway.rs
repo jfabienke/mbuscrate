@@ -14,13 +14,12 @@
 //! cargo run --example single_channel_gateway
 //! ```
 
-use env_logger;
 use log::{info, warn};
 
 // Import LoRa types
 use mbus_rs::wmbus::radio::lora::{
-    LoRaCadParams, LoRaModParams, SpreadingFactor, LoRaBandwidth, CodingRate,
-    params::LoRaModParamsExt,
+    params::LoRaModParamsExt, CodingRate, LoRaBandwidth, LoRaCadParams, LoRaModParams,
+    SpreadingFactor,
 };
 
 /// Single-channel gateway configuration
@@ -48,12 +47,12 @@ impl GatewayConfig {
     /// EU868 configuration - complies with ETSI duty cycle limits
     pub fn eu868() -> Self {
         Self {
-            frequency_hz: 868_100_000,  // 868.1 MHz - EU868 channel 1
+            frequency_hz: 868_100_000, // 868.1 MHz - EU868 channel 1
             spreading_factor: SpreadingFactor::SF9,
             bandwidth: LoRaBandwidth::BW125,
             coding_rate: CodingRate::CR4_5,
-            tx_power_dbm: 14,  // ETSI limit
-            max_duty_cycle_percent: 1.0,  // 1% duty cycle
+            tx_power_dbm: 14,            // ETSI limit
+            max_duty_cycle_percent: 1.0, // 1% duty cycle
             use_private_sync_word: false,
             optimize_for_reliability: true,
         }
@@ -62,12 +61,12 @@ impl GatewayConfig {
     /// US915 configuration - no duty cycle restrictions
     pub fn us915() -> Self {
         Self {
-            frequency_hz: 902_300_000,  // US915 channel 0
+            frequency_hz: 902_300_000, // US915 channel 0
             spreading_factor: SpreadingFactor::SF7,
             bandwidth: LoRaBandwidth::BW500,
             coding_rate: CodingRate::CR4_5,
-            tx_power_dbm: 20,  // FCC limit for US915
-            max_duty_cycle_percent: 100.0,  // No duty cycle limit
+            tx_power_dbm: 20,              // FCC limit for US915
+            max_duty_cycle_percent: 100.0, // No duty cycle limit
             use_private_sync_word: false,
             optimize_for_reliability: false,
         }
@@ -76,7 +75,7 @@ impl GatewayConfig {
     /// AS923 configuration - Asia-Pacific region
     pub fn as923() -> Self {
         Self {
-            frequency_hz: 923_200_000,  // AS923 channel 1
+            frequency_hz: 923_200_000, // AS923 channel 1
             spreading_factor: SpreadingFactor::SF8,
             bandwidth: LoRaBandwidth::BW125,
             coding_rate: CodingRate::CR4_5,
@@ -90,13 +89,13 @@ impl GatewayConfig {
     /// Private network configuration for metering
     pub fn metering_network() -> Self {
         Self {
-            frequency_hz: 869_525_000,  // Non-standard frequency for private network
-            spreading_factor: SpreadingFactor::SF10,  // Good range/data rate balance
+            frequency_hz: 869_525_000, // Non-standard frequency for private network
+            spreading_factor: SpreadingFactor::SF10, // Good range/data rate balance
             bandwidth: LoRaBandwidth::BW125,
-            coding_rate: CodingRate::CR4_6,  // Extra error correction
+            coding_rate: CodingRate::CR4_6, // Extra error correction
             tx_power_dbm: 14,
             max_duty_cycle_percent: 1.0,
-            use_private_sync_word: true,  // Private sync word to avoid LoRaWAN
+            use_private_sync_word: true, // Private sync word to avoid LoRaWAN
             optimize_for_reliability: true,
         }
     }
@@ -115,7 +114,8 @@ fn main() {
     info!("========================");
 
     let eu868 = GatewayConfig::eu868();
-    info!("EU868: {:.1} MHz, SF{:?}, BW{:?}, {}dBm, {:.1}% duty cycle",
+    info!(
+        "EU868: {:.1} MHz, SF{:?}, BW{:?}, {}dBm, {:.1}% duty cycle",
         eu868.frequency_hz as f64 / 1_000_000.0,
         eu868.spreading_factor,
         eu868.bandwidth,
@@ -124,7 +124,8 @@ fn main() {
     );
 
     let us915 = GatewayConfig::us915();
-    info!("US915: {:.1} MHz, SF{:?}, BW{:?}, {}dBm, {:.1}% duty cycle",
+    info!(
+        "US915: {:.1} MHz, SF{:?}, BW{:?}, {}dBm, {:.1}% duty cycle",
         us915.frequency_hz as f64 / 1_000_000.0,
         us915.spreading_factor,
         us915.bandwidth,
@@ -133,7 +134,8 @@ fn main() {
     );
 
     let as923 = GatewayConfig::as923();
-    info!("AS923: {:.1} MHz, SF{:?}, BW{:?}, {}dBm, {:.1}% duty cycle",
+    info!(
+        "AS923: {:.1} MHz, SF{:?}, BW{:?}, {}dBm, {:.1}% duty cycle",
         as923.frequency_hz as f64 / 1_000_000.0,
         as923.spreading_factor,
         as923.bandwidth,
@@ -142,7 +144,8 @@ fn main() {
     );
 
     let metering = GatewayConfig::metering_network();
-    info!("Private Metering: {:.1} MHz, SF{:?}, BW{:?}, {}dBm, private sync",
+    info!(
+        "Private Metering: {:.1} MHz, SF{:?}, BW{:?}, {}dBm, private sync",
         metering.frequency_hz as f64 / 1_000_000.0,
         metering.spreading_factor,
         metering.bandwidth,
@@ -183,16 +186,22 @@ fn main() {
     info!("CAD Duration Estimates:");
 
     let cad_sf7_125 = LoRaCadParams::optimal(SpreadingFactor::SF7, LoRaBandwidth::BW125);
-    info!("SF7/BW125: ~{}ms per CAD cycle",
-        cad_sf7_125.duration_ms(SpreadingFactor::SF7, LoRaBandwidth::BW125));
+    info!(
+        "SF7/BW125: ~{}ms per CAD cycle",
+        cad_sf7_125.duration_ms(SpreadingFactor::SF7, LoRaBandwidth::BW125)
+    );
 
     let cad_sf10_125 = LoRaCadParams::optimal(SpreadingFactor::SF10, LoRaBandwidth::BW125);
-    info!("SF10/BW125: ~{}ms per CAD cycle",
-        cad_sf10_125.duration_ms(SpreadingFactor::SF10, LoRaBandwidth::BW125));
+    info!(
+        "SF10/BW125: ~{}ms per CAD cycle",
+        cad_sf10_125.duration_ms(SpreadingFactor::SF10, LoRaBandwidth::BW125)
+    );
 
     let cad_sf12_125 = LoRaCadParams::optimal(SpreadingFactor::SF12, LoRaBandwidth::BW125);
-    info!("SF12/BW125: ~{}ms per CAD cycle",
-        cad_sf12_125.duration_ms(SpreadingFactor::SF12, LoRaBandwidth::BW125));
+    info!(
+        "SF12/BW125: ~{}ms per CAD cycle",
+        cad_sf12_125.duration_ms(SpreadingFactor::SF12, LoRaBandwidth::BW125)
+    );
 
     info!("");
     info!("This example demonstrates configuration only.");

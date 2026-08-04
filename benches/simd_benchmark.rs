@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use mbus_rs::mbus::frame::calculate_mbus_checksum;
 use mbus_rs::wmbus::frame_decode::calculate_wmbus_crc_enhanced;
+use std::hint::black_box;
 
 // Scalar reference implementations for comparison
 fn calculate_checksum_scalar(data: &[u8]) -> u8 {
@@ -38,18 +39,14 @@ fn bench_checksum_comparison(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(*size as u64));
 
         // Benchmark scalar implementation
-        group.bench_with_input(
-            BenchmarkId::new("scalar", size),
-            &data,
-            |b, data| b.iter(|| calculate_checksum_scalar(black_box(data))),
-        );
+        group.bench_with_input(BenchmarkId::new("scalar", size), &data, |b, data| {
+            b.iter(|| calculate_checksum_scalar(black_box(data)))
+        });
 
         // Benchmark SIMD implementation
-        group.bench_with_input(
-            BenchmarkId::new("simd", size),
-            &data,
-            |b, data| b.iter(|| calculate_mbus_checksum(black_box(data))),
-        );
+        group.bench_with_input(BenchmarkId::new("simd", size), &data, |b, data| {
+            b.iter(|| calculate_mbus_checksum(black_box(data)))
+        });
     }
 
     group.finish();
@@ -65,18 +62,14 @@ fn bench_crc_comparison(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(*size as u64));
 
         // Benchmark scalar implementation
-        group.bench_with_input(
-            BenchmarkId::new("scalar", size),
-            &data,
-            |b, data| b.iter(|| calculate_crc_scalar(black_box(data))),
-        );
+        group.bench_with_input(BenchmarkId::new("scalar", size), &data, |b, data| {
+            b.iter(|| calculate_crc_scalar(black_box(data)))
+        });
 
         // Benchmark SIMD implementation
-        group.bench_with_input(
-            BenchmarkId::new("simd", size),
-            &data,
-            |b, data| b.iter(|| calculate_wmbus_crc_enhanced(black_box(data))),
-        );
+        group.bench_with_input(BenchmarkId::new("simd", size), &data, |b, data| {
+            b.iter(|| calculate_wmbus_crc_enhanced(black_box(data)))
+        });
     }
 
     group.finish();
@@ -102,11 +95,13 @@ fn bench_real_world_frames(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("frame_checksum", name),
             &data,
-            |b, data| b.iter(|| {
-                let checksum = calculate_mbus_checksum(black_box(data));
-                let crc = calculate_wmbus_crc_enhanced(black_box(data));
-                (checksum, crc)
-            }),
+            |b, data| {
+                b.iter(|| {
+                    let checksum = calculate_mbus_checksum(black_box(data));
+                    let crc = calculate_wmbus_crc_enhanced(black_box(data));
+                    (checksum, crc)
+                })
+            },
         );
     }
 

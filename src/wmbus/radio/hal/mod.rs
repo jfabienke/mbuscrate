@@ -46,6 +46,59 @@ pub trait Hal {
     fn gpio_write(&mut self, pin: u8, value: bool) -> Result<(), HalError>;
 }
 
+/// A no-op [`Hal`] implementation for tests, examples, and documentation.
+///
+/// Every write succeeds and is discarded; every read succeeds and yields zeroes.
+/// This lets driver logic be exercised without radio hardware attached. It models
+/// no device behaviour, so it cannot be used to assert on radio state — use it to
+/// check that call sequences type-check and run, not that they do the right thing.
+///
+/// # Examples
+///
+/// ```rust
+/// use mbus_rs::wmbus::radio::hal::MockHal;
+/// use mbus_rs::wmbus::radio::driver::Sx126xDriver;
+///
+/// let driver = Sx126xDriver::new(MockHal::new(), 32_000_000);
+/// ```
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MockHal;
+
+impl MockHal {
+    /// Create a new mock HAL.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Hal for MockHal {
+    fn write_command(&mut self, _opcode: u8, _data: &[u8]) -> Result<(), HalError> {
+        Ok(())
+    }
+
+    fn read_command(&mut self, _opcode: u8, buf: &mut [u8]) -> Result<(), HalError> {
+        buf.fill(0);
+        Ok(())
+    }
+
+    fn write_register(&mut self, _addr: u16, _data: &[u8]) -> Result<(), HalError> {
+        Ok(())
+    }
+
+    fn read_register(&mut self, _addr: u16, buf: &mut [u8]) -> Result<(), HalError> {
+        buf.fill(0);
+        Ok(())
+    }
+
+    fn gpio_read(&mut self, _pin: u8) -> Result<bool, HalError> {
+        Ok(false)
+    }
+
+    fn gpio_write(&mut self, _pin: u8, _value: bool) -> Result<(), HalError> {
+        Ok(())
+    }
+}
+
 // Enhanced GPIO abstraction
 pub mod enhanced_gpio;
 

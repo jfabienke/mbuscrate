@@ -24,17 +24,26 @@ fn main() {
         has_timestamp: false,
         has_battery: true,
     };
-    manager.register_device("00112233".to_string(), DecoderType::GenericCounter(water_meter_config));
+    manager.register_device(
+        "00112233".to_string(),
+        DecoderType::GenericCounter(water_meter_config),
+    );
 
     // Dragino SW3L flow sensor
-    manager.register_device("AABBCCDD".to_string(), DecoderType::Dragino(DraginoModel::SW3L));
+    manager.register_device(
+        "AABBCCDD".to_string(),
+        DecoderType::Dragino(DraginoModel::SW3L),
+    );
 
     // Decentlab pressure sensor
     let decentlab_config = DecentlabConfig {
         protocol_version: 2,
         channels: vec![], // Will be auto-detected
     };
-    manager.register_device("12345678".to_string(), DecoderType::Decentlab(decentlab_config));
+    manager.register_device(
+        "12345678".to_string(),
+        DecoderType::Decentlab(decentlab_config),
+    );
 
     // EN 13757-3 Compact frame decoder as default
     manager.set_default_decoder(DecoderType::En13757Compact);

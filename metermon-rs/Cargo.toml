@@ -1,0 +1,33 @@
+[package]
+name = "metermon-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust reimplementation of the epulse `metermon` wM-Bus gateway, built on mbus-rs. A/B validation target against the deployed C++ metermon."
+
+# Nested standalone crate, matching this repo's `examples/` convention
+# (path-dep on the mbus-rs library at "..", not a workspace member).
+
+[dependencies]
+# The library under test. `crypto` is required for Mode 5/7/9 decryption.
+mbus-rs = { path = "..", features = ["crypto"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rumqttc = "0.24"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
+
+# Direct SPI access for the read-only `dumpregs` diagnostic (Pi only).
+rppal = { version = "0.22", optional = true }
+redb = "4.1.0"
+
+[features]
+default = []
+# The `radio` feature pulls in the RFM69 driver + Pi HAL. Only builds on Linux/aarch64
+# (rppal is Linux-only), so it is OFF by default: the decode core, file-replay source,
+# and MQTT publisher all build and test on any host without it.
+radio = ["mbus-rs/rfm69", "mbus-rs/raspberry-pi", "dep:rppal"]

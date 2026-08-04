@@ -406,7 +406,6 @@ async fn test_simulated_device_discovery() {
 
     // For this test, we can't easily verify the exact results without more
     // sophisticated mocking, but we can verify the operations don't crash
-    assert!(true, "Device discovery simulation completed without errors");
 }
 
 #[tokio::test]
@@ -425,10 +424,12 @@ async fn test_unexpected_irq_bit() {
         "Should detect that some interrupt is active"
     );
 
-    // Verify that the raw value includes the unexpected bit
+    // Verify that the raw value includes the unexpected bit.
+    // Derive the expectation from the enum rather than hardcoding it: per the SX126x
+    // IRQ register, TxDone is bit 0 and RxDone is bit 1, so this is 0x8002, not 0x8001.
     assert_eq!(
         unexpected_irq.raw(),
-        0x8001,
+        0x8000 | (IrqMaskBit::RxDone as u16),
         "Raw value should include unexpected bit"
     );
 
@@ -449,4 +450,34 @@ async fn test_unexpected_irq_bit() {
 
     // This test ensures the driver won't panic with unexpected hardware behavior
     // and will log warnings appropriately (though we can't easily test logging here)
+}
+
+#[test]
+fn full_frame_with_0x79_manufacturer_lowbyte_not_misparsed_as_compact() {
+    // Regression for fix #4/#1: manufacturer-ID low byte 0x79 collides with the compact-frame
+    // CI marker at byte 2. A full frame with CI 0x73 (fixed-data response) or 0x8E (ELL) — both
+    // omitted from the old narrow allowlist — must still parse as a FULL frame, not compact.
+    for ci in [0x73u8, 0x8E] {
+        let built = WMBusFrame::build(
+            0x44,
+            0x2C79,
+            0x11223344,
+            0x01,
+            0x07,
+            ci,
+            &[0x01, 0x02, 0x03],
+        );
+        assert_eq!(
+            built[2], 0x79,
+            "manufacturer low byte is the 0x79 collision case"
+        );
+        let frame = parse_wmbus_frame(&built)
+            .unwrap_or_else(|e| panic!("CI {ci:#04X}: should parse as a full frame, got {e:?}"));
+        assert_eq!(frame.control_info, ci, "CI {ci:#04X}: parsed as full");
+        assert_eq!(
+            frame.device_address, 0x1122_3344,
+            "CI {ci:#04X}: full address, not compact placeholder"
+        );
+        assert_eq!(frame.manufacturer_id, 0x2C79);
+    }
 }

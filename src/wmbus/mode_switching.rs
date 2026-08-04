@@ -17,16 +17,17 @@
 //! ```rust
 //! use mbus_rs::wmbus::mode_switching::{ModeSwitcher, WMBusMode};
 //!
+//! # async fn demo() {
 //! let mut switcher = ModeSwitcher::new();
 //!
 //! // Try next mode in sequence
-//! let next_mode = switcher.next_mode();
+//! if let Some(next_mode) = switcher.next_mode().await {
+//!     // ... configure the radio for `next_mode` here ...
 //!
-//! // Configure radio for mode
-//! radio.configure_mode(next_mode);
-//!
-//! // On successful communication
-//! switcher.mode_established(next_mode);
+//!     // On successful communication
+//!     switcher.mode_established(next_mode);
+//! }
+//! # }
 //! ```
 
 use std::time::{Duration, Instant};
@@ -354,7 +355,9 @@ impl ModeNegotiator {
             WMBusMode::S2,
         ];
 
-        preference_order.into_iter().find(|&mode| self.supported_modes.contains(&mode) && remote_modes.contains(&mode))
+        preference_order
+            .into_iter()
+            .find(|&mode| self.supported_modes.contains(&mode) && remote_modes.contains(&mode))
     }
 }
 

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::MBusError;
 use crate::mbus::secondary_addressing::SecondaryAddress;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Type of CRC error for vendor tolerance decisions
@@ -247,10 +247,7 @@ pub trait VendorExtension: Send + Sync {
     }
 
     /// Serialize traces for debugging
-    fn serialize_traces(
-        &self,
-        _data: &[u8],
-    ) -> Result<Value, MBusError> {
+    fn serialize_traces(&self, _data: &[u8]) -> Result<Value, MBusError> {
         Ok(Value::Null)
     }
 }
@@ -342,17 +339,21 @@ impl VendorRegistry {
         let registry = Self::new();
 
         // Auto-register all manufacturers with quirks
-        for (&id, info) in crate::vendors::manufacturer::all_manufacturers() {
+        for (&_id, info) in crate::vendors::manufacturer::all_manufacturers() {
             if info.has_quirks {
                 match info.code {
                     "QDS" => {
-                        let extension = Arc::new(crate::vendors::qundis_hca::QundisHcaExtension::new());
+                        let extension =
+                            Arc::new(crate::vendors::qundis_hca::QundisHcaExtension::new());
                         registry.register(info.code, extension)?;
-                    },
+                    }
                     // Add other vendors with quirks here as they're implemented
                     _ => {
                         // Log that this manufacturer has quirks but no extension yet
-                        log::debug!("Manufacturer {} has quirks but no extension implemented", info.code);
+                        log::debug!(
+                            "Manufacturer {} has quirks but no extension implemented",
+                            info.code
+                        );
                     }
                 }
             }
@@ -540,7 +541,10 @@ mod tests {
 
         // Test round-trip conversion
         assert_eq!(parse_manufacturer_id("KAM"), 0x2C2D);
-        assert_eq!(manufacturer_id_to_string(parse_manufacturer_id("ABC")), "ABC");
+        assert_eq!(
+            manufacturer_id_to_string(parse_manufacturer_id("ABC")),
+            "ABC"
+        );
     }
 
     #[test]

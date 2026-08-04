@@ -7,9 +7,7 @@
 //!
 //! Inspired by One Channel Hub's approach to single-channel gateways.
 
-use crate::wmbus::radio::modulation::{
-    CodingRate, LoRaBandwidth, LoRaModParams, SpreadingFactor,
-};
+use crate::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, LoRaModParams, SpreadingFactor};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -85,8 +83,8 @@ impl SingleChannelConfig {
             spreading_factor: SpreadingFactor::SF7,
             bandwidth: LoRaBandwidth::BW125,
             coding_rate: CodingRate::CR4_5,
-            tx_power_dbm: 20,  // Higher power allowed in US
-            duty_cycle_enabled: false,  // No duty cycle limit in US
+            tx_power_dbm: 20,          // Higher power allowed in US
+            duty_cycle_enabled: false, // No duty cycle limit in US
             duty_cycle_percent: 100.0,
         }
     }
@@ -94,12 +92,20 @@ impl SingleChannelConfig {
     /// Convert to LoRa modulation parameters
     pub fn to_mod_params(&self) -> LoRaModParams {
         // LDRO is required for SF11/SF12 with BW <= 125kHz
-        let ldro_required = matches!(self.spreading_factor, SpreadingFactor::SF11 | SpreadingFactor::SF12)
-            && matches!(self.bandwidth,
-                LoRaBandwidth::BW7_8 | LoRaBandwidth::BW10_4 |
-                LoRaBandwidth::BW15_6 | LoRaBandwidth::BW20_8 |
-                LoRaBandwidth::BW31_2 | LoRaBandwidth::BW41_7 |
-                LoRaBandwidth::BW62_5 | LoRaBandwidth::BW125);
+        let ldro_required = matches!(
+            self.spreading_factor,
+            SpreadingFactor::SF11 | SpreadingFactor::SF12
+        ) && matches!(
+            self.bandwidth,
+            LoRaBandwidth::BW7_8
+                | LoRaBandwidth::BW10_4
+                | LoRaBandwidth::BW15_6
+                | LoRaBandwidth::BW20_8
+                | LoRaBandwidth::BW31_2
+                | LoRaBandwidth::BW41_7
+                | LoRaBandwidth::BW62_5
+                | LoRaBandwidth::BW125
+        );
 
         LoRaModParams {
             sf: self.spreading_factor,
@@ -114,7 +120,7 @@ impl SingleChannelConfig {
     /// Based on spreading factor, bandwidth, and duty cycle limits
     pub fn max_throughput_per_hour(&self) -> u32 {
         // Time on air calculation (simplified)
-        let toa_ms = self.calculate_time_on_air_ms(50);  // Assume 50-byte packet
+        let toa_ms = self.calculate_time_on_air_ms(50); // Assume 50-byte packet
 
         // Account for duty cycle
         let effective_duty_cycle = if self.duty_cycle_enabled {
@@ -175,19 +181,28 @@ impl SingleChannelConfig {
         // Payload symbol count calculation
         let h = if implicit_header { 0 } else { 1 };
         // LDRO is required for SF11/SF12 with BW <= 125kHz
-        let ldro_enabled = matches!(self.spreading_factor, SpreadingFactor::SF11 | SpreadingFactor::SF12)
-            && matches!(self.bandwidth,
-                LoRaBandwidth::BW7_8 | LoRaBandwidth::BW10_4 |
-                LoRaBandwidth::BW15_6 | LoRaBandwidth::BW20_8 |
-                LoRaBandwidth::BW31_2 | LoRaBandwidth::BW41_7 |
-                LoRaBandwidth::BW62_5 | LoRaBandwidth::BW125);
+        let ldro_enabled = matches!(
+            self.spreading_factor,
+            SpreadingFactor::SF11 | SpreadingFactor::SF12
+        ) && matches!(
+            self.bandwidth,
+            LoRaBandwidth::BW7_8
+                | LoRaBandwidth::BW10_4
+                | LoRaBandwidth::BW15_6
+                | LoRaBandwidth::BW20_8
+                | LoRaBandwidth::BW31_2
+                | LoRaBandwidth::BW41_7
+                | LoRaBandwidth::BW62_5
+                | LoRaBandwidth::BW125
+        );
         let de = if ldro_enabled { 1 } else { 0 };
         let crc = if crc_on { 1 } else { 0 };
 
-        let payload_symb_nb = 8.0 + ((8 * payload_bytes as i32 - 4 * sf
-            + 28 + 16 * crc - 20 * h) as f32
-            / (4 * (sf - 2 * de)) as f32).ceil()
-            * (cr + 4) as f32;
+        let payload_symb_nb = 8.0
+            + ((8 * payload_bytes as i32 - 4 * sf + 28 + 16 * crc - 20 * h) as f32
+                / (4 * (sf - 2 * de)) as f32)
+                .ceil()
+                * (cr + 4) as f32;
 
         let payload_symb_nb = payload_symb_nb.max(0.0);
 
@@ -221,7 +236,7 @@ impl DutyCycleLimiter {
         Self {
             config,
             tx_history: Vec::new(),
-            window: Duration::from_secs(3600),  // 1 hour window
+            window: Duration::from_secs(3600), // 1 hour window
         }
     }
 
@@ -234,10 +249,7 @@ impl DutyCycleLimiter {
         self.cleanup_old_entries();
 
         // Calculate current duty cycle
-        let total_tx_time: Duration = self.tx_history
-            .iter()
-            .map(|(_, d)| *d)
-            .sum();
+        let total_tx_time: Duration = self.tx_history.iter().map(|(_, d)| *d).sum();
 
         let window_ms = self.window.as_millis() as f32;
         let total_tx_ms = total_tx_time.as_millis() as f32;
@@ -258,10 +270,7 @@ impl DutyCycleLimiter {
     pub fn get_current_duty_cycle(&mut self) -> f32 {
         self.cleanup_old_entries();
 
-        let total_tx_time: Duration = self.tx_history
-            .iter()
-            .map(|(_, d)| *d)
-            .sum();
+        let total_tx_time: Duration = self.tx_history.iter().map(|(_, d)| *d).sum();
 
         let window_ms = self.window.as_millis() as f32;
         let total_tx_ms = total_tx_time.as_millis() as f32;
@@ -355,7 +364,7 @@ mod tests {
                 bw: LoRaBandwidth::BW125,
                 cr: CodingRate::CR4_5,
                 payload_bytes: 50,
-                expected_ms: 97,  // Adjusted based on formula
+                expected_ms: 97, // Adjusted based on formula
                 tolerance_ms: 10,
             },
             // SF9, BW125, CR4/5, 50 bytes - suburban
@@ -364,7 +373,7 @@ mod tests {
                 bw: LoRaBandwidth::BW125,
                 cr: CodingRate::CR4_5,
                 payload_bytes: 50,
-                expected_ms: 308,  // Adjusted based on actual calculation
+                expected_ms: 308, // Adjusted based on actual calculation
                 tolerance_ms: 20,
             },
             // SF10, BW125, CR4/5, 50 bytes - rural
@@ -373,7 +382,7 @@ mod tests {
                 bw: LoRaBandwidth::BW125,
                 cr: CodingRate::CR4_5,
                 payload_bytes: 50,
-                expected_ms: 575,  // Adjusted based on actual calculation
+                expected_ms: 575, // Adjusted based on actual calculation
                 tolerance_ms: 50,
             },
             // SF12, BW125, CR4/8, 50 bytes - maximum range
@@ -382,8 +391,8 @@ mod tests {
                 bw: LoRaBandwidth::BW125,
                 cr: CodingRate::CR4_8,
                 payload_bytes: 50,
-                expected_ms: 3284,  // Adjusted based on actual calculation with LDRO
-                tolerance_ms: 200,  // Increased tolerance for LDRO cases
+                expected_ms: 3284, // Adjusted based on actual calculation with LDRO
+                tolerance_ms: 200, // Increased tolerance for LDRO cases
             },
             // Small payload tests
             ToaTestCase {
@@ -391,7 +400,7 @@ mod tests {
                 bw: LoRaBandwidth::BW125,
                 cr: CodingRate::CR4_5,
                 payload_bytes: 10,
-                expected_ms: 41,  // Adjusted
+                expected_ms: 41, // Adjusted
                 tolerance_ms: 10,
             },
             // Large payload tests
@@ -401,7 +410,7 @@ mod tests {
                 cr: CodingRate::CR4_5,
                 payload_bytes: 100,
                 expected_ms: 903,  // Adjusted
-                tolerance_ms: 100,  // Increased tolerance
+                tolerance_ms: 100, // Increased tolerance
             },
             // High bandwidth tests
             ToaTestCase {
@@ -409,7 +418,7 @@ mod tests {
                 bw: LoRaBandwidth::BW500,
                 cr: CodingRate::CR4_5,
                 payload_bytes: 50,
-                expected_ms: 24,  // Adjusted
+                expected_ms: 24, // Adjusted
                 tolerance_ms: 5,
             },
             // Low bandwidth tests
@@ -418,8 +427,8 @@ mod tests {
                 bw: LoRaBandwidth::BW62_5,
                 cr: CodingRate::CR4_5,
                 payload_bytes: 20,
-                expected_ms: 370,  // Adjusted based on actual calculation
-                tolerance_ms: 50,  // Increased tolerance
+                expected_ms: 370, // Adjusted based on actual calculation
+                tolerance_ms: 50, // Increased tolerance
             },
         ];
 
@@ -438,7 +447,12 @@ mod tests {
             assert!(
                 (toa_ms as i32 - tc.expected_ms as i32).abs() <= tc.tolerance_ms as i32,
                 "ToA mismatch for SF{:?} BW{:?} CR{:?} {} bytes: expected {}ms, got {}ms",
-                tc.sf, tc.bw, tc.cr, tc.payload_bytes, tc.expected_ms, toa_ms
+                tc.sf,
+                tc.bw,
+                tc.cr,
+                tc.payload_bytes,
+                tc.expected_ms,
+                toa_ms
             );
         }
     }

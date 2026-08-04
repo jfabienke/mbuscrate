@@ -23,20 +23,16 @@
 //! cargo run --example pio_irq_demo --features pio-irq -- --noise-test
 //! ```
 
-use std::time::{Duration, Instant};
-use std::thread;
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use clap::{Arg, Command};
-use log::{info, warn, error, debug};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "pio-irq")]
 use mbus_rs::wmbus::radio::pio_irq::{
-    get_pio_irq_backend, PioIrqBackend,
-    DIO0_TX_DONE, DIO1_RX_DONE, DIO2_MASK, DIO3_MASK,
+    get_pio_irq_backend, PioIrqBackend, DIO0_TX_DONE, DIO1_RX_DONE, DIO2_MASK, DIO3_MASK,
 };
 
 #[cfg(feature = "pio-irq")]
-use mbus_rs::wmbus::radio::lora::sx1262::{Sx1262Driver, LoRaConfig};
+use mbus_rs::wmbus::radio::lora::sx1262::{LoRaConfig, Sx1262Driver};
 
 /// Demo configuration
 #[derive(Debug, Clone)]
@@ -82,13 +78,17 @@ impl PerformanceStats {
         }
 
         // Update latency statistics
-        self.total_latency_ns.fetch_add(latency_ns, Ordering::Relaxed);
+        self.total_latency_ns
+            .fetch_add(latency_ns, Ordering::Relaxed);
 
         // Update min latency
         let mut current_min = self.min_latency_ns.load(Ordering::Relaxed);
         while current_min == 0 || latency_ns < current_min {
             match self.min_latency_ns.compare_exchange_weak(
-                current_min, latency_ns, Ordering::Relaxed, Ordering::Relaxed
+                current_min,
+                latency_ns,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => current_min = actual,
@@ -99,7 +99,10 @@ impl PerformanceStats {
         let mut current_max = self.max_latency_ns.load(Ordering::Relaxed);
         while latency_ns > current_max {
             match self.max_latency_ns.compare_exchange_weak(
-                current_max, latency_ns, Ordering::Relaxed, Ordering::Relaxed
+                current_max,
+                latency_ns,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => current_max = actual,
@@ -117,15 +120,24 @@ impl PerformanceStats {
 
         println!("\n=== PIO IRQ Performance Statistics ===");
         println!("Total IRQ events:     {}", total);
-        println!("Valid IRQs:           {} ({:.1}%)", valid, (valid as f64 / total as f64) * 100.0);
-        println!("Filtered (noise):     {} ({:.1}%)", filtered, (filtered as f64 / total as f64) * 100.0);
+        println!(
+            "Valid IRQs:           {} ({:.1}%)",
+            valid,
+            (valid as f64 / total as f64) * 100.0
+        );
+        println!(
+            "Filtered (noise):     {} ({:.1}%)",
+            filtered,
+            (filtered as f64 / total as f64) * 100.0
+        );
 
-        if total > 0 {
-            let avg_ns = total_ns / total;
-            println!("Latency (min/avg/max): {:.1}μs / {:.1}μs / {:.1}μs",
-                     min_ns as f64 / 1000.0,
-                     avg_ns as f64 / 1000.0,
-                     max_ns as f64 / 1000.0);
+        if let Some(avg_ns) = total_ns.checked_div(total) {
+            println!(
+                "Latency (min/avg/max): {:.1}μs / {:.1}μs / {:.1}μs",
+                min_ns as f64 / 1000.0,
+                avg_ns as f64 / 1000.0,
+                max_ns as f64 / 1000.0
+            );
         }
         println!("=======================================\n");
     }
@@ -135,30 +147,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let matches = Command::new("PIO IRQ Demo")
         .about("Demonstrates PIO-based IRQ debouncing for SX1262 on Raspberry Pi 5")
-        .arg(Arg::new("duration")
-            .short('d')
-            .long("duration")
-            .value_name("SECONDS")
-            .help("Demo duration in seconds")
-            .default_value("30"))
-        .arg(Arg::new("stats")
-            .long("stats")
-            .help("Show performance statistics")
-            .action(clap::ArgAction::SetTrue))
-        .arg(Arg::new("noise-test")
-            .long("noise-test")
-            .help("Enable noise simulation test")
-            .action(clap::ArgAction::SetTrue))
-        .arg(Arg::new("debounce")
-            .long("debounce")
-            .value_name("MICROSECONDS")
-            .help("Debounce window in microseconds")
-            .default_value("10"))
-        .arg(Arg::new("verbose")
-            .short('v')
-            .long("verbose")
-            .help("Enable verbose logging")
-            .action(clap::ArgAction::SetTrue))
+        .arg(
+            Arg::new("duration")
+                .short('d')
+                .long("duration")
+                .value_name("SECONDS")
+                .help("Demo duration in seconds")
+                .default_value("30"),
+        )
+        .arg(
+            Arg::new("stats")
+                .long("stats")
+                .help("Show performance statistics")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("noise-test")
+                .long("noise-test")
+                .help("Enable noise simulation test")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("debounce")
+                .long("debounce")
+                .value_name("MICROSECONDS")
+                .help("Debounce window in microseconds")
+                .default_value("10"),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help("Enable verbose logging")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     // Initialize logging
@@ -174,13 +196,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Parse configuration
     let config = DemoConfig {
-        duration_secs: matches.get_one::<String>("duration")
+        duration_secs: matches
+            .get_one::<String>("duration")
             .unwrap()
             .parse()
             .expect("Invalid duration"),
         show_stats: matches.get_flag("stats"),
         noise_test: matches.get_flag("noise-test"),
-        debounce_us: matches.get_one::<String>("debounce")
+        debounce_us: matches
+            .get_one::<String>("debounce")
             .unwrap()
             .parse()
             .expect("Invalid debounce value"),
@@ -288,7 +312,13 @@ fn run_interactive_demo(
     let config_clone = config.clone();
 
     let monitor_handle = thread::spawn(move || {
-        monitor_irq_events(backend_clone, stats_clone, running_clone, &config_clone, sx1262_available);
+        monitor_irq_events(
+            backend_clone,
+            stats_clone,
+            running_clone,
+            &config_clone,
+            sx1262_available,
+        );
     });
 
     // Start statistics display thread
@@ -354,8 +384,10 @@ fn monitor_irq_events(
                 stats.record_irq(latency_ns, filtered);
 
                 if config.verbose {
-                    debug!("IRQ detected: mask=0x{:02X}, events=0x{:02X}, latency={}ns",
-                           mask, events, latency_ns);
+                    debug!(
+                        "IRQ detected: mask=0x{:02X}, events=0x{:02X}, latency={}ns",
+                        mask, events, latency_ns
+                    );
                 }
             }
         }
@@ -375,11 +407,7 @@ fn monitor_irq_events(
 }
 
 #[cfg(feature = "pio-irq")]
-fn display_live_stats(
-    stats: Arc<PerformanceStats>,
-    running: Arc<AtomicBool>,
-    config: &DemoConfig,
-) {
+fn display_live_stats(stats: Arc<PerformanceStats>, running: Arc<AtomicBool>, config: &DemoConfig) {
     let mut last_total = 0u64;
 
     while running.load(Ordering::Relaxed) {
@@ -391,8 +419,10 @@ fn display_live_stats(
 
         if current_total > last_total {
             let rate = (current_total - last_total) as f64 / 5.0; // IRQs per second
-            println!("📊 Live Stats - Rate: {:.1} IRQ/s, Valid: {}, Filtered: {}",
-                     rate, valid, filtered);
+            println!(
+                "📊 Live Stats - Rate: {:.1} IRQ/s, Valid: {}, Filtered: {}",
+                rate, valid, filtered
+            );
             last_total = current_total;
         }
     }
@@ -411,10 +441,22 @@ fn run_noise_simulation_test(
 
     // Simulate various noise patterns
     let noise_patterns = [
-        ("Burst", simulate_burst_noise as fn(Arc<dyn PioIrqBackend>, Arc<PerformanceStats>, u64, u32)),
-        ("Glitch", simulate_glitch_noise as fn(Arc<dyn PioIrqBackend>, Arc<PerformanceStats>, u64, u32)),
-        ("Periodic", simulate_periodic_noise as fn(Arc<dyn PioIrqBackend>, Arc<PerformanceStats>, u64, u32)),
-        ("Random", simulate_random_noise as fn(Arc<dyn PioIrqBackend>, Arc<PerformanceStats>, u64, u32)),
+        (
+            "Burst",
+            simulate_burst_noise as fn(Arc<dyn PioIrqBackend>, Arc<PerformanceStats>, u64, u32),
+        ),
+        (
+            "Glitch",
+            simulate_glitch_noise as fn(Arc<dyn PioIrqBackend>, Arc<PerformanceStats>, u64, u32),
+        ),
+        (
+            "Periodic",
+            simulate_periodic_noise as fn(Arc<dyn PioIrqBackend>, Arc<PerformanceStats>, u64, u32),
+        ),
+        (
+            "Random",
+            simulate_random_noise as fn(Arc<dyn PioIrqBackend>, Arc<PerformanceStats>, u64, u32),
+        ),
     ];
 
     for (name, pattern_fn) in &noise_patterns {
@@ -426,7 +468,12 @@ fn run_noise_simulation_test(
         let backend_clone = Arc::clone(&backend);
         let stats_clone = Arc::clone(&pattern_stats);
 
-        pattern_fn(backend_clone, stats_clone, test_duration, config.debounce_us);
+        pattern_fn(
+            backend_clone,
+            stats_clone,
+            test_duration,
+            config.debounce_us,
+        );
 
         // Print pattern-specific results
         let total = pattern_stats.total_irqs.load(Ordering::Relaxed);
@@ -434,7 +481,10 @@ fn run_noise_simulation_test(
 
         if total > 0 {
             let filter_rate = (filtered as f64 / total as f64) * 100.0;
-            println!("  {} Pattern: {} IRQs, {:.1}% filtered", name, total, filter_rate);
+            println!(
+                "  {} Pattern: {} IRQs, {:.1}% filtered",
+                name, total, filter_rate
+            );
         }
     }
 
@@ -541,7 +591,9 @@ fn simulate_random_noise(
 
 /// Demonstrate the state machine reset functionality
 #[cfg(feature = "pio-irq")]
-fn demonstrate_reset_functionality(backend: &Arc<dyn PioIrqBackend>) -> Result<(), Box<dyn std::error::Error>> {
+fn demonstrate_reset_functionality(
+    backend: &Arc<dyn PioIrqBackend>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Instant;
 
     println!("📋 Backend: {}", backend.name());
@@ -558,7 +610,10 @@ fn demonstrate_reset_functionality(backend: &Arc<dyn PioIrqBackend>) -> Result<(
     backend.clear_irq_fifo();
     let events = backend.debounce_irq(0x02, 10);
     assert_eq!(events, 0, "No events expected after reset");
-    assert!(!backend.is_irq_pending(), "No pending IRQs expected after reset");
+    assert!(
+        !backend.is_irq_pending(),
+        "No pending IRQs expected after reset"
+    );
     println!("    All functions working correctly after reset");
 
     // Test 3: Multiple reset cycles with different configurations
@@ -572,8 +627,12 @@ fn demonstrate_reset_functionality(backend: &Arc<dyn PioIrqBackend>) -> Result<(
         // Test different debounce configurations after each reset
         backend.debounce_irq(0x0F, debounce_us);
 
-        println!("    Cycle {}: Reset in {:?}, debounce {}μs configured",
-                 i + 1, reset_time, debounce_us);
+        println!(
+            "    Cycle {}: Reset in {:?}, debounce {}μs configured",
+            i + 1,
+            reset_time,
+            debounce_us
+        );
     }
 
     // Test 4: Performance measurement
@@ -592,7 +651,10 @@ fn demonstrate_reset_functionality(backend: &Arc<dyn PioIrqBackend>) -> Result<(
     }
 
     let avg_reset_time = total_time / RESET_COUNT as u32;
-    println!("    Average reset time: {:?} ({} iterations)", avg_reset_time, RESET_COUNT);
+    println!(
+        "    Average reset time: {:?} ({} iterations)",
+        avg_reset_time, RESET_COUNT
+    );
 
     // Test 5: Reset after simulated IRQ activity
     println!("  ✓ Testing reset after IRQ activity...");

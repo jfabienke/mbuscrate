@@ -4,9 +4,9 @@
 //! to avoid interference from WiFi and other sources. Inspired by One Channel Hub's
 //! fixed channel approach but extended for multi-channel resilience.
 
+use log::{debug, info, warn};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use log::{debug, info, warn};
 
 /// Channel definition for frequency hopping
 #[derive(Debug, Clone, Copy)]
@@ -29,26 +29,122 @@ pub struct Channel {
 
 /// EU868 channel plan (8 standard channels + optional)
 pub const EU868_CHANNELS: [Channel; 8] = [
-    Channel { frequency_hz: 868_100_000, name: "EU868-1", duty_cycle_limit: 1.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 868_300_000, name: "EU868-2", duty_cycle_limit: 1.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 868_500_000, name: "EU868-3", duty_cycle_limit: 1.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 867_100_000, name: "EU868-4", duty_cycle_limit: 1.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 867_300_000, name: "EU868-5", duty_cycle_limit: 1.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 867_500_000, name: "EU868-6", duty_cycle_limit: 1.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 867_700_000, name: "EU868-7", duty_cycle_limit: 1.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 867_900_000, name: "EU868-8", duty_cycle_limit: 1.0, last_activity: None, quality: 1.0 },
+    Channel {
+        frequency_hz: 868_100_000,
+        name: "EU868-1",
+        duty_cycle_limit: 1.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 868_300_000,
+        name: "EU868-2",
+        duty_cycle_limit: 1.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 868_500_000,
+        name: "EU868-3",
+        duty_cycle_limit: 1.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 867_100_000,
+        name: "EU868-4",
+        duty_cycle_limit: 1.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 867_300_000,
+        name: "EU868-5",
+        duty_cycle_limit: 1.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 867_500_000,
+        name: "EU868-6",
+        duty_cycle_limit: 1.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 867_700_000,
+        name: "EU868-7",
+        duty_cycle_limit: 1.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 867_900_000,
+        name: "EU868-8",
+        duty_cycle_limit: 1.0,
+        last_activity: None,
+        quality: 1.0,
+    },
 ];
 
 /// US915 channel plan (first 8 uplink channels)
 pub const US915_CHANNELS: [Channel; 8] = [
-    Channel { frequency_hz: 902_300_000, name: "US915-0", duty_cycle_limit: 100.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 902_500_000, name: "US915-1", duty_cycle_limit: 100.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 902_700_000, name: "US915-2", duty_cycle_limit: 100.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 902_900_000, name: "US915-3", duty_cycle_limit: 100.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 903_100_000, name: "US915-4", duty_cycle_limit: 100.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 903_300_000, name: "US915-5", duty_cycle_limit: 100.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 903_500_000, name: "US915-6", duty_cycle_limit: 100.0, last_activity: None, quality: 1.0 },
-    Channel { frequency_hz: 903_700_000, name: "US915-7", duty_cycle_limit: 100.0, last_activity: None, quality: 1.0 },
+    Channel {
+        frequency_hz: 902_300_000,
+        name: "US915-0",
+        duty_cycle_limit: 100.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 902_500_000,
+        name: "US915-1",
+        duty_cycle_limit: 100.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 902_700_000,
+        name: "US915-2",
+        duty_cycle_limit: 100.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 902_900_000,
+        name: "US915-3",
+        duty_cycle_limit: 100.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 903_100_000,
+        name: "US915-4",
+        duty_cycle_limit: 100.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 903_300_000,
+        name: "US915-5",
+        duty_cycle_limit: 100.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 903_500_000,
+        name: "US915-6",
+        duty_cycle_limit: 100.0,
+        last_activity: None,
+        quality: 1.0,
+    },
+    Channel {
+        frequency_hz: 903_700_000,
+        name: "US915-7",
+        duty_cycle_limit: 100.0,
+        last_activity: None,
+        quality: 1.0,
+    },
 ];
 
 /// Channel hopping strategy
@@ -155,11 +251,11 @@ impl ChannelHopper {
 
     /// Random channel selection
     fn next_random(&mut self) -> Channel {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
+        use rand::RngExt;
+        let mut rng = rand::rng();
 
         loop {
-            let idx = rng.gen_range(0..self.channels.len());
+            let idx = rng.random_range(0..self.channels.len());
 
             if !self.blacklist.contains(&idx) {
                 self.current_index = idx;
@@ -185,8 +281,10 @@ impl ChannelHopper {
         self.current_index = best_idx;
         self.channels[best_idx].last_activity = Some(Instant::now());
 
-        debug!("Selected channel {} with quality {:.2}",
-               self.channels[best_idx].name, best_quality);
+        debug!(
+            "Selected channel {} with quality {:.2}",
+            self.channels[best_idx].name, best_quality
+        );
 
         self.channels[best_idx]
     }
@@ -217,12 +315,13 @@ impl ChannelHopper {
         }
 
         // Blacklist if quality drops too low
-        if self.channels[channel_idx].quality < 0.2
-            && !self.blacklist.contains(&channel_idx) {
-                warn!("Blacklisting channel {} due to poor quality",
-                      self.channels[channel_idx].name);
-                self.blacklist.push(channel_idx);
-            }
+        if self.channels[channel_idx].quality < 0.2 && !self.blacklist.contains(&channel_idx) {
+            warn!(
+                "Blacklisting channel {} due to poor quality",
+                self.channels[channel_idx].name
+            );
+            self.blacklist.push(channel_idx);
+        }
     }
 
     /// Perform channel scan to detect interference
@@ -245,12 +344,17 @@ impl ChannelHopper {
             let noise_quality = ((-noise_floor - 70.0) / 50.0).clamp(0.0, 1.0);
             channel.quality = channel.quality * 0.7 + noise_quality * 0.3;
 
-            debug!("Channel {} noise floor: {:.1} dBm, quality: {:.2}",
-                   channel.name, noise_floor, channel.quality);
+            debug!(
+                "Channel {} noise floor: {:.1} dBm, quality: {:.2}",
+                channel.name, noise_floor, channel.quality
+            );
 
             // Clear from blacklist if quality improves
             if channel.quality > 0.5 && self.blacklist.contains(&idx) {
-                info!("Removing channel {} from blacklist (quality improved)", channel.name);
+                info!(
+                    "Removing channel {} from blacklist (quality improved)",
+                    channel.name
+                );
                 self.blacklist.retain(|&x| x != idx);
             }
         }
@@ -306,7 +410,7 @@ mod tests {
         let mut hopper = ChannelHopper::new_eu868(HoppingStrategy::Adaptive);
 
         // Update quality for multiple channels to ensure channel 0 is best
-        hopper.update_quality(0, -70, true);   // Good quality
+        hopper.update_quality(0, -70, true); // Good quality
         hopper.update_quality(1, -100, false); // Poor quality
         hopper.update_quality(2, -110, false); // Very poor quality
 

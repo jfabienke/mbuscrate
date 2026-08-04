@@ -1,7 +1,9 @@
 //! Tests for enhanced ToA calculator and LBT support
 
+// Included by `modulation.rs` as `mod tests;`, so name the inner module differently to
+// avoid clippy::module_inception (a `tests` module inside a `tests` module).
 #[cfg(test)]
-mod tests {
+mod toa {
     use crate::wmbus::radio::modulation::{EncodingType, ListenBeforeTalk, TimeOnAir};
 
     #[test]

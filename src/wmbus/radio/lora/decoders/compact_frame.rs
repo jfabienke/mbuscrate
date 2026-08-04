@@ -92,10 +92,9 @@ impl LoRaPayloadDecoder for CompactFrameDecoder {
         // Check for typical compact frame structure
         // Byte 0: Length indicator (0x1C-0x3C typical)
         // Byte 1: C field (0x44 for SND-NR, 0x46 for SND-IR)
-        if payload[0] >= 0x1C && payload[0] <= 0x3C
-            && (payload[1] == 0x44 || payload[1] == 0x46) {
-                return true;
-            }
+        if payload[0] >= 0x1C && payload[0] <= 0x3C && (payload[1] == 0x44 || payload[1] == 0x46) {
+            return true;
+        }
 
         // Try parsing as wM-Bus frame
         parse_wmbus_frame(payload).is_ok()

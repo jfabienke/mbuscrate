@@ -239,10 +239,7 @@ fn test_parse_variable_record_extended_variable_length() {
 
         let result = parse_variable_record(&input);
         if test_len == expected_len {
-            assert!(
-                result.is_ok(),
-                "Failed for length byte 0x{length_byte:02X}"
-            );
+            assert!(result.is_ok(), "Failed for length byte 0x{length_byte:02X}");
             let record = result.unwrap();
             assert_eq!(
                 record.data_len, expected_len,
@@ -375,9 +372,7 @@ fn test_parse_variable_record_error_cases() {
         0xFF, // Length too large
     ];
     // Add some data
-    for _ in 0..20 {
-        input.push(0xAA);
-    }
+    input.resize(input.len() + 20, 0xAA);
 
     let result = parse_variable_record(&input);
     assert!(result.is_err());

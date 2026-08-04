@@ -25,25 +25,36 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use mbus_rs::wmbus::radio::hal::enhanced_gpio::{EnhancedGpio, GpioEventType, EdgeType};
+//! use mbus_rs::wmbus::radio::hal::enhanced_gpio::{
+//!     EnhancedGpio, GpioConfig, GpioEventType, EdgeType,
+//! };
 //!
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut gpio = EnhancedGpio::new()?;
 //!
 //! // Setup interrupt-driven DIO1 monitoring
-//! gpio.setup_interrupt(24, EdgeType::Rising, GpioEventType::HighPriority).await?;
+//! gpio.setup_interrupt(GpioConfig {
+//!     pin: 24,
+//!     edge: EdgeType::Rising,
+//!     priority: GpioEventType::HighPriority,
+//!     debounce_us: None,
+//!     max_events_per_sec: None,
+//! }).await?;
 //!
 //! // Wait for GPIO event asynchronously
 //! let event = gpio.wait_for_event().await?;
 //! println!("GPIO {} triggered", event.pin);
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::util::{logging, IoBuffer};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 #[cfg(feature = "raspberry-pi")]
@@ -280,7 +291,9 @@ impl EnhancedGpio {
         let last_times = self.last_event_times.clone();
         let debounce_us = config.debounce_us;
 
-        pin.set_async_interrupt(trigger, move |level| {
+        // rppal 0.22: set_async_interrupt takes (trigger, debounce, callback) and the
+        // callback receives an Event (which carries the trigger), not a Level.
+        pin.set_async_interrupt(trigger, None, move |evt| {
             let now = Instant::now();
 
             // Debouncing check
@@ -303,7 +316,7 @@ impl EnhancedGpio {
 
             let event = GpioEvent {
                 pin: pin_num,
-                level: level == Level::High,
+                level: evt.trigger == Trigger::RisingEdge,
                 edge,
                 priority,
                 timestamp: now,

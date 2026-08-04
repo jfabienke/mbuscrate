@@ -31,27 +31,25 @@
 //!
 //! ## wM-Bus Configuration Example
 //!
-//! ```rust,no_run
-//! use crate::wmbus::radio::modulation::*;
+//! ```rust
+//! use mbus_rs::wmbus::radio::modulation::*;
 //!
 //! // Typical wM-Bus S-mode configuration
-//! let mod_params = ModulationParams {
-//!     packet_type: PacketType::Gfsk,
+//! let mod_params = ModulationParams::Gfsk {
 //!     params: GfskModParams {
 //!         bitrate: 100_000,        // 100 kbps
 //!         modulation_shaping: 1,   // Gaussian 0.5
 //!         bandwidth: 156,          // 156 kHz RX bandwidth
-//!         fdev: 50_000,           // 50 kHz frequency deviation
+//!         fdev: 50_000,            // 50 kHz frequency deviation
 //!     },
 //! };
 //!
-//! let packet_params = PacketParams {
-//!     packet_type: PacketType::Gfsk,
+//! let packet_params = PacketParams::Gfsk {
 //!     preamble_len: 48,                    // 48-bit preamble
 //!     header_type: HeaderType::Variable,   // Variable length packets
 //!     payload_len: 255,                    // Max payload size
 //!     crc_on: true,                        // Enable CRC
-//!     crc_type: CrcType::Byte2,           // 2-byte CRC
+//!     crc_type: CrcType::Byte2,            // 2-byte CRC
 //!     sync_word_len: 4,                    // 4-byte sync word
 //! };
 //! ```
@@ -66,13 +64,15 @@ pub enum PacketType {
 }
 
 /// Spreading Factor (SF) for LoRa (Table 13-47)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum SpreadingFactor {
-    SF5  = 0x05,
-    SF6  = 0x06,
-    SF7  = 0x07,
-    SF8  = 0x08,
-    SF9  = 0x09,
+    SF5 = 0x05,
+    SF6 = 0x06,
+    SF7 = 0x07,
+    SF8 = 0x08,
+    SF9 = 0x09,
     SF10 = 0x0A,
     SF11 = 0x0B,
     SF12 = 0x0C,
@@ -81,16 +81,16 @@ pub enum SpreadingFactor {
 /// Bandwidth for LoRa (Table 13-48)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LoRaBandwidth {
-    BW7_8  = 0x00, // 7.8 kHz
+    BW7_8 = 0x00,  // 7.8 kHz
     BW10_4 = 0x08, // 10.4 kHz
     BW15_6 = 0x01, // 15.6 kHz
     BW20_8 = 0x09, // 20.8 kHz
     BW31_2 = 0x02, // 31.25 kHz
     BW41_7 = 0x0A, // 41.7 kHz
     BW62_5 = 0x03, // 62.5 kHz
-    BW125  = 0x04, // 125 kHz
-    BW250  = 0x05, // 250 kHz
-    BW500  = 0x06, // 500 kHz
+    BW125 = 0x04,  // 125 kHz
+    BW250 = 0x05,  // 250 kHz
+    BW500 = 0x06,  // 500 kHz
 }
 
 /// Coding Rate (CR) for LoRa (Table 13-49)
@@ -157,9 +157,9 @@ pub enum ModulationParams {
 /// LoRa packet parameters
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LoRaPacketParams {
-    pub preamble_len: u16,      // 8 to 65535 symbols
-    pub implicit_header: bool,  // true for implicit, false for explicit
-    pub payload_len: u8,        // For implicit header mode
+    pub preamble_len: u16,     // 8 to 65535 symbols
+    pub implicit_header: bool, // true for implicit, false for explicit
+    pub payload_len: u8,       // For implicit header mode
     pub crc_on: bool,
     pub iq_inverted: bool,
 }

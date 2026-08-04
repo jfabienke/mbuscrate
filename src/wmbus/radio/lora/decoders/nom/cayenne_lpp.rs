@@ -7,12 +7,7 @@ use crate::payload::record::MBusRecordValue;
 use crate::wmbus::radio::lora::decoder::{
     BatteryStatus, DeviceStatus, LoRaDecodeError, LoRaPayloadDecoder, MeteringData, Reading,
 };
-use nom::{
-    bytes::complete::take,
-    multi::many0,
-    number::complete::u8 as parse_u8,
-    IResult,
-};
+use nom::{bytes::complete::take, multi::many0, number::complete::u8 as parse_u8, IResult, Parser};
 use std::time::SystemTime;
 
 /// Cayenne LPP data types
@@ -374,7 +369,7 @@ pub fn parse_cayenne_tlv(input: &[u8]) -> IResult<&[u8], (u8, CayenneValue)> {
 
 /// Parse complete Cayenne LPP payload
 pub fn parse_cayenne_lpp(input: &[u8]) -> IResult<&[u8], Vec<(u8, CayenneValue)>> {
-    many0(parse_cayenne_tlv)(input)
+    many0(parse_cayenne_tlv).parse(input)
 }
 
 /// Convert Cayenne values to MeteringData

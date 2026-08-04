@@ -28,10 +28,7 @@
 use defmt_rtt as _;
 
 #[cfg(feature = "rtt-logging")]
-use tracing_subscriber::{
-    fmt::writer::MakeWriter,
-    util::SubscriberInitExt,
-};
+use tracing_subscriber::{fmt::writer::MakeWriter, util::SubscriberInitExt};
 
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
@@ -173,8 +170,7 @@ pub fn init_defmt_tracing() -> Result<(), Box<dyn std::error::Error + Send + Syn
         // Fallback to standard tracing when RTT not available
         tracing_subscriber::fmt()
             .with_env_filter(
-                EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new("info"))
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
             )
             .init();
     }
@@ -275,7 +271,12 @@ pub mod structured {
         defmt::info!("IRQ: {}", event);
 
         #[cfg(not(feature = "rtt-logging"))]
-        log::info!("IRQ: mask=0x{:02X}, latency={}ns, pin={}", mask, latency_ns, pin);
+        log::info!(
+            "IRQ: mask=0x{:02X}, latency={}ns, pin={}",
+            mask,
+            latency_ns,
+            pin
+        );
     }
 
     /// Log crypto operation with structured data
@@ -291,8 +292,13 @@ pub mod structured {
         defmt::info!("Crypto: {}", event);
 
         #[cfg(not(feature = "rtt-logging"))]
-        log::info!("Crypto: op={:?}, backend={:?}, len={}, duration={}ns",
-                   event.operation, event.backend, length, duration_ns);
+        log::info!(
+            "Crypto: op={:?}, backend={:?}, len={}, duration={}ns",
+            event.operation,
+            event.backend,
+            length,
+            duration_ns
+        );
     }
 
     /// Log LoRa event with structured data
@@ -317,8 +323,15 @@ pub mod structured {
         defmt::info!("LoRa: {}", event);
 
         #[cfg(not(feature = "rtt-logging"))]
-        log::info!("LoRa: event={:?}, RSSI={}, SNR={:.1}, freq={}Hz, SF={}, len={}",
-                   event.event_type, rssi, snr, frequency, sf, length);
+        log::info!(
+            "LoRa: event={:?}, RSSI={}, SNR={:.1}, freq={}Hz, SF={}, len={}",
+            event.event_type,
+            rssi,
+            snr,
+            frequency,
+            sf,
+            length
+        );
     }
 }
 
@@ -369,8 +382,8 @@ mod tests {
 
     #[test]
     fn test_structured_logging() {
-        use structured::*;
         use encoders::*;
+        use structured::*;
 
         // These should not panic
         log_irq_event(0x02, 1000, 26);
