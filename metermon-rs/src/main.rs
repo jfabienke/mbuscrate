@@ -171,6 +171,16 @@ enum Cmd {
         #[arg(long)]
         from_config: String,
     },
+    /// Remove a persisted AES key from the redb store (e.g. one bound to the wrong
+    /// meter id). Run with the monitor stopped (redb is single-writer).
+    RemoveKey {
+        /// redb store to remove the key from.
+        #[arg(long, default_value = "metermon-devices.redb")]
+        db: String,
+        /// Meter id (decimal device address) whose key to remove.
+        #[arg(long)]
+        meterid: u32,
+    },
 }
 
 fn main() -> Result<()> {
@@ -216,6 +226,15 @@ fn main() -> Result<()> {
         } => run_sweep(&config, &db, seconds),
         Cmd::Import { db, from } => run_import(&db, &from),
         Cmd::ImportKeys { db, from_config } => run_import_keys(&db, &from_config),
+        Cmd::RemoveKey { db, meterid } => {
+            let dm = devices::DeviceManager::open(&db, 20, 600)?;
+            if dm.remove_key(meterid)? {
+                println!("removed AES key for meter {meterid}");
+            } else {
+                println!("no AES key stored for meter {meterid}");
+            }
+            Ok(())
+        }
     }
 }
 

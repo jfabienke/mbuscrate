@@ -185,6 +185,19 @@ impl DeviceManager {
         Ok(())
     }
 
+    /// Remove a persisted AES key (e.g. one that turned out to be bound to the wrong
+    /// meter id). Returns whether a key was present.
+    pub fn remove_key(&self, meterid: u32) -> Result<bool> {
+        let w = self.db.begin_write()?;
+        let existed;
+        {
+            let mut t = w.open_table(KEYS)?;
+            existed = t.remove(meterid)?.is_some();
+        }
+        w.commit()?;
+        Ok(existed)
+    }
+
     /// Load all persisted `(meterid, hexkey)` pairs, to seed the keystore at startup before
     /// MQTT/radio initialization.
     pub fn load_keys(&self) -> Result<Vec<(u32, String)>> {
@@ -895,6 +908,10 @@ mod tests {
           // Durable across reopen; the rejected writes left no trace.
         let dm = DeviceManager::open(&path, 20, 600).unwrap();
         assert_eq!(dm.load_keys().unwrap(), vec![(74644444, key.to_string())]);
+        // A mis-bound key can be removed; removal is idempotent.
+        assert!(dm.remove_key(74644444).unwrap());
+        assert!(!dm.remove_key(74644444).unwrap());
+        assert!(dm.load_keys().unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
     }
 }
