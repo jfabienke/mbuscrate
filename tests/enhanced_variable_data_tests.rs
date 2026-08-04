@@ -25,7 +25,8 @@ fn test_single_dif_vif_record() {
     assert!(record.is_numeric);
 
     if let MBusRecordValue::Numeric(value) = record.value {
-        assert!((value - 305419896.0).abs() < 1e-6);
+        // VIF 0x13 = volume, 10^-3 m^3: raw 0x12345678 scales to 305419.896 m^3.
+        assert!((value - 305419.896).abs() < 1e-6);
     } else {
         panic!("Expected numeric value");
     }
@@ -53,7 +54,8 @@ fn test_multi_tariff_dife_chain() {
     assert_eq!(record.storage_number, 0); // From DIFE bits [3:0] = 0
 
     if let MBusRecordValue::Numeric(value) = record.value {
-        assert!((value - 4660.0).abs() < 1e-6);
+        // VIF 0x13 = volume, 10^-3 m^3.
+        assert!((value - 4.660).abs() < 1e-6);
     } else {
         panic!("Expected numeric value");
     }
@@ -79,7 +81,8 @@ fn test_extended_storage_number_dife_chain() {
         assert_eq!(record.storage_number, 10 | (15 << 4)); // 250
 
         if let MBusRecordValue::Numeric(value) = record.value {
-            assert!((value - 4096.0).abs() < 1e-6);
+            // VIF 0x13 = volume, 10^-3 m^3.
+            assert!((value - 4.096).abs() < 1e-6);
         } else {
             panic!("Expected numeric value");
         }
