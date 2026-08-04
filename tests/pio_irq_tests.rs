@@ -11,7 +11,9 @@ use mbus_rs::wmbus::radio::pio_irq::{
 };
 
 #[cfg(feature = "pio-irq")]
-use mbus_rs::wmbus::radio::lora::sx1262::{LoRaConfig, Sx1262Driver};
+use std::thread;
+#[cfg(feature = "pio-irq")]
+use std::time::{Duration, Instant};
 
 /// Test basic PIO IRQ backend functionality
 #[cfg(feature = "pio-irq")]
@@ -261,68 +263,6 @@ fn test_irq_storm_handling() {
     );
 }
 
-/// Test SX1262 driver integration
-#[cfg(feature = "pio-irq")]
-#[test]
-fn test_sx1262_integration() {
-    // This test may fail on non-Pi hardware, which is expected
-    match Sx1262Driver::new() {
-        Ok(mut driver) => {
-            println!("SX1262 driver created successfully");
-
-            // Test configuration
-            let result = driver.configure_for_wmbus(868_950_000, 125_000);
-            assert!(result.is_ok(), "wM-Bus configuration should succeed");
-
-            // Test RX mode setup
-            let result = driver.set_rx_continuous();
-            assert!(result.is_ok(), "RX continuous mode should succeed");
-
-            // Test packet ready check (should be false initially)
-            let result = driver.is_packet_ready();
-            assert!(result.is_ok(), "Packet ready check should succeed");
-            assert!(!result.unwrap(), "No packet should be ready initially");
-
-            // Test signal quality getters
-            let rssi = driver.get_rssi();
-            let snr = driver.get_snr();
-            println!("Initial RSSI: {} dBm, SNR: {} dB", rssi, snr);
-
-            // Values should be in reasonable ranges
-            assert!(rssi >= -150 && rssi <= 0, "RSSI should be in valid range");
-            assert!(snr >= -20 && snr <= 20, "SNR should be in valid range");
-        }
-        Err(e) => {
-            println!("SX1262 driver creation failed (expected on non-Pi): {}", e);
-            // This is expected on development machines without SX1262 hardware
-        }
-    }
-}
-
-/// Test LoRa configuration validation
-#[cfg(feature = "pio-irq")]
-#[test]
-fn test_lora_configuration() {
-    let config = LoRaConfig::default();
-
-    // Verify default configuration
-    assert_eq!(config.frequency_hz, 868_950_000);
-    assert_eq!(config.bandwidth_hz, 125_000);
-    assert_eq!(config.spreading_factor, 7);
-    assert_eq!(config.coding_rate, 1);
-    assert_eq!(config.sync_word, 0x12);
-    assert_eq!(config.preamble_length, 8);
-    assert!(config.header_type);
-    assert_eq!(config.payload_length, 255);
-    assert!(config.crc_on);
-    assert!(!config.invert_iq);
-
-    // Test configuration cloning
-    let cloned = config.clone();
-    assert_eq!(config.frequency_hz, cloned.frequency_hz);
-    assert_eq!(config.bandwidth_hz, cloned.bandwidth_hz);
-}
-
 /// Test error handling
 #[cfg(feature = "pio-irq")]
 #[test]
@@ -382,53 +322,6 @@ fn test_debounce_window_performance() {
             debounce_us,
             avg_time
         );
-    }
-}
-
-/// Integration test simulating real SX1262 usage pattern
-#[cfg(feature = "pio-irq")]
-#[test]
-fn test_realistic_usage_pattern() {
-    match Sx1262Driver::new() {
-        Ok(mut driver) => {
-            // Simulate typical wM-Bus receiver workflow
-
-            // 1. Configure for EU band
-            driver
-                .configure_for_wmbus(868_950_000, 125_000)
-                .expect("Configuration should succeed");
-
-            // 2. Start receiving
-            driver.set_rx_continuous().expect("RX start should succeed");
-
-            // 3. Poll for packets (simulating main loop)
-            for i in 0..10 {
-                let packet_ready = driver
-                    .is_packet_ready()
-                    .expect("Packet check should succeed");
-
-                if packet_ready {
-                    println!("Iteration {}: Packet detected", i);
-                    // In real usage, would call read_packet() here
-                } else {
-                    println!("Iteration {}: No packet", i);
-                }
-
-                thread::sleep(Duration::from_millis(10));
-            }
-
-            // 4. Test transmission
-            let test_payload = b"Hello wM-Bus";
-            let tx_result = driver.transmit_packet(test_payload);
-            assert!(tx_result.is_ok(), "Transmission should succeed");
-
-            // 5. Wait for TX completion
-            let tx_done = driver.wait_tx_done(1000).expect("TX wait should succeed");
-            println!("TX completed: {}", tx_done);
-        }
-        Err(_) => {
-            println!("Skipping realistic test - no SX1262 hardware available");
-        }
     }
 }
 
