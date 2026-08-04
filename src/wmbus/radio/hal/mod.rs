@@ -139,6 +139,10 @@ struct Recording {
     fail_on: Option<(u8, Vec<u8>)>,
     /// Persistent fault: every `write_command` with this opcode fails (any data).
     fail_every: Option<u8>,
+    /// A payload queued to be delivered on the next `process_irqs` poll: it makes GetIrqStatus
+    /// report RxDone, GetRxBufferStatus report the length, and ReadBuffer return the bytes
+    /// (consumed once read). Lets an end-to-end test drive real reception with no hardware.
+    pending_rx: Option<Vec<u8>>,
 }
 
 #[cfg(test)]
@@ -162,6 +166,11 @@ impl RecordingHal {
         let hal = Self::new();
         hal.inner.lock().unwrap().fail_every = Some(opcode);
         hal
+    }
+
+    /// Queue `payload` to be delivered on the next `process_irqs` poll (one packet).
+    pub fn queue_rx(&self, payload: Vec<u8>) {
+        self.inner.lock().unwrap().pending_rx = Some(payload);
     }
 
     /// Snapshot of the recorded `(opcode, data)` command stream, in order.
@@ -218,8 +227,34 @@ impl Hal for RecordingHal {
 
     fn read_command(&mut self, opcode: u8, buf: &mut [u8]) -> Result<(), HalError> {
         buf.fill(0);
-        if opcode == 0xC0 && !buf.is_empty() {
-            buf[0] = self.inner.lock().unwrap().mode_bits << 4; // GetStatus: chip mode in bits [6:4]
+        let mut g = self.inner.lock().unwrap();
+        match opcode {
+            // GetStatus: chip mode in bits [6:4].
+            0xC0 => {
+                if !buf.is_empty() {
+                    buf[0] = g.mode_bits << 4;
+                }
+            }
+            // GetIrqStatus (u16, big-endian): report RxDone (bit 1) when a packet is queued.
+            0x12 => {
+                if g.pending_rx.is_some() && buf.len() >= 2 {
+                    buf[1] = 0x02;
+                }
+            }
+            // GetRxBufferStatus: byte 0 is the payload length.
+            0x13 => {
+                if let (Some(p), false) = (g.pending_rx.as_ref(), buf.is_empty()) {
+                    buf[0] = p.len() as u8;
+                }
+            }
+            // ReadBuffer: deliver (and consume) the queued payload.
+            0x1E => {
+                if let Some(p) = g.pending_rx.take() {
+                    let n = buf.len().min(p.len());
+                    buf[..n].copy_from_slice(&p[..n]);
+                }
+            }
+            _ => {}
         }
         Ok(())
     }

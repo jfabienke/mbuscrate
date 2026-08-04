@@ -372,6 +372,23 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
         })
     }
 
+    /// The shared radio driver behind this handle, for constructing a
+    /// [`ProfileScheduler`](crate::wmbus::radio::scheduler::ProfileScheduler) that drives
+    /// profile transitions on the **same** radio instance — never a second driver.
+    pub fn shared_driver(&self) -> Arc<Mutex<Sx126xDriver<H>>> {
+        self.driver.clone()
+    }
+
+    /// Poll the radio once for a mode-tagged received item: lock the driver, capture the
+    /// packet atomically with its modem (see [`Sx126xDriver::process_irqs_with_mode`]), and
+    /// route it. Shared by the background receiver loop and the tests.
+    async fn poll_once(
+        driver: &Arc<Mutex<Sx126xDriver<H>>>,
+    ) -> Result<Option<ReceivedItem>, DriverError> {
+        let mut guard = driver.lock().await;
+        Ok(guard.process_irqs_with_mode()?.and_then(route_packet))
+    }
+
     /// Start continuous frame reception in background
     ///
     /// Spawns a background task that continuously monitors for incoming wM-Bus frames.
@@ -400,51 +417,41 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
         let handle = tokio::spawn(async move {
             let mut consecutive_errors = 0;
 
-            loop {
-                // Set radio to continuous receive mode
-                {
-                    let mut driver_guard = driver.lock().await;
-                    if let Err(e) = driver_guard.set_rx_continuous() {
-                        log::error!("Failed to set RX continuous: {e:?}");
-                        sleep(Duration::from_millis(1000)).await;
-                        continue;
-                    }
+            // Arm continuous RX once. If a ProfileScheduler shares this driver it re-arms RX
+            // on every profile transition, so the receiver must NOT issue its own RX command
+            // each iteration — that would compete with those transitions. RX is re-armed only
+            // defensively after a run of poll errors.
+            {
+                let mut driver_guard = driver.lock().await;
+                if let Err(e) = driver_guard.set_rx_continuous() {
+                    log::error!("Failed to arm continuous RX: {e:?}");
                 }
+            }
 
-                // Poll for received frames
+            loop {
                 tokio::time::sleep(Duration::from_millis(10)).await;
 
-                // Poll for a packet tagged with the modem it arrived on, atomically under a
-                // single driver lock (mode + payload + RSSI captured together, so the mode
-                // cannot skew if a scheduler switches profiles right afterwards).
-                let result = {
-                    let mut driver_guard = driver.lock().await;
-                    driver_guard.process_irqs_with_mode()
-                };
-
-                match result {
-                    Ok(Some(packet)) => {
+                // One atomic, mode-tagged poll under a single driver lock.
+                match Self::poll_once(&driver).await {
+                    Ok(Some(item)) => {
                         consecutive_errors = 0;
 
-                        // Route by captured modem: GFSK → parse wM-Bus, LoRa → raw payload.
-                        if let Some(item) = route_packet(packet) {
-                            // Device registry + unsolicited callback apply to wM-Bus frames.
-                            if let ReceivedItem::Wmbus { frame, rssi_dbm } = &item {
-                                Self::update_device_registry(&devices, frame, *rssi_dbm).await;
-                                if let Some(callback) = &unsolicited_callback {
-                                    callback(frame);
-                                }
+                        // Device registry + unsolicited callback apply to wM-Bus frames.
+                        if let ReceivedItem::Wmbus { frame, rssi_dbm } = &item {
+                            Self::update_device_registry(&devices, frame, *rssi_dbm).await;
+                            if let Some(callback) = &unsolicited_callback {
+                                callback(frame);
                             }
+                        }
 
-                            // Send the tagged item to the channel.
-                            if tx_sender.send(item).is_err() {
-                                log::warn!("Frame channel receiver dropped");
-                                break;
-                            }
+                        // Send the tagged item to the channel.
+                        if tx_sender.send(item).is_err() {
+                            log::warn!("Frame channel receiver dropped");
+                            break;
                         }
                     }
                     Ok(None) => {
-                        // No frame received, continue polling
+                        // No packet available; keep polling.
                     }
                     Err(e) => {
                         consecutive_errors += 1;
@@ -452,9 +459,13 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
                             "Radio error in receiver: {e:?} (consecutive: {consecutive_errors})"
                         );
 
-                        // If too many consecutive errors, back off
+                        // After a run of errors, re-arm RX and back off.
                         if consecutive_errors > 10 {
-                            log::error!("Too many consecutive radio errors, backing off");
+                            log::error!("Too many consecutive radio errors; re-arming RX");
+                            {
+                                let mut driver_guard = driver.lock().await;
+                                let _ = driver_guard.set_rx_continuous();
+                            }
                             sleep(Duration::from_millis(5000)).await;
                             consecutive_errors = 0;
                         }
@@ -569,6 +580,13 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
         if let Some(sender) = &self.tx_sender {
             let _ = sender.send(item);
         }
+    }
+
+    /// Test-only: one mode-tagged poll of the shared driver (what the background receiver
+    /// does each iteration), so an end-to-end test can step reception deterministically.
+    #[cfg(test)]
+    async fn poll_once_test(&self) -> Result<Option<ReceivedItem>, DriverError> {
+        Self::poll_once(&self.driver).await
     }
 
     /// Scan for wM-Bus devices
@@ -1105,5 +1123,56 @@ mod tests {
             handle.recv_frame(Some(500)).await,
             Err(WMBusError::Timeout)
         ));
+    }
+
+    #[tokio::test]
+    async fn scheduler_switching_produces_ordered_items_through_the_handle() {
+        use crate::wmbus::radio::driver::{LoRaProfile, RadioProfile, WmbusProfile};
+        use crate::wmbus::radio::hal::RecordingHal;
+        use crate::wmbus::radio::modulation::CodingRate;
+        use crate::wmbus::radio::scheduler::ProfileScheduler;
+
+        fn wmbus() -> RadioProfile {
+            RadioProfile::Wmbus(WmbusProfile::mode_c(868_950_000, 100_000))
+        }
+        fn lora() -> RadioProfile {
+            RadioProfile::LoRa(LoRaProfile {
+                frequency_hz: 868_100_000,
+                sf: SpreadingFactor::SF7,
+                bw: LoRaBandwidth::BW125,
+                cr: CodingRate::CR4_5,
+                power_dbm: 14,
+                sync_word: None,
+            })
+        }
+
+        // One RecordingHal, one Sx126xDriver, owned by the handle; the scheduler is built
+        // from the handle's driver Arc via shared_driver() — never a second driver.
+        let hal = RecordingHal::new();
+        let probe = hal.clone();
+        let handle = WMBusHandle::new(hal, None).await.unwrap();
+        let scheduler = ProfileScheduler::new(handle.shared_driver(), wmbus());
+
+        let mut items = Vec::new();
+
+        // Base GFSK: a wM-Bus frame arrives -> Wmbus item.
+        scheduler.switch_to(&wmbus()).await.unwrap();
+        probe.queue_rx(valid_wmbus_bytes());
+        items.push(handle.poll_once_test().await.unwrap());
+
+        // Scheduler switches to LoRa: a raw payload arrives -> Lora item.
+        scheduler.switch_to(&lora()).await.unwrap();
+        probe.queue_rx(vec![0x01, 0x02, 0x03, 0x04]);
+        items.push(handle.poll_once_test().await.unwrap());
+
+        // Back to GFSK: another wM-Bus frame -> Wmbus item.
+        scheduler.switch_to(&wmbus()).await.unwrap();
+        probe.queue_rx(valid_wmbus_bytes());
+        items.push(handle.poll_once_test().await.unwrap());
+
+        // Reception followed the scheduler's switches, in order: Wmbus, Lora, Wmbus.
+        assert!(matches!(items[0], Some(ReceivedItem::Wmbus { .. })));
+        assert!(matches!(items[1], Some(ReceivedItem::Lora { .. })));
+        assert!(matches!(items[2], Some(ReceivedItem::Wmbus { .. })));
     }
 }

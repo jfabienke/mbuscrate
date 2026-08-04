@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use tokio::time::{sleep_until, Instant};
 
 use crate::wmbus::radio::driver::{RadioProfile, Sx126xExt};
@@ -151,36 +151,50 @@ async fn wait_until(deadline: Instant, cancel: &CancelToken) -> Wait {
     }
 }
 
-/// Owns a radio and drives base-profile RX plus scheduled alternate-profile windows.
+/// Drives base-profile RX plus scheduled alternate-profile windows on a **shared** radio.
+///
+/// The driver is held as `Arc<Mutex<D>>` — the *same* instance the [`WMBusHandle`] receiver
+/// polls (build one via [`WMBusHandle::shared_driver`](crate::wmbus::handle::WMBusHandle::shared_driver)),
+/// never a second driver. Each transition holds the lock for its whole `stop → switch →
+/// start` sequence, so the receiver cannot interleave RX commands mid-transition.
 pub struct ProfileScheduler<D> {
-    driver: D,
+    driver: Arc<Mutex<D>>,
     base: RadioProfile,
 }
 
 impl<D: RadioDriver + Sx126xExt + Send> ProfileScheduler<D> {
-    /// Create a scheduler for `driver`, resting in `base` (the wM-Bus/GFSK profile).
-    pub fn new(driver: D, base: RadioProfile) -> Self {
+    /// Create a scheduler over the shared `driver`, resting in `base` (the wM-Bus/GFSK
+    /// profile). Pass the handle's driver Arc so both share one radio instance.
+    pub fn new(driver: Arc<Mutex<D>>, base: RadioProfile) -> Self {
         Self { driver, base }
     }
 
-    /// Borrow the owned radio (for inspection).
-    pub fn driver(&self) -> &D {
-        &self.driver
+    /// The shared driver this scheduler drives (a clone of the `Arc`).
+    pub fn driver(&self) -> Arc<Mutex<D>> {
+        self.driver.clone()
     }
 
-    /// Consume the scheduler and return the owned radio.
-    pub fn into_driver(self) -> D {
-        self.driver
+    /// Immediately switch to `profile` (leave RX → switch → arm RX), serialized under the
+    /// driver lock. On failure the radio may be in an undefined state, so the error is
+    /// returned (never swallowed) for the caller to treat as a fault.
+    pub async fn switch_to(&self, profile: &RadioProfile) -> Result<(), SchedulerError> {
+        self.enter_profile_rx(profile)
+            .await
+            .map_err(SchedulerError::Radio)
     }
 
-    /// Leave RX, switch to `profile`, then arm continuous RX.
+    /// Leave RX, switch to `profile`, then arm continuous RX — the whole sequence under one
+    /// lock hold on the shared driver.
     ///
     /// `stop_receive` first satisfies "stop/leave RX before every profile change" from any
     /// state; `switch_profile` ends in standby by contract, so RX is armed explicitly after.
-    async fn enter_profile_rx(&mut self, profile: &RadioProfile) -> Result<(), RadioDriverError> {
-        self.driver.stop_receive().await?;
-        self.driver.switch_profile(profile).await?;
-        self.driver.start_receive().await?;
+    /// Holding the lock across all three prevents the receiver loop from issuing a competing
+    /// RX command between them.
+    async fn enter_profile_rx(&self, profile: &RadioProfile) -> Result<(), RadioDriverError> {
+        let mut driver = self.driver.lock().await;
+        driver.stop_receive().await?;
+        driver.switch_profile(profile).await?;
+        driver.start_receive().await?;
         Ok(())
     }
 
@@ -188,7 +202,7 @@ impl<D: RadioDriver + Sx126xExt + Send> ProfileScheduler<D> {
     /// surfaced (as [`SchedulerError::RecoveryFailed`] by the caller), never swallowed —
     /// otherwise the caller would believe the radio is in GFSK RX when it may still be in
     /// LoRa or standby.
-    async fn restore_base(&mut self) -> Result<(), RadioDriverError> {
+    async fn restore_base(&self) -> Result<(), RadioDriverError> {
         let base = self.base.clone();
         self.enter_profile_rx(&base).await
     }
@@ -200,7 +214,7 @@ impl<D: RadioDriver + Sx126xExt + Send> ProfileScheduler<D> {
     /// [`Notify::notify_waiters`]). On cancellation, a radio error, or a timeout, the base
     /// GFSK profile is restored before returning.
     pub async fn run(
-        &mut self,
+        &self,
         windows: &[ScheduledWindow],
         cancel: &CancelToken,
     ) -> Result<(), SchedulerError> {
@@ -232,7 +246,7 @@ impl<D: RadioDriver + Sx126xExt + Send> ProfileScheduler<D> {
     }
 
     async fn run_inner(
-        &mut self,
+        &self,
         windows: &[ScheduledWindow],
         cancel: &CancelToken,
     ) -> Result<Completed, SchedulerError> {
@@ -271,6 +285,14 @@ mod tests {
     use crate::wmbus::radio::driver::{LoRaProfile, Sx126xDriver, WmbusProfile};
     use crate::wmbus::radio::hal::RecordingHal;
     use crate::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, SpreadingFactor};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    /// A scheduler over a fresh shared driver backed by `hal`, resting in base GFSK.
+    fn scheduler_with(hal: RecordingHal) -> ProfileScheduler<Sx126xDriver<RecordingHal>> {
+        let driver = Sx126xDriver::new(hal, 32_000_000);
+        ProfileScheduler::new(Arc::new(Mutex::new(driver)), wmbus_base())
+    }
 
     // SX126x command opcodes referenced by the assertions.
     const SET_STANDBY: u8 = 0x80;
@@ -334,8 +356,7 @@ mod tests {
     async fn runs_window_and_returns_to_base() {
         let hal = RecordingHal::new();
         let probe = hal.clone();
-        let driver = Sx126xDriver::new(hal, 32_000_000);
-        let mut sched = ProfileScheduler::new(driver, wmbus_base());
+        let sched = scheduler_with(hal);
         let cancel = CancelToken::new();
 
         sched.run(&one_lora_window(), &cancel).await.unwrap();
@@ -359,8 +380,7 @@ mod tests {
         // Fault the LoRa packet-type selection during the window switch.
         let hal = RecordingHal::fail_on(SET_PACKET_TYPE, &[LORA]);
         let probe = hal.clone();
-        let driver = Sx126xDriver::new(hal, 32_000_000);
-        let mut sched = ProfileScheduler::new(driver, wmbus_base());
+        let sched = scheduler_with(hal);
         let cancel = CancelToken::new();
 
         let result = sched.run(&one_lora_window(), &cancel).await;
@@ -388,8 +408,7 @@ mod tests {
     async fn cancellation_restores_base() {
         let hal = RecordingHal::new();
         let probe = hal.clone();
-        let driver = Sx126xDriver::new(hal, 32_000_000);
-        let mut sched = ProfileScheduler::new(driver, wmbus_base());
+        let sched = scheduler_with(hal);
         let cancel = CancelToken::new();
 
         // Pre-cancel: the flag is set before `run`, so the scheduler's first wait sees it
@@ -414,8 +433,7 @@ mod tests {
         // Fail every SetPacketType so the base restore itself cannot complete: the scheduler
         // must report RecoveryFailed and retain the triggering error rather than claim success.
         let hal = RecordingHal::fail_every(SET_PACKET_TYPE);
-        let driver = Sx126xDriver::new(hal, 32_000_000);
-        let mut sched = ProfileScheduler::new(driver, wmbus_base());
+        let sched = scheduler_with(hal);
         let cancel = CancelToken::new();
 
         let result = sched.run(&one_lora_window(), &cancel).await;
