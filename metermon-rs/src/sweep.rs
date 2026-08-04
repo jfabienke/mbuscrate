@@ -302,7 +302,7 @@ mod tests {
     fn pack(bits: &[u8], pad: usize) -> Vec<u8> {
         let mut all = vec![0u8; pad]; // pad filler bits (0)
         all.extend_from_slice(bits);
-        while all.len() % 8 != 0 {
+        while !all.len().is_multiple_of(8) {
             all.push(0);
         }
         let mut out = vec![0u8; all.len() / 8];

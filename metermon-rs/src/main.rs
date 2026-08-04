@@ -17,6 +17,7 @@
 mod config;
 mod decode;
 mod devices;
+mod health;
 mod keystore;
 mod publish;
 mod source;
@@ -296,30 +297,49 @@ fn run_monitor(
         let dm = devices::DeviceManager::open(db_path, 20, 600)?;
         log::info!("device store: {db_path}");
 
-        // AES key pull: subscribe to meter/control/<gwid> and install op:key messages
-        // live, mirroring metermon. Non-fatal if the broker is unreachable — the
-        // radio monitor keeps running on whatever keys were seeded.
-        let _publisher = match publish::Publisher::connect(&cfg.mqtt, None) {
-            Ok(mut p) => match &cfg.mqtt.control_topic {
-                Some(control) => {
-                    let keys_cb = keys.clone();
-                    match p.subscribe_control(control, move |msg| {
-                        if let Some(id) = keys_cb.lock().unwrap().handle_control(msg) {
-                            log::info!("installed AES key for meter {id} (from control topic)");
+        // Gateway self-instrumentation topics: retained online/offline status (offline is
+        // delivered by the broker via Last-Will) + a periodic health heartbeat, so the
+        // fleet is observable upstream without SSH.
+        let status_topic = cfg.gateway_status_topic();
+        let health_topic = cfg.gateway_health_topic();
+        let offline_payload =
+            serde_json::to_vec(&serde_json::json!({ "gwid": cfg.gwid, "status": "offline" }))
+                .unwrap_or_default();
+
+        // AES key pull + gateway status. Non-fatal if the broker is unreachable — the radio
+        // monitor keeps running on whatever keys were seeded (store-and-forward via redb).
+        let mut publisher = match publish::Publisher::connect(
+            &cfg.mqtt,
+            None,
+            Some((status_topic.clone(), offline_payload)),
+        ) {
+            Ok(mut p) => {
+                // Birth: retained "online" so a subscriber always sees the current state.
+                let online =
+                    serde_json::to_vec(&serde_json::json!({ "gwid": cfg.gwid, "status": "online" }))
+                        .unwrap_or_default();
+                if let Err(e) = p.publish_retained(&status_topic, &online) {
+                    log::warn!("gateway birth publish failed: {e}");
+                }
+                match &cfg.mqtt.control_topic {
+                    Some(control) => {
+                        let keys_cb = keys.clone();
+                        match p.subscribe_control(control, move |msg| {
+                            if let Some(id) = keys_cb.lock().unwrap().handle_control(msg) {
+                                log::info!("installed AES key for meter {id} (from control topic)");
+                            }
+                        }) {
+                            Ok(()) => log::info!("pulling AES keys from control topic {control}"),
+                            Err(e) => log::warn!("control-topic subscribe failed: {e}"),
                         }
-                    }) {
-                        Ok(()) => log::info!("pulling AES keys from control topic {control}"),
-                        Err(e) => log::warn!("control-topic subscribe failed: {e}"),
                     }
-                    Some(p)
+                    None => log::warn!("no control-topic in config; live AES key pull disabled"),
                 }
-                None => {
-                    log::warn!("no control-topic in config; live AES key pull disabled");
-                    Some(p)
-                }
-            },
+                log::info!("gateway status → {status_topic}, health → {health_topic}");
+                Some(p)
+            }
             Err(e) => {
-                log::warn!("MQTT connect failed ({e}); live key pull off, using seeded keys");
+                log::warn!("MQTT connect failed ({e}); key pull + health off, using seeded keys");
                 None
             }
         };
@@ -338,8 +358,16 @@ fn run_monitor(
             log::info!("airwave discovery sweep enabled: every {sweep_hours}h");
         }
 
+        // Gateway watchdog: recover the radio if no frame arrives within the stall window
+        // (5 min vs the normal sub-minute cadence), escalating to a process restart after
+        // 3 failed in-process recoveries (systemd relaunches).
+        let mut watchdog = health::RadioWatchdog::new(300, 3);
+        let mut last_frame_at: Option<Instant> = None;
+        let mut radio_recoveries: u32 = 0;
+
         loop {
-            if let Some((frame, rssi)) = radio.poll().await? {
+            if let Some((frame, rssi, freq_offset)) = radio.poll().await? {
+                last_frame_at = Some(Instant::now()); // any received frame proves RX is alive
                 let (v, has_key) = {
                     let k = keys.lock().unwrap();
                     let v = decode::decode_frame(&frame, &cfg, &k);
@@ -376,13 +404,15 @@ fn run_monitor(
                     rssi,
                     has_key,
                     reading: None, // populated once ELL decrypt lands (Phase 1.4b)
+                    mode: radio.mode().to_string(),
+                    freq_offset_hz: freq_offset,
                 };
                 if let Err(err) = dm.record_frame(&obs) {
                     log::warn!("device store write failed: {err}");
                 }
 
                 log::info!(
-                    "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm"
+                    "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz"
                 );
             } else {
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -399,6 +429,80 @@ fn run_monitor(
                 if let Err(err) = dm.print_report(10) {
                     log::warn!("device report failed: {err}");
                 }
+
+                // --- gateway self-instrumentation: health heartbeat + radio watchdog ---
+                let opmode = radio.opmode().await;
+                let uptime = start.elapsed().as_secs();
+                let total: u64 = stats.values().map(|s| s.total).sum();
+                let ok: u64 = stats.values().map(|s| s.ok).sum();
+                // "no frame yet" counts its age as the uptime, so a radio that is dead from
+                // boot still trips the watchdog rather than waiting forever for a first frame.
+                let frame_age = last_frame_at.map(|t| t.elapsed().as_secs());
+                let stall_age = frame_age.unwrap_or(uptime);
+                let gw = health::GatewayHealth {
+                    gwid: cfg.gwid.clone(),
+                    status: "online",
+                    ts: devices::now_unix(),
+                    uptime_secs: uptime,
+                    radio_opmode: opmode,
+                    radio_state: opmode
+                        .map(|o| health::RadioState::from_opmode(o).as_str())
+                        .unwrap_or("unknown"),
+                    frames_per_min: if uptime > 0 {
+                        total as f64 * 60.0 / uptime as f64
+                    } else {
+                        0.0
+                    },
+                    last_frame_age_secs: frame_age,
+                    radio_recoveries,
+                    meters_seen: stats.len(),
+                    crc_pass_pct: (total > 0).then(|| (ok * 100 / total) as u8),
+                    keys_held: nkeys,
+                    cpu_temp_c: health::read_cpu_temp_c(),
+                    load_avg_1m: health::read_load_avg_1m(),
+                };
+                if let Some(p) = publisher.as_mut() {
+                    if let Err(e) = p.publish_to(&health_topic, &gw.to_json()) {
+                        log::warn!("gateway health publish failed: {e}");
+                    }
+                }
+
+                match watchdog.assess(stall_age) {
+                    health::WatchdogAction::Healthy => {}
+                    health::WatchdogAction::Recover { attempt } => {
+                        radio_recoveries += 1;
+                        log::warn!(
+                            "radio stalled ({stall_age}s no frame, opmode={opmode:?}) — recovery attempt {attempt}"
+                        );
+                        let _ = dm.record_discovery(&format!(
+                            "radio stall: {stall_age}s no frame, opmode={opmode:?}, recovery {attempt}"
+                        ));
+                        // Cheap in-process recovery (re-arm RX). If it works a frame arrives and
+                        // resets the stall; if not, the age keeps growing to the next attempt.
+                        if let Err(e) = radio.recover().await {
+                            log::error!("radio recover failed: {e}");
+                        }
+                    }
+                    health::WatchdogAction::Escalate => {
+                        log::error!(
+                            "radio unrecoverable after {} attempts — exiting for systemd restart",
+                            watchdog.attempts()
+                        );
+                        let _ = dm.record_discovery(&format!(
+                            "radio unrecoverable after {} attempts; restarting process",
+                            watchdog.attempts()
+                        ));
+                        if let Some(p) = publisher.as_mut() {
+                            let payload = serde_json::to_vec(&serde_json::json!({
+                                "gwid": cfg.gwid, "status": "offline", "reason": "radio_unrecoverable"
+                            }))
+                            .unwrap_or_default();
+                            let _ = p.publish_retained(&status_topic, &payload);
+                        }
+                        std::process::exit(1);
+                    }
+                }
+
                 last_report = Instant::now();
             }
 
@@ -670,7 +774,7 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let mut radio = source::Rfm69Source::open(&spidev).await?;
-        let mut pub_ = publish::Publisher::connect(&cfg.mqtt, shadow_topic.as_deref())?;
+        let mut pub_ = publish::Publisher::connect(&cfg.mqtt, shadow_topic.as_deref(), None)?;
 
         // Subscribe to meter/control/<gwid> and install keys from op:key messages.
         if let Some(control) = &cfg.mqtt.control_topic {
@@ -689,7 +793,7 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
         );
         radio.start().await?;
         loop {
-            if let Some((frame, _rssi)) = radio.poll().await? {
+            if let Some((frame, _rssi, _off)) = radio.poll().await? {
                 let decoded = {
                     let k = keys.lock().unwrap();
                     decode::decode_frame(&frame, &cfg, &k)
@@ -738,12 +842,12 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
         while n < count && tokio::time::Instant::now() < deadline {
             let remaining = deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, radio.poll()).await {
-                Ok(Ok(Some((frame, rssi)))) => {
+                Ok(Ok(Some((frame, rssi, off)))) => {
                     writeln!(file, "{}", hex::encode(&frame))?;
                     file.flush()?;
                     n += 1;
                     log::info!(
-                        "frame {n}: {} bytes rssi={rssi}dBm  {}",
+                        "frame {n}: {} bytes rssi={rssi}dBm off={off}Hz  {}",
                         frame.len(),
                         hex::encode(&frame)
                     );

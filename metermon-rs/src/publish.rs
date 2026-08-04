@@ -2,7 +2,7 @@
 //! same place in the pipeline (or a shadow topic for a non-destructive compare).
 
 use anyhow::Result;
-use rumqttc::{Client, Event, Incoming, MqttOptions, QoS};
+use rumqttc::{Client, Event, Incoming, LastWill, MqttOptions, QoS};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,9 +24,19 @@ impl Publisher {
     /// The connection event loop must be polled for either publishing or receiving
     /// to work, so it is always driven on a background thread here; incoming control
     /// messages are routed to a handler slot that `subscribe_control` may fill.
-    pub fn connect(cfg: &MqttConfig, topic_override: Option<&str>) -> Result<Self> {
+    pub fn connect(
+        cfg: &MqttConfig,
+        topic_override: Option<&str>,
+        last_will: Option<(String, Vec<u8>)>,
+    ) -> Result<Self> {
         let mut opts = MqttOptions::new(cfg.clientid.clone(), cfg.host.clone(), cfg.port);
         opts.set_keep_alive(Duration::from_secs(30));
+        // Register a retained Last-Will so the broker announces the gateway `offline` if it
+        // drops off ungracefully (crash, power loss, network partition) — remote
+        // dead-gateway detection without any polling upstream.
+        if let Some((topic, payload)) = last_will {
+            opts.set_last_will(LastWill::new(topic, payload, QoS::AtLeastOnce, true));
+        }
         let (client, mut connection) = Client::new(opts, 16);
 
         let control: ControlHandler = Arc::new(Mutex::new(None));
@@ -65,6 +75,22 @@ impl Publisher {
         let payload = serde_json::to_vec(value)?;
         self.client
             .publish(&self.topic, QoS::AtLeastOnce, false, payload)?;
+        Ok(())
+    }
+
+    /// Publish JSON to an arbitrary topic (e.g. the gateway health heartbeat).
+    pub fn publish_to(&mut self, topic: &str, value: &serde_json::Value) -> Result<()> {
+        let payload = serde_json::to_vec(value)?;
+        self.client
+            .publish(topic, QoS::AtLeastOnce, false, payload)?;
+        Ok(())
+    }
+
+    /// Publish a retained payload (e.g. the `online`/`offline` gateway status/birth
+    /// message), so a subscriber always sees the last known state on connect.
+    pub fn publish_retained(&mut self, topic: &str, payload: &[u8]) -> Result<()> {
+        self.client
+            .publish(topic, QoS::AtLeastOnce, true, payload.to_vec())?;
         Ok(())
     }
 

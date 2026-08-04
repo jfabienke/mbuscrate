@@ -41,6 +41,10 @@ pub struct MqttConfig {
     pub data_topic: String,
     #[serde(rename = "control-topic")]
     pub control_topic: Option<String>,
+    /// Optional override for the gateway health/status topic base. When absent it is
+    /// derived from `gwid` (see [`Config::gateway_status_topic`]).
+    #[serde(rename = "status-topic", default)]
+    pub status_topic: Option<String>,
 }
 
 fn default_mqtt_port() -> u16 {
@@ -59,6 +63,20 @@ impl Config {
         let text = std::fs::read_to_string(path.as_ref())?;
         let cfg: Config = serde_json::from_str(&text)?;
         Ok(cfg)
+    }
+
+    /// Retained topic carrying the gateway's `online`/`offline` state (the latter delivered
+    /// by the broker via MQTT Last-Will). Alongside `meter/data`/`meter/control`.
+    pub fn gateway_status_topic(&self) -> String {
+        self.mqtt
+            .status_topic
+            .clone()
+            .unwrap_or_else(|| format!("meter/gateway/{}/status", self.gwid))
+    }
+
+    /// Topic carrying periodic [`crate::health::GatewayHealth`] heartbeats.
+    pub fn gateway_health_topic(&self) -> String {
+        format!("meter/gateway/{}/health", self.gwid)
     }
 }
 

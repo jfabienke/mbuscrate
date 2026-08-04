@@ -43,6 +43,13 @@ struct DeviceRecord {
     frames_fail: u64,
     last_rssi: i16,
     last_reading: Option<String>,
+    /// wM-Bus radio mode this device is received on ("C"/"T"/"S"; "" for records
+    /// written before mode tracking existed).
+    #[serde(default)]
+    mode: String,
+    /// Last AFC-measured carrier offset from the 868.95 MHz center, in Hz.
+    #[serde(default)]
+    last_freq_offset_hz: i32,
 }
 
 /// Persisted event record (JSON-encoded as the `events` table value).
@@ -97,6 +104,10 @@ pub struct Observation {
     pub has_key: bool,
     /// A decoded human reading (e.g. "25.340 m3"), once decryption is available.
     pub reading: Option<String>,
+    /// Radio mode this frame was received on ("C" today — single-channel mode-C RX).
+    pub mode: String,
+    /// AFC-measured carrier offset from the 868.95 MHz center for this frame, in Hz.
+    pub freq_offset_hz: i32,
 }
 
 pub struct DeviceManager {
@@ -192,6 +203,8 @@ impl DeviceManager {
             rec.ci = o.ci;
             rec.encrypted = o.encrypted;
             rec.has_key = o.has_key;
+            rec.mode = o.mode.clone();
+            rec.last_freq_offset_hz = o.freq_offset_hz;
             rec.silent = false;
             if is_new {
                 rec.first_seen = now;
@@ -289,8 +302,8 @@ impl DeviceManager {
         let txn = self.db.begin_read()?;
 
         println!(
-            "{:>10}  {:>3}  {:<15}  {:>7}  {:>11}  {:>6}  {:>3}",
-            "meter", "mfr", "type", "seen", "frames(ok)", "rssi", "key"
+            "{:>10}  {:>3}  {:<15}  {:>4}  {:>7}  {:>11}  {:>6}  {:>7}  {:>3}",
+            "meter", "mfr", "type", "mode", "seen", "frames(ok)", "rssi", "off(Hz)", "key"
         );
         if let Ok(dtab) = txn.open_table(DEVICES) {
             for entry in dtab.iter()? {
@@ -303,11 +316,17 @@ impl DeviceManager {
                 } else {
                     ago(r.last_seen)
                 };
+                let mode = if r.mode.is_empty() {
+                    "-"
+                } else {
+                    r.mode.as_str()
+                };
                 println!(
-                    "{id:>10}  {:>3}  {:<15}  {seen:>7}  {frames:>11}  {:>4}dBm  {:>3}",
+                    "{id:>10}  {:>3}  {:<15}  {mode:>4}  {seen:>7}  {frames:>11}  {:>4}dBm  {:>+7}  {:>3}",
                     r.manufacturer,
                     r.type_name,
                     r.last_rssi,
+                    r.last_freq_offset_hz,
                     if r.has_key { "yes" } else { "-" },
                 );
             }
@@ -392,6 +411,9 @@ impl DeviceManager {
                         frames_fail: od.frames_fail,
                         last_rssi: od.last_rssi,
                         last_reading: od.last_reading.clone(),
+                        // Old SQLite dumps predate mode/frequency tracking.
+                        mode: String::new(),
+                        last_freq_offset_hz: 0,
                     },
                 };
                 dtab.insert(od.meter_id, serde_json::to_string(&merged)?.as_str())?;
@@ -524,7 +546,25 @@ mod tests {
             rssi: -90,
             has_key,
             reading: None,
+            mode: "C".into(),
+            freq_offset_hz: 0,
         }
+    }
+
+    #[test]
+    fn persists_mode_and_freq_offset() {
+        let dm = DeviceManager::open(&tmp_db(), 20, 600).unwrap();
+        let mut o = obs(74644444, true, false);
+        o.mode = "C".into();
+        o.freq_offset_hz = 305;
+        dm.record_frame(&o).unwrap();
+
+        let txn = dm.db.begin_read().unwrap();
+        let dtab = txn.open_table(DEVICES).unwrap();
+        let raw = dtab.get(74644444u32).unwrap().unwrap();
+        let rec: DeviceRecord = serde_json::from_str(raw.value()).unwrap();
+        assert_eq!(rec.mode, "C");
+        assert_eq!(rec.last_freq_offset_hz, 305);
     }
 
     /// Count events of a given kind for a meter (test helper).
