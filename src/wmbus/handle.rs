@@ -40,20 +40,81 @@
 
 use crate::wmbus::frame::{ParseError, WMBusFrame};
 use crate::wmbus::radio::driver::{
-    DeviceErrors, DriverError, LbtConfig, RadioStats, RadioStatusReport, Sx126xDriver,
+    DeviceErrors, DriverError, LbtConfig, LoRaRxInfo, ModeTaggedPacket, RadioStats,
+    RadioStatusReport, Sx126xDriver,
 };
 use crate::wmbus::radio::hal::Hal;
 use crate::wmbus::radio::irq::IrqStatus;
+use crate::wmbus::radio::modulation::PacketType;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex, RwLock};
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{sleep, timeout, Duration, Instant};
 
 /// Type aliases for complex types to improve readability
-type FrameReceiver = Arc<RwLock<Option<mpsc::UnboundedReceiver<(WMBusFrame, i16)>>>>;
-type FrameSender = mpsc::UnboundedSender<(WMBusFrame, i16)>;
+type FrameReceiver = Arc<RwLock<Option<mpsc::UnboundedReceiver<ReceivedItem>>>>;
+type FrameSender = mpsc::UnboundedSender<ReceivedItem>;
 type UnsolicitedCallback = Arc<dyn Fn(&WMBusFrame) + Send + Sync>;
+
+/// A received item tagged with the modem it arrived on.
+///
+/// The receiver routes each packet by the driver's active modem, captured atomically with
+/// the packet (see [`Sx126xDriver::process_irqs_with_mode`]): GFSK payloads are parsed as
+/// wM-Bus frames; LoRa payloads are surfaced **raw** with their radio metadata (no payload
+/// decoding happens here). Delivered over [`WMBusHandle::recv_item`].
+#[derive(Debug, Clone)]
+pub enum ReceivedItem {
+    /// A parsed wM-Bus frame received on the GFSK modem.
+    Wmbus {
+        /// The parsed frame.
+        frame: WMBusFrame,
+        /// RSSI for this frame, in dBm.
+        rssi_dbm: i16,
+    },
+    /// A raw LoRa payload with its receive metadata (undecoded).
+    Lora {
+        /// Raw payload bytes.
+        payload: Vec<u8>,
+        /// RSSI for this packet, in dBm.
+        rssi_dbm: i16,
+        /// LoRa demodulator metadata.
+        lora: LoRaRxInfo,
+    },
+}
+
+/// Route a mode-tagged packet from the driver into a [`ReceivedItem`], or `None` if it
+/// should be dropped: a GFSK payload that fails wM-Bus parsing, or — defensively — a LoRa
+/// packet missing its metadata (which [`Sx126xDriver::process_irqs_with_mode`]'s invariant
+/// already prevents).
+fn route_packet(packet: ModeTaggedPacket) -> Option<ReceivedItem> {
+    let ModeTaggedPacket {
+        mode,
+        payload,
+        rssi_dbm,
+        lora,
+    } = packet;
+    match mode {
+        PacketType::Gfsk => match crate::wmbus::frame::parse_wmbus_frame(&payload) {
+            Ok(frame) => Some(ReceivedItem::Wmbus { frame, rssi_dbm }),
+            Err(e) => {
+                log::debug!("Dropping unparseable wM-Bus frame: {e:?}");
+                None
+            }
+        },
+        PacketType::LoRa => match lora {
+            Some(lora) => Some(ReceivedItem::Lora {
+                payload,
+                rssi_dbm,
+                lora,
+            }),
+            None => {
+                log::error!("LoRa packet arrived without metadata; dropping");
+                None
+            }
+        },
+    }
+}
 type WMBusFuture<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<(WMBusFrame, i16), WMBusError>> + Send + 'a>,
 >;
@@ -311,6 +372,23 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
         })
     }
 
+    /// The shared radio driver behind this handle, for constructing a
+    /// [`ProfileScheduler`](crate::wmbus::radio::scheduler::ProfileScheduler) that drives
+    /// profile transitions on the **same** radio instance — never a second driver.
+    pub fn shared_driver(&self) -> Arc<Mutex<Sx126xDriver<H>>> {
+        self.driver.clone()
+    }
+
+    /// Poll the radio once for a mode-tagged received item: lock the driver, capture the
+    /// packet atomically with its modem (see [`Sx126xDriver::process_irqs_with_mode`]), and
+    /// route it. Shared by the background receiver loop and the tests.
+    async fn poll_once(
+        driver: &Arc<Mutex<Sx126xDriver<H>>>,
+    ) -> Result<Option<ReceivedItem>, DriverError> {
+        let mut guard = driver.lock().await;
+        Ok(guard.process_irqs_with_mode()?.and_then(route_packet))
+    }
+
     /// Start continuous frame reception in background
     ///
     /// Spawns a background task that continuously monitors for incoming wM-Bus frames.
@@ -339,59 +417,41 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
         let handle = tokio::spawn(async move {
             let mut consecutive_errors = 0;
 
-            loop {
-                // Set radio to continuous receive mode
-                {
-                    let mut driver_guard = driver.lock().await;
-                    if let Err(e) = driver_guard.set_rx_continuous() {
-                        log::error!("Failed to set RX continuous: {e:?}");
-                        sleep(Duration::from_millis(1000)).await;
-                        continue;
-                    }
+            // Arm continuous RX once. If a ProfileScheduler shares this driver it re-arms RX
+            // on every profile transition, so the receiver must NOT issue its own RX command
+            // each iteration — that would compete with those transitions. RX is re-armed only
+            // defensively after a run of poll errors.
+            {
+                let mut driver_guard = driver.lock().await;
+                if let Err(e) = driver_guard.set_rx_continuous() {
+                    log::error!("Failed to arm continuous RX: {e:?}");
                 }
+            }
 
-                // Poll for received frames
+            loop {
                 tokio::time::sleep(Duration::from_millis(10)).await;
 
-                let result = {
-                    let mut driver_guard = driver.lock().await;
-                    driver_guard.process_irqs()
-                };
-
-                match result {
-                    Ok(Some(payload)) => {
+                // One atomic, mode-tagged poll under a single driver lock.
+                match Self::poll_once(&driver).await {
+                    Ok(Some(item)) => {
                         consecutive_errors = 0;
 
-                        // Parse wM-Bus frame
-                        match crate::wmbus::frame::parse_wmbus_frame(&payload) {
-                            Ok(frame) => {
-                                // Get RSSI for this frame
-                                let rssi = {
-                                    let mut driver_guard = driver.lock().await;
-                                    driver_guard.get_rssi_instant().unwrap_or(-100)
-                                };
-
-                                // Update device registry
-                                Self::update_device_registry(&devices, &frame, rssi).await;
-
-                                // Send frame to channel
-                                if tx_sender.send((frame.clone(), rssi)).is_err() {
-                                    log::warn!("Frame channel receiver dropped");
-                                    break;
-                                }
-
-                                // Call unsolicited callback if registered
-                                if let Some(callback) = &unsolicited_callback {
-                                    callback(&frame);
-                                }
+                        // Device registry + unsolicited callback apply to wM-Bus frames.
+                        if let ReceivedItem::Wmbus { frame, rssi_dbm } = &item {
+                            Self::update_device_registry(&devices, frame, *rssi_dbm).await;
+                            if let Some(callback) = &unsolicited_callback {
+                                callback(frame);
                             }
-                            Err(e) => {
-                                log::debug!("Failed to parse frame: {e:?}");
-                            }
+                        }
+
+                        // Send the tagged item to the channel.
+                        if tx_sender.send(item).is_err() {
+                            log::warn!("Frame channel receiver dropped");
+                            break;
                         }
                     }
                     Ok(None) => {
-                        // No frame received, continue polling
+                        // No packet available; keep polling.
                     }
                     Err(e) => {
                         consecutive_errors += 1;
@@ -399,9 +459,13 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
                             "Radio error in receiver: {e:?} (consecutive: {consecutive_errors})"
                         );
 
-                        // If too many consecutive errors, back off
+                        // After a run of errors, re-arm RX and back off.
                         if consecutive_errors > 10 {
-                            log::error!("Too many consecutive radio errors, backing off");
+                            log::error!("Too many consecutive radio errors; re-arming RX");
+                            {
+                                let mut driver_guard = driver.lock().await;
+                                let _ = driver_guard.set_rx_continuous();
+                            }
                             sleep(Duration::from_millis(5000)).await;
                             consecutive_errors = 0;
                         }
@@ -444,23 +508,16 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
         Ok(())
     }
 
-    /// Receive a frame with timeout
+    /// Receive the next tagged item (wM-Bus or LoRa) with timeout.
     ///
-    /// Waits for the next received frame or times out.
-    ///
-    /// # Arguments
-    ///
-    /// * `timeout_ms` - Timeout in milliseconds (None for default)
+    /// This is the full dual-mode stream. Callers that only want wM-Bus frames can use the
+    /// [`WMBusHandle::recv_frame`] compatibility wrapper instead.
     ///
     /// # Returns
-    ///
-    /// * `Ok((frame, rssi))` - Received frame and signal strength
-    /// * `Err(WMBusError::Timeout)` - No frame received within timeout
-    /// * `Err(WMBusError)` - Other error
-    pub async fn recv_frame(
-        &mut self,
-        timeout_ms: Option<u32>,
-    ) -> Result<(WMBusFrame, i16), WMBusError> {
+    /// * `Ok(ReceivedItem)` - the next received item
+    /// * `Err(WMBusError::Timeout)` - nothing received within the timeout
+    /// * `Err(WMBusError)` - other error
+    pub async fn recv_item(&mut self, timeout_ms: Option<u32>) -> Result<ReceivedItem, WMBusError> {
         let timeout_duration =
             Duration::from_millis(timeout_ms.unwrap_or(self.config.rx_timeout_ms) as u64);
 
@@ -470,10 +527,66 @@ impl<H: Hal + Send + 'static> WMBusHandle<H> {
             .ok_or_else(|| WMBusError::InvalidConfig("RX channel not available".to_string()))?;
 
         match timeout(timeout_duration, rx_channel.recv()).await {
-            Ok(Some(frame_and_rssi)) => Ok(frame_and_rssi),
+            Ok(Some(item)) => Ok(item),
             Ok(None) => Err(WMBusError::Network("Frame channel closed".to_string())),
             Err(_) => Err(WMBusError::Timeout),
         }
+    }
+
+    /// Receive the next **wM-Bus** frame with timeout (compatibility wrapper).
+    ///
+    /// Returns the next [`ReceivedItem::Wmbus`], **skipping and discarding** any
+    /// [`ReceivedItem::Lora`] items that arrive first — all within one absolute deadline
+    /// (the timeout does not reset per skipped item). Because skipped LoRa packets are
+    /// consumed from the stream, callers that need *every* packet must use
+    /// [`WMBusHandle::recv_item`] instead.
+    ///
+    /// # Returns
+    /// * `Ok((frame, rssi))` - the next wM-Bus frame and its RSSI
+    /// * `Err(WMBusError::Timeout)` - no wM-Bus frame arrived before the deadline
+    /// * `Err(WMBusError)` - other error
+    pub async fn recv_frame(
+        &mut self,
+        timeout_ms: Option<u32>,
+    ) -> Result<(WMBusFrame, i16), WMBusError> {
+        let timeout_duration =
+            Duration::from_millis(timeout_ms.unwrap_or(self.config.rx_timeout_ms) as u64);
+        let deadline = Instant::now() + timeout_duration;
+
+        let mut rx_guard = self.rx_channel.write().await;
+        let rx_channel = rx_guard
+            .as_mut()
+            .ok_or_else(|| WMBusError::InvalidConfig("RX channel not available".to_string()))?;
+
+        loop {
+            // One absolute deadline shared across skipped LoRa items.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(WMBusError::Timeout);
+            }
+            match timeout(remaining, rx_channel.recv()).await {
+                Ok(Some(ReceivedItem::Wmbus { frame, rssi_dbm })) => return Ok((frame, rssi_dbm)),
+                Ok(Some(ReceivedItem::Lora { .. })) => continue, // skip/consume LoRa items
+                Ok(None) => return Err(WMBusError::Network("Frame channel closed".to_string())),
+                Err(_) => return Err(WMBusError::Timeout),
+            }
+        }
+    }
+
+    /// Test-only: inject an item directly into the receive channel (bypassing the radio),
+    /// so `recv_item`/`recv_frame` routing can be tested without hardware.
+    #[cfg(test)]
+    fn inject_item(&self, item: ReceivedItem) {
+        if let Some(sender) = &self.tx_sender {
+            let _ = sender.send(item);
+        }
+    }
+
+    /// Test-only: one mode-tagged poll of the shared driver (what the background receiver
+    /// does each iteration), so an end-to-end test can step reception deterministically.
+    #[cfg(test)]
+    async fn poll_once_test(&self) -> Result<Option<ReceivedItem>, DriverError> {
+        Self::poll_once(&self.driver).await
     }
 
     /// Scan for wM-Bus devices
@@ -889,5 +1002,179 @@ impl WMBusHandleFactory {
         let config = WMBusConfigBuilder::eu_t_mode().build();
         let handle = WMBusHandle::new(hal, Some(config)).await?;
         Ok(Box::new(handle))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{route_packet, ReceivedItem, WMBusError, WMBusHandle};
+    use crate::wmbus::frame::WMBusFrame;
+    use crate::wmbus::radio::driver::{LoRaRxInfo, ModeTaggedPacket};
+    use crate::wmbus::radio::hal::MockHal;
+    use crate::wmbus::radio::modulation::{LoRaBandwidth, PacketType, SpreadingFactor};
+
+    fn gfsk_packet(payload: Vec<u8>) -> ModeTaggedPacket {
+        ModeTaggedPacket {
+            mode: PacketType::Gfsk,
+            payload,
+            rssi_dbm: -70,
+            lora: None,
+        }
+    }
+
+    fn lora_packet() -> ModeTaggedPacket {
+        ModeTaggedPacket {
+            mode: PacketType::LoRa,
+            payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            rssi_dbm: -95,
+            lora: Some(LoRaRxInfo {
+                snr_db: 6.25,
+                freq_error_hz: Some(120),
+                sf: SpreadingFactor::SF7,
+                bw: LoRaBandwidth::BW125,
+            }),
+        }
+    }
+
+    /// A complete, CRC-valid wM-Bus radio frame that `parse_wmbus_frame` accepts.
+    fn valid_wmbus_bytes() -> Vec<u8> {
+        WMBusFrame::build(0x44, 0x6815, 0x74280561, 0x37, 0x01, 0x8E, &[0x01, 0x02])
+    }
+
+    #[test]
+    fn routes_gfsk_valid_to_wmbus_and_malformed_to_none() {
+        // A valid GFSK payload parses into a wM-Bus item...
+        match route_packet(gfsk_packet(valid_wmbus_bytes())) {
+            Some(ReceivedItem::Wmbus { frame, rssi_dbm }) => {
+                assert_eq!(frame.device_address, 0x74280561);
+                assert_eq!(rssi_dbm, -70);
+            }
+            other => panic!("expected Wmbus, got {other:?}"),
+        }
+        // ...and a malformed GFSK payload is dropped rather than surfaced.
+        assert!(route_packet(gfsk_packet(vec![0x00, 0x01, 0x02])).is_none());
+    }
+
+    #[test]
+    fn routes_lora_to_raw_item_with_metadata() {
+        match route_packet(lora_packet()) {
+            Some(ReceivedItem::Lora {
+                payload,
+                rssi_dbm,
+                lora,
+            }) => {
+                assert_eq!(payload, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+                assert_eq!(rssi_dbm, -95);
+                assert_eq!(lora.snr_db, 6.25);
+                assert_eq!(lora.sf, SpreadingFactor::SF7);
+                assert_eq!(lora.freq_error_hz, Some(120));
+            }
+            other => panic!("expected Lora, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_order_lora_wmbus_lora_routes_each_correctly() {
+        let items: Vec<_> = [
+            lora_packet(),
+            gfsk_packet(valid_wmbus_bytes()),
+            lora_packet(),
+        ]
+        .into_iter()
+        .map(route_packet)
+        .collect();
+        assert!(matches!(items[0], Some(ReceivedItem::Lora { .. })));
+        assert!(matches!(items[1], Some(ReceivedItem::Wmbus { .. })));
+        assert!(matches!(items[2], Some(ReceivedItem::Lora { .. })));
+    }
+
+    async fn test_handle() -> WMBusHandle<MockHal> {
+        WMBusHandle::new(MockHal::new(), None).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn recv_frame_skips_lora_and_returns_next_wmbus() {
+        let mut handle = test_handle().await;
+        // Two LoRa items ahead of the wM-Bus frame in the stream.
+        handle.inject_item(route_packet(lora_packet()).unwrap());
+        handle.inject_item(route_packet(lora_packet()).unwrap());
+        handle.inject_item(route_packet(gfsk_packet(valid_wmbus_bytes())).unwrap());
+
+        let (frame, rssi) = handle.recv_frame(Some(1000)).await.unwrap();
+        assert_eq!(frame.device_address, 0x74280561);
+        assert_eq!(rssi, -70);
+    }
+
+    #[tokio::test]
+    async fn recv_item_returns_the_lora_item() {
+        let mut handle = test_handle().await;
+        handle.inject_item(route_packet(lora_packet()).unwrap());
+        match handle.recv_item(Some(1000)).await.unwrap() {
+            ReceivedItem::Lora { lora, .. } => assert_eq!(lora.sf, SpreadingFactor::SF7),
+            other => panic!("expected Lora, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recv_frame_times_out_when_only_lora_arrives() {
+        let mut handle = test_handle().await;
+        // Only a LoRa item: recv_frame consumes it, finds no wM-Bus frame, and times out on
+        // a single absolute deadline (the timeout does not reset per skipped LoRa item).
+        handle.inject_item(route_packet(lora_packet()).unwrap());
+        assert!(matches!(
+            handle.recv_frame(Some(500)).await,
+            Err(WMBusError::Timeout)
+        ));
+    }
+
+    #[tokio::test]
+    async fn scheduler_switching_produces_ordered_items_through_the_handle() {
+        use crate::wmbus::radio::driver::{LoRaProfile, RadioProfile, WmbusProfile};
+        use crate::wmbus::radio::hal::RecordingHal;
+        use crate::wmbus::radio::modulation::CodingRate;
+        use crate::wmbus::radio::scheduler::ProfileScheduler;
+
+        fn wmbus() -> RadioProfile {
+            RadioProfile::Wmbus(WmbusProfile::mode_c(868_950_000, 100_000))
+        }
+        fn lora() -> RadioProfile {
+            RadioProfile::LoRa(LoRaProfile {
+                frequency_hz: 868_100_000,
+                sf: SpreadingFactor::SF7,
+                bw: LoRaBandwidth::BW125,
+                cr: CodingRate::CR4_5,
+                power_dbm: 14,
+                sync_word: None,
+            })
+        }
+
+        // One RecordingHal, one Sx126xDriver, owned by the handle; the scheduler is built
+        // from the handle's driver Arc via shared_driver() — never a second driver.
+        let hal = RecordingHal::new();
+        let probe = hal.clone();
+        let handle = WMBusHandle::new(hal, None).await.unwrap();
+        let scheduler = ProfileScheduler::new(handle.shared_driver(), wmbus());
+
+        let mut items = Vec::new();
+
+        // Base GFSK: a wM-Bus frame arrives -> Wmbus item.
+        scheduler.switch_to(&wmbus()).await.unwrap();
+        probe.queue_rx(valid_wmbus_bytes());
+        items.push(handle.poll_once_test().await.unwrap());
+
+        // Scheduler switches to LoRa: a raw payload arrives -> Lora item.
+        scheduler.switch_to(&lora()).await.unwrap();
+        probe.queue_rx(vec![0x01, 0x02, 0x03, 0x04]);
+        items.push(handle.poll_once_test().await.unwrap());
+
+        // Back to GFSK: another wM-Bus frame -> Wmbus item.
+        scheduler.switch_to(&wmbus()).await.unwrap();
+        probe.queue_rx(valid_wmbus_bytes());
+        items.push(handle.poll_once_test().await.unwrap());
+
+        // Reception followed the scheduler's switches, in order: Wmbus, Lora, Wmbus.
+        assert!(matches!(items[0], Some(ReceivedItem::Wmbus { .. })));
+        assert!(matches!(items[1], Some(ReceivedItem::Lora { .. })));
+        assert!(matches!(items[2], Some(ReceivedItem::Wmbus { .. })));
     }
 }

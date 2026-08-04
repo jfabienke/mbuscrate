@@ -3,6 +3,7 @@ pub mod hal;
 pub mod irq;
 pub mod modulation;
 pub mod radio_driver;
+pub mod scheduler;
 
 // PIO IRQ debouncing for Raspberry Pi 5
 #[cfg(feature = "pio-irq")]

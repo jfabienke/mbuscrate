@@ -24,15 +24,16 @@
 //! ```
 
 use clap::{Arg, Command};
-use std::sync::atomic::{AtomicU64, Ordering};
+use log::{debug, info};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "pio-irq")]
 use mbus_rs::wmbus::radio::pio_irq::{
     get_pio_irq_backend, PioIrqBackend, DIO0_TX_DONE, DIO1_RX_DONE, DIO2_MASK, DIO3_MASK,
 };
-
-#[cfg(feature = "pio-irq")]
-use mbus_rs::wmbus::radio::lora::sx1262::{LoRaConfig, Sx1262Driver};
 
 /// Demo configuration
 #[derive(Debug, Clone)]
@@ -286,25 +287,6 @@ fn run_interactive_demo(
     let stats = Arc::new(PerformanceStats::default());
     let running = Arc::new(AtomicBool::new(true));
 
-    // Try to initialize SX1262 driver
-    let sx1262_available = match Sx1262Driver::new() {
-        Ok(mut driver) => {
-            info!("✅ SX1262 driver initialized");
-
-            // Configure for wM-Bus
-            driver.configure_for_wmbus(868_950_000, 125_000)?;
-            driver.set_rx_continuous()?;
-
-            println!("📡 SX1262 configured for wM-Bus reception (868.95 MHz)");
-            true
-        }
-        Err(e) => {
-            warn!("⚠️  SX1262 driver not available: {}", e);
-            println!("📊 Running IRQ backend test without radio");
-            false
-        }
-    };
-
     // Start monitoring thread
     let backend_clone = Arc::clone(&backend);
     let stats_clone = Arc::clone(&stats);
@@ -312,13 +294,7 @@ fn run_interactive_demo(
     let config_clone = config.clone();
 
     let monitor_handle = thread::spawn(move || {
-        monitor_irq_events(
-            backend_clone,
-            stats_clone,
-            running_clone,
-            &config_clone,
-            sx1262_available,
-        );
+        monitor_irq_events(backend_clone, stats_clone, running_clone, &config_clone);
     });
 
     // Start statistics display thread
@@ -363,7 +339,6 @@ fn monitor_irq_events(
     stats: Arc<PerformanceStats>,
     running: Arc<AtomicBool>,
     config: &DemoConfig,
-    sx1262_available: bool,
 ) {
     let mut iteration = 0u64;
 
@@ -390,13 +365,6 @@ fn monitor_irq_events(
                     );
                 }
             }
-        }
-
-        // If SX1262 is available, also check for packets
-        if sx1262_available && iteration % 100 == 0 {
-            // This would need a mutable reference to the driver
-            // For demo purposes, we'll just log that we would check
-            debug!("Would check SX1262 for packets (iteration {})", iteration);
         }
 
         // Prevent overwhelming the system

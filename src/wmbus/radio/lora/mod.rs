@@ -20,10 +20,6 @@ pub mod params;
 pub mod single_channel;
 pub mod smart_decoder;
 
-// SX1262 driver with PIO IRQ integration
-#[cfg(feature = "pio-irq")]
-pub mod sx1262;
-
 pub use adr::{AdrConfig, AdrController, AdrDecision, AdrReason, SignalMetrics};
 pub use cad::{CadExitMode, CadStats, LoRaCadParams};
 pub use channel_hopping::{Channel, ChannelHopper, ChannelStats, HoppingStrategy};
@@ -46,7 +42,3 @@ pub use params::{
 };
 pub use single_channel::{DutyCycleLimiter, SingleChannelConfig};
 pub use smart_decoder::{DeviceStats, SmartDecoder};
-
-// Export SX1262 driver when PIO IRQ feature is enabled
-#[cfg(feature = "pio-irq")]
-pub use sx1262::{LoRaConfig, Sx1262Driver, Sx1262Error};
