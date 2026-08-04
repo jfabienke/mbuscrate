@@ -29,8 +29,35 @@ impl Publisher {
         topic_override: Option<&str>,
         last_will: Option<(String, Vec<u8>)>,
     ) -> Result<Self> {
-        let mut opts = MqttOptions::new(cfg.clientid.clone(), cfg.host.clone(), cfg.port);
+        Self::connect_inner(
+            &cfg.host,
+            cfg.port,
+            &cfg.clientid,
+            topic_override.unwrap_or(&cfg.data_topic),
+            last_will,
+        )
+    }
+
+    /// Connect to an arbitrary broker for a subscription-only role (e.g. the dedicated
+    /// AES key broker): no data topic, no last will. Keep the returned `Publisher`
+    /// alive — dropping it disconnects.
+    pub fn connect_subscriber(host: &str, port: u16, clientid: &str) -> Result<Self> {
+        Self::connect_inner(host, port, clientid, "", None)
+    }
+
+    fn connect_inner(
+        host: &str,
+        port: u16,
+        clientid: &str,
+        topic: &str,
+        last_will: Option<(String, Vec<u8>)>,
+    ) -> Result<Self> {
+        let mut opts = MqttOptions::new(clientid, host, port);
         opts.set_keep_alive(Duration::from_secs(30));
+        // Persistent session: the broker keeps the control-topic subscription (and queues
+        // QoS1 messages) across reconnects. With a clean session, any reconnect silently
+        // dropped the subscription and the key pull went dead until restart.
+        opts.set_clean_session(false);
         // Register a retained Last-Will so the broker announces the gateway `offline` if it
         // drops off ungracefully (crash, power loss, network partition) — remote
         // dead-gateway detection without any polling upstream.
@@ -43,19 +70,25 @@ impl Publisher {
         let control_cb = control.clone();
         std::thread::spawn(move || {
             for event in connection.iter() {
-                if let Ok(Event::Incoming(Incoming::Publish(p))) = event {
-                    if let Some(handler) = control_cb.lock().unwrap().as_ref() {
-                        if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&p.payload) {
-                            handler(&msg);
+                match event {
+                    Ok(Event::Incoming(Incoming::Publish(p))) => {
+                        if let Some(handler) = control_cb.lock().unwrap().as_ref() {
+                            if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&p.payload)
+                            {
+                                handler(&msg);
+                            }
                         }
                     }
+                    Ok(_) => {}
+                    // Unreachable broker: back off instead of spinning through reconnects.
+                    Err(_) => std::thread::sleep(Duration::from_secs(1)),
                 }
             }
         });
 
         Ok(Self {
             client,
-            topic: topic_override.unwrap_or(&cfg.data_topic).to_string(),
+            topic: topic.to_string(),
             control,
         })
     }

@@ -29,6 +29,11 @@ pub struct Config {
     /// self-contained testing.
     #[serde(default)]
     pub keys: BTreeMap<String, String>,
+    /// Optional dedicated broker for the AES key pull, for deployments whose primary
+    /// upstream has no key functionality. Only the control topic is subscribed there;
+    /// data/status/health stay on the primary `mqtt` broker.
+    #[serde(rename = "key-mqtt", default)]
+    pub key_mqtt: Option<KeyMqttConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +54,21 @@ pub struct MqttConfig {
 
 fn default_mqtt_port() -> u16 {
     1883
+}
+
+/// Broker carrying only the AES key control topic (see [`Config::key_mqtt`]).
+#[derive(Debug, Clone, Deserialize)]
+pub struct KeyMqttConfig {
+    pub host: String,
+    #[serde(default = "default_mqtt_port")]
+    pub port: u16,
+    /// Client id on the key broker. Must differ from the primary's if both point at
+    /// the same broker; defaults to `<primary clientid>-keys`.
+    pub clientid: Option<String>,
+    /// Control topic to subscribe on the key broker; defaults to the primary
+    /// `control-topic`.
+    #[serde(rename = "control-topic")]
+    pub control_topic: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,5 +121,25 @@ mod tests {
             Some("/dev/spidev0.1")
         );
         assert!(cfg.keys.is_empty());
+        assert!(cfg.key_mqtt.is_none());
+    }
+
+    #[test]
+    fn parses_dedicated_key_broker() {
+        let json = r#"{
+            "gwid": "6543",
+            "mqtt": { "host": "mqtt.ringgaard.com", "clientid": "meter6543",
+                      "data-topic": "meter/data/6543", "control-topic": "meter/control/6543" },
+            "key-mqtt": { "host": "192.168.50.101", "control-topic": "meter/control/gateway-001" }
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        let kb = cfg.key_mqtt.expect("key-mqtt section");
+        assert_eq!(kb.host, "192.168.50.101");
+        assert_eq!(kb.port, 1883); // defaulted
+        assert_eq!(kb.clientid, None); // derived at connect time
+        assert_eq!(
+            kb.control_topic.as_deref(),
+            Some("meter/control/gateway-001")
+        );
     }
 }

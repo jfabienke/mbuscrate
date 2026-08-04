@@ -153,6 +153,19 @@ enum Cmd {
         #[arg(long)]
         from: String,
     },
+    /// Import the `keys` map of a metermon.conf-format file into the redb store, so
+    /// the monitor holds them from startup without any broker. Keys are validated
+    /// before storage and their values are never printed. Run with the monitor
+    /// stopped (redb is single-writer).
+    ImportKeys {
+        /// redb store to write the keys into.
+        #[arg(long, default_value = "metermon-devices.redb")]
+        db: String,
+        /// metermon.conf-format JSON whose `keys` map to import (e.g. a retired
+        /// gateway config).
+        #[arg(long)]
+        from_config: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -193,6 +206,62 @@ fn main() -> Result<()> {
             seconds,
         } => run_sweep(&config, &db, seconds),
         Cmd::Import { db, from } => run_import(&db, &from),
+        Cmd::ImportKeys { db, from_config } => run_import_keys(&db, &from_config),
+    }
+}
+
+/// Import a config file's `keys` map into the redb store (monitor stopped). The
+/// monitor then loads them at startup like any control-topic-pulled key. Key values
+/// are never printed; malformed entries are rejected by `store_key`.
+fn run_import_keys(db: &str, from_config: &str) -> Result<()> {
+    let cfg = Config::load(from_config)?;
+    if cfg.keys.is_empty() {
+        anyhow::bail!("no `keys` map in {from_config}");
+    }
+    let dm = devices::DeviceManager::open(db, 20, 600)?;
+    let (mut stored, mut rejected) = (0u32, 0u32);
+    for (id_str, hexkey) in &cfg.keys {
+        let Ok(id) = id_str.parse::<u32>() else {
+            log::warn!("skipping non-numeric meterid {id_str:?}");
+            rejected += 1;
+            continue;
+        };
+        match dm.store_key(id, hexkey) {
+            Ok(()) => {
+                println!("stored AES key for meter {id}");
+                stored += 1;
+            }
+            Err(e) => {
+                log::warn!("rejected key for meter {id}: {e}");
+                rejected += 1;
+            }
+        }
+    }
+    println!("imported {stored} key(s) into {db} ({rejected} rejected)");
+    Ok(())
+}
+
+/// Persist-then-install handler for `op:key` control messages, shared by the primary
+/// and the dedicated key broker. The redb write happens outside the keystore lock and
+/// the key only becomes usable after the write commits, so a key is never live before
+/// it is durable. Key values are never logged; `store_key` validates and rejects
+/// malformed keys.
+#[cfg(feature = "radio")]
+fn key_install_handler(
+    keys: std::sync::Arc<std::sync::Mutex<KeyStore>>,
+    dm: std::sync::Arc<devices::DeviceManager>,
+) -> impl Fn(&serde_json::Value) + Send + 'static {
+    move |msg| {
+        let Some((id, hexkey)) = KeyStore::parse_key_message(msg) else {
+            return;
+        };
+        match dm.store_key(id, &hexkey) {
+            Ok(()) => {
+                keys.lock().unwrap().install(id, hexkey);
+                log::info!("installed + persisted AES key for meter {id} (control topic)");
+            }
+            Err(e) => log::warn!("rejected AES key for meter {id}: {e}"),
+        }
     }
 }
 
@@ -338,26 +407,10 @@ fn run_monitor(
                 }
                 match &cfg.mqtt.control_topic {
                     Some(control) => {
-                        let keys_cb = keys.clone();
-                        let dm_cb = dm.clone();
-                        match p.subscribe_control(control, move |msg| {
-                            let Some((id, hexkey)) = KeyStore::parse_key_message(msg) else {
-                                return;
-                            };
-                            // Persist durably FIRST — outside the keystore lock — and only
-                            // install in memory (make the key usable) after the write commits,
-                            // so a key is never live before it is durable. The key value is
-                            // never logged; store_key validates it and rejects malformed keys.
-                            match dm_cb.store_key(id, &hexkey) {
-                                Ok(()) => {
-                                    keys_cb.lock().unwrap().install(id, hexkey);
-                                    log::info!(
-                                        "installed + persisted AES key for meter {id} (control topic)"
-                                    );
-                                }
-                                Err(e) => log::warn!("rejected AES key for meter {id}: {e}"),
-                            }
-                        }) {
+                        match p.subscribe_control(
+                            control,
+                            key_install_handler(keys.clone(), dm.clone()),
+                        ) {
                             Ok(()) => log::info!("pulling AES keys from control topic {control}"),
                             Err(e) => log::warn!("control-topic subscribe failed: {e}"),
                         }
@@ -372,6 +425,46 @@ fn run_monitor(
                 None
             }
         };
+
+        // Dedicated key broker: when the primary upstream has no AES key functionality,
+        // an optional `key-mqtt` broker carries the control topic instead. Subscription
+        // only — data/status/health stay on the primary. The handle must stay alive for
+        // the life of the monitor; rumqttc retries in the background if the broker is
+        // down, and the persistent session re-delivers keys missed while offline.
+        let _key_broker = cfg.key_mqtt.as_ref().and_then(|kb| {
+            let clientid = kb
+                .clientid
+                .clone()
+                .unwrap_or_else(|| format!("{}-keys", cfg.mqtt.clientid));
+            let Some(control) = kb
+                .control_topic
+                .clone()
+                .or_else(|| cfg.mqtt.control_topic.clone())
+            else {
+                log::warn!("key-mqtt configured but no control-topic to subscribe");
+                return None;
+            };
+            match publish::Publisher::connect_subscriber(&kb.host, kb.port, &clientid) {
+                Ok(mut p) => {
+                    match p.subscribe_control(
+                        &control,
+                        key_install_handler(keys.clone(), dm.clone()),
+                    ) {
+                        Ok(()) => log::info!(
+                            "pulling AES keys from key broker {}:{} topic {control}",
+                            kb.host,
+                            kb.port
+                        ),
+                        Err(e) => log::warn!("key-broker subscribe failed: {e}"),
+                    }
+                    Some(p)
+                }
+                Err(e) => {
+                    log::warn!("key-broker connect failed ({e}); keys from primary/seeded only");
+                    None
+                }
+            }
+        });
 
         // SIGTERM (systemd stop) / SIGINT (^C) request a clean shutdown: the loop breaks
         // and parks the radio instead of the process dying mid-SPI-transaction, which can
