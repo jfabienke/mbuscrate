@@ -1028,6 +1028,7 @@ mod tests {
             payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
             rssi_dbm: -95,
             lora: Some(LoRaRxInfo {
+                snr_db: 6.25,
                 freq_error_hz: Some(120),
                 sf: SpreadingFactor::SF7,
                 bw: LoRaBandwidth::BW125,
@@ -1064,6 +1065,7 @@ mod tests {
             }) => {
                 assert_eq!(payload, vec![0xDE, 0xAD, 0xBE, 0xEF]);
                 assert_eq!(rssi_dbm, -95);
+                assert_eq!(lora.snr_db, 6.25);
                 assert_eq!(lora.sf, SpreadingFactor::SF7);
                 assert_eq!(lora.freq_error_hz, Some(120));
             }

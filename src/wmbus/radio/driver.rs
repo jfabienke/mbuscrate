@@ -87,6 +87,15 @@ fn lora_freq_error_hz(regs: [u8; 3], bw_khz: f64) -> i32 {
     (1.55 * f64::from(efe) / (1600.0 / bw_khz)).round() as i32
 }
 
+/// Convert the SX126x LoRa `SnrPkt` byte from GetPacketStatus (0x14) into dB.
+///
+/// `SnrPkt` is a *signed* two's-complement byte in quarter-dB units, so the SNR is
+/// `(byte as i8) / 4`. (Earlier code treated this byte as an RSSI — `-(byte)/2` — which is
+/// wrong: it flips the sign and mis-scales, so a real SNR of +5 dB read as roughly -10 dBm.)
+fn lora_snr_db(snr_byte: u8) -> f32 {
+    (snr_byte as i8) as f32 / 4.0
+}
+
 /// Radio operating states based on SX126x chip modes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RadioState {
@@ -386,17 +395,28 @@ pub struct ModeTaggedPacket {
 }
 
 /// LoRa-only receive metadata accompanying a [`ModeTaggedPacket`].
-///
-/// (SNR is intentionally omitted for now: [`Sx126xDriver::get_packet_status`] currently
-/// mis-scales the SNR byte as an RSSI, so a correct SNR needs a separate driver fix first.)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LoRaRxInfo {
+    /// Signal-to-noise ratio for this packet, in dB (signed).
+    pub snr_db: f32,
     /// Per-packet carrier frequency error in Hz, if the LoRa demodulator reported one.
     pub freq_error_hz: Option<i32>,
     /// Active spreading factor.
     pub sf: SpreadingFactor,
     /// Active signal bandwidth.
     pub bw: LoRaBandwidth,
+}
+
+/// Decoded SX126x GetPacketStatus (0x14) fields. RSSI values are in dBm; `snr_db` is a
+/// signed LoRa SNR and is only meaningful for LoRa packets.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PacketStatus {
+    /// Per-packet RSSI in dBm (`RssiPkt`).
+    pub rssi_pkt_dbm: i16,
+    /// LoRa SNR in dB (`SnrPkt`, signed).
+    pub snr_db: f32,
+    /// Post-despread signal RSSI in dBm (`SignalRssiPkt`).
+    pub signal_rssi_dbm: i16,
 }
 
 /// SX126x-specific dual-mode capability, layered on top of
@@ -968,8 +988,10 @@ impl<H: Hal> Sx126xDriver<H> {
         let lora = match mode {
             PacketType::LoRa => {
                 let freq_error_hz = self.get_lora_frequency_error()?;
+                let snr_db = self.get_packet_status()?.snr_db;
                 match self.current_mod_params {
                     Some(ModulationParams::LoRa { params }) => Some(LoRaRxInfo {
+                        snr_db,
                         freq_error_hz,
                         sf: params.sf,
                         bw: params.bw,
@@ -1385,15 +1407,17 @@ impl<H: Hal> Sx126xDriver<H> {
     /// RSSI/SNR fields (LoRa: RssiPkt, SnrPkt, SignalRssiPkt; GFSK: RxStatus, RssiSync,
     /// RssiAvg). A previous version mislabeled the third byte as "FreqError"; the real
     /// per-packet frequency error comes from [`Self::get_lora_frequency_error`].
-    pub fn get_packet_status(&mut self) -> Result<(i16, i16), DriverError> {
+    pub fn get_packet_status(&mut self) -> Result<PacketStatus, DriverError> {
         let mut status = [0u8; 3];
         self.hal.read_command(0x14, &mut status)?; // GetPacketStatus command
 
-        // LoRa: status[0] = RssiPkt, status[1] = SnrPkt, status[2] = SignalRssiPkt.
-        let rssi_pkt = -(status[0] as i16) / 2;
-        let rssi_sync = -(status[1] as i16) / 2;
-
-        Ok((rssi_pkt, rssi_sync))
+        // LoRa: status[0] = RssiPkt, status[1] = SnrPkt (signed, quarter-dB),
+        //       status[2] = SignalRssiPkt.
+        Ok(PacketStatus {
+            rssi_pkt_dbm: -(status[0] as i16) / 2,
+            snr_db: lora_snr_db(status[1]),
+            signal_rssi_dbm: -(status[2] as i16) / 2,
+        })
     }
 
     /// Read the LoRa modem's per-packet frequency-error estimate, in Hz.
@@ -2369,7 +2393,10 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
             Some(data) => {
                 // RSSI from GetPacketStatus; per-packet frequency error from the LoRa modem
                 // registers (None in GFSK — the SX126x has no per-packet FEI there).
-                let (rssi_pkt, _rssi_sync) = self.get_packet_status().unwrap_or((-80, -80));
+                let rssi_pkt = self
+                    .get_packet_status()
+                    .map(|s| s.rssi_pkt_dbm)
+                    .unwrap_or(-80);
                 let freq_error_hz = self.get_lora_frequency_error().unwrap_or(None);
 
                 let packet = crate::wmbus::radio::radio_driver::ReceivedPacket {
@@ -2509,7 +2536,7 @@ impl<H: Hal + Send + Sync> crate::wmbus::radio::radio_driver::RadioDriver for Sx
 
 #[cfg(test)]
 mod tests {
-    use super::lora_freq_error_hz;
+    use super::{lora_freq_error_hz, lora_snr_db};
 
     #[test]
     fn lora_freq_error_zero_is_zero() {
@@ -2536,6 +2563,20 @@ mod tests {
         let bw125 = lora_freq_error_hz([0x00, 0x10, 0x00], 125.0);
         let bw500 = lora_freq_error_hz([0x00, 0x10, 0x00], 500.0);
         assert_eq!(bw500, bw125 * 4);
+    }
+
+    #[test]
+    fn lora_snr_positive_raw() {
+        // SnrPkt is a signed byte in quarter-dB: 0x14 = 20 -> +5.0 dB.
+        assert_eq!(lora_snr_db(0x14), 5.0);
+        assert_eq!(lora_snr_db(0x00), 0.0);
+    }
+
+    #[test]
+    fn lora_snr_negative_raw() {
+        // Two's-complement negatives: 0xFC = -4 -> -1.0 dB; 0x80 = -128 -> -32.0 dB.
+        assert_eq!(lora_snr_db(0xFC), -1.0);
+        assert_eq!(lora_snr_db(0x80), -32.0);
     }
 
     // TODO: Implement mock HAL for comprehensive testing
@@ -2780,5 +2821,30 @@ mod tests {
         )
         .unwrap();
         assert!(lora.process_irqs_with_mode().unwrap().is_none());
+    }
+
+    #[test]
+    fn process_irqs_with_mode_reports_lora_snr() {
+        // Deliver a LoRa packet with a scripted GetPacketStatus SNR byte (0x14 = 20 -> +5 dB)
+        // and confirm the signed SNR surfaces in the tagged packet's LoRa metadata.
+        let hal = RecordingHal::new();
+        let probe = hal.clone();
+        let mut driver = Sx126xDriver::new(hal, 32_000_000);
+        driver
+            .configure_for_lora(
+                868_100_000,
+                SpreadingFactor::SF7,
+                LoRaBandwidth::BW125,
+                CodingRate::CR4_5,
+                14,
+            )
+            .unwrap();
+        probe.set_packet_status([0x00, 0x14, 0x00]); // SnrPkt = 20 -> +5.0 dB
+        probe.queue_rx(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+
+        let packet = driver.process_irqs_with_mode().unwrap().expect("a packet");
+        assert_eq!(packet.mode, PacketType::LoRa);
+        let lora = packet.lora.expect("LoRa metadata present");
+        assert_eq!(lora.snr_db, 5.0);
     }
 }

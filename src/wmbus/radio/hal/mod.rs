@@ -143,6 +143,8 @@ struct Recording {
     /// report RxDone, GetRxBufferStatus report the length, and ReadBuffer return the bytes
     /// (consumed once read). Lets an end-to-end test drive real reception with no hardware.
     pending_rx: Option<Vec<u8>>,
+    /// Raw 3 bytes returned by GetPacketStatus (0x14): [RssiPkt, SnrPkt, SignalRssiPkt].
+    packet_status: [u8; 3],
 }
 
 #[cfg(test)]
@@ -171,6 +173,11 @@ impl RecordingHal {
     /// Queue `payload` to be delivered on the next `process_irqs` poll (one packet).
     pub fn queue_rx(&self, payload: Vec<u8>) {
         self.inner.lock().unwrap().pending_rx = Some(payload);
+    }
+
+    /// Set the raw bytes GetPacketStatus (0x14) returns: `[RssiPkt, SnrPkt, SignalRssiPkt]`.
+    pub fn set_packet_status(&self, bytes: [u8; 3]) {
+        self.inner.lock().unwrap().packet_status = bytes;
     }
 
     /// Snapshot of the recorded `(opcode, data)` command stream, in order.
@@ -253,6 +260,11 @@ impl Hal for RecordingHal {
                     let n = buf.len().min(p.len());
                     buf[..n].copy_from_slice(&p[..n]);
                 }
+            }
+            // GetPacketStatus: [RssiPkt, SnrPkt, SignalRssiPkt].
+            0x14 => {
+                let n = buf.len().min(3);
+                buf[..n].copy_from_slice(&g.packet_status[..n]);
             }
             _ => {}
         }
