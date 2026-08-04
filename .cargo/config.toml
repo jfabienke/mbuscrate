@@ -2,9 +2,9 @@
 
 [target.aarch64-unknown-linux-gnu]
 # Raspberry Pi 4 (64-bit) / Raspberry Pi 5
-# NOTE: this is a *-gnu target but the linker below is a musl toolchain. Verify
-# against your installed cross toolchain; aarch64-linux-gnu-gcc is the usual match.
-linker = "aarch64-linux-musl-gcc"
+# No `linker` here: aarch64-unknown-linux-gnu is the Pi's NATIVE host triple, so an
+# unconditional linker override breaks builds on the Pi itself. When cross-compiling
+# from another host, set CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER instead.
 # Enable crypto extensions for Pi 5 (Cortex-A76).
 # For Pi 4 (Cortex-A72), drop target-cpu to cortex-a72; +aes/+sha2 are still present.
 # The flag is `target-feature` (singular) — `target-features` is not a rustc option

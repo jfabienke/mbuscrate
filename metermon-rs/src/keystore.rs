@@ -55,19 +55,25 @@ impl KeyStore {
         self.keys.is_empty()
     }
 
-    /// Handle one control message. Returns the meterid if it was an `op:key`
-    /// message that installed a key. Mirrors metermon's control handler.
-    pub fn handle_control(&mut self, msg: &serde_json::Value) -> Option<u32> {
+    /// Parse an `op:key` control message into `(meterid, hexkey)` **without** installing it,
+    /// so the live path can persist the key durably before making it usable. Returns `None`
+    /// for non-key messages or empty/zero fields.
+    pub fn parse_key_message(msg: &serde_json::Value) -> Option<(u32, String)> {
         if msg.get("op").and_then(|v| v.as_str()) != Some("key") {
             return None;
         }
         let meterid = msg.get("meterid").and_then(|v| v.as_u64())? as u32;
         let key = msg.get("key").and_then(|v| v.as_str())?;
-        if meterid != 0 && !key.is_empty() {
-            self.install(meterid, key.to_string());
-            return Some(meterid);
-        }
-        None
+        (meterid != 0 && !key.is_empty()).then(|| (meterid, key.to_string()))
+    }
+
+    /// Handle one control message: install an `op:key` in memory. Returns the meterid if a
+    /// key was installed. Mirrors metermon's control handler. (For the live gateway path,
+    /// prefer [`KeyStore::parse_key_message`] + a durable store before installing.)
+    pub fn handle_control(&mut self, msg: &serde_json::Value) -> Option<u32> {
+        let (id, key) = Self::parse_key_message(msg)?;
+        self.install(id, key);
+        Some(id)
     }
 
     /// Load keys captured for offline replay. Accepts either:

@@ -578,7 +578,7 @@ impl Rfm69Driver {
     ) {
         info!("Interrupt handler task started");
 
-        let mut tick: u64 = 0;
+        let mut last_status = Instant::now();
         // Track the STRONGEST signal seen per window: RSSI reg is 2×(-dBm), so the
         // smallest register value = strongest signal. Sampling every loop (~1kHz)
         // catches the few-ms transmission bursts a 1Hz sample would miss.
@@ -597,9 +597,11 @@ impl Rfm69Driver {
                 }
             }
 
-            // Periodic radio-status diagnostic (~once/sec at the 1ms idle poll).
-            tick += 1;
-            if tick % 1000 == 0 {
+            // Periodic radio-status diagnostic, rate-limited by wall time. A `tick % N`
+            // cadence breaks when the idle loop spins faster than expected — it flooded the
+            // log at ~47 lines/s; wall-time gating keeps it to ~1/s regardless of loop rate.
+            if last_status.elapsed() >= Duration::from_secs(1) {
+                last_status = Instant::now();
                 let op = Self::read_register_static(&spi, REG_OPMODE)
                     .await
                     .unwrap_or(0xFF);
@@ -1025,6 +1027,13 @@ impl Rfm69Driver {
                 "rfm69 feature not enabled".to_string(),
             ))
         }
+    }
+
+    /// Current `RegOpMode` byte (radio operating-mode register). Used by the gateway
+    /// watchdog / health report to distinguish RX (mode bits 0x10) from a stuck STANDBY
+    /// (0x04) when frames stop arriving.
+    pub async fn read_opmode(&self) -> Result<u8, Rfm69Error> {
+        self.read_register(REG_OPMODE).await
     }
 
     /// Static version of read_register for use in tasks
