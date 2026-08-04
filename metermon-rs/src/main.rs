@@ -241,6 +241,23 @@ fn run_import_keys(db: &str, from_config: &str) -> Result<()> {
     Ok(())
 }
 
+/// The `op:startup` announcement the C++ gateway publishes on its data topic at boot
+/// (metermon.cc:207). The upstream backend responds by pushing `op:key` control
+/// messages to the `control` topic named here. Unlike the C++ version, the raw config
+/// file is deliberately NOT included — it may contain a seeded `keys` map.
+#[cfg(feature = "radio")]
+fn startup_announcement(gwid: &str, control_topic: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "op": "startup",
+        "ts": devices::now_unix(),
+        "gw": gwid,
+        "app": "metermon-rs",
+        "version": env!("CARGO_PKG_VERSION"),
+        "control": control_topic,
+        "pid": std::process::id(),
+    })
+}
+
 /// Persist-then-install handler for `op:key` control messages, shared by the primary
 /// and the dedicated key broker. The redb write happens outside the keystore lock and
 /// the key only becomes usable after the write commits, so a key is never live before
@@ -417,6 +434,16 @@ fn run_monitor(
                     }
                     None => log::warn!("no control-topic in config; live AES key pull disabled"),
                 }
+                // Protocol-compatible startup announcement (metermon.cc:207): published on
+                // the data topic; the upstream backend pushes op:key messages to the
+                // announced control topic in response. Keys are not retained, so this
+                // announcement is what actually triggers key delivery.
+                if let Err(e) = p.publish_json(&startup_announcement(
+                    &cfg.gwid,
+                    cfg.mqtt.control_topic.as_deref(),
+                )) {
+                    log::warn!("startup announce failed: {e}");
+                }
                 log::info!("gateway status → {status_topic}, health → {health_topic}");
                 Some(p)
             }
@@ -456,6 +483,16 @@ fn run_monitor(
                             kb.port
                         ),
                         Err(e) => log::warn!("key-broker subscribe failed: {e}"),
+                    }
+                    // Announce under the (possibly legacy) gateway identity the keys were
+                    // provisioned for, so the backend pushes them to our control topic.
+                    let gw = kb.gwid.clone().unwrap_or_else(|| cfg.gwid.clone());
+                    match p.publish_to(
+                        &format!("meter/data/{gw}"),
+                        &startup_announcement(&gw, Some(&control)),
+                    ) {
+                        Ok(()) => log::info!("announced startup as gateway {gw} on key broker"),
+                        Err(e) => log::warn!("key-broker startup announce failed: {e}"),
                     }
                     Some(p)
                 }

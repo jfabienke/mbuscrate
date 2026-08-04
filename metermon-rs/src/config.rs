@@ -69,6 +69,10 @@ pub struct KeyMqttConfig {
     /// `control-topic`.
     #[serde(rename = "control-topic")]
     pub control_topic: Option<String>,
+    /// Gateway id to announce (`op:startup`) on the key broker, for keys provisioned
+    /// under an older gateway identity. Defaults to the primary `gwid`. The backend
+    /// pushes keys in response to the announcement — they are not retained.
+    pub gwid: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,7 +134,8 @@ mod tests {
             "gwid": "6543",
             "mqtt": { "host": "mqtt.ringgaard.com", "clientid": "meter6543",
                       "data-topic": "meter/data/6543", "control-topic": "meter/control/6543" },
-            "key-mqtt": { "host": "192.168.50.101", "control-topic": "meter/control/gateway-001" }
+            "key-mqtt": { "host": "192.168.50.101", "control-topic": "meter/control/gateway-001",
+                          "gwid": "gateway-001" }
         }"#;
         let cfg: Config = serde_json::from_str(json).unwrap();
         let kb = cfg.key_mqtt.expect("key-mqtt section");
@@ -141,5 +146,6 @@ mod tests {
             kb.control_topic.as_deref(),
             Some("meter/control/gateway-001")
         );
+        assert_eq!(kb.gwid.as_deref(), Some("gateway-001"));
     }
 }
