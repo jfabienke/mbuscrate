@@ -66,7 +66,10 @@
       "Bash(RUST_BACKTRACE=1 cargo test --lib instrumentation::stats::tests::test_success_rate -- --nocapture)",
       "Bash(RUST_BACKTRACE=1 cargo test --test lora_enhancements_test -- --nocapture)",
       "Bash(cargo bench:*)",
-      "Bash(RUST_BACKTRACE=1 cargo test --lib test_qundis_date_g_decoding -- --nocapture)"
+      "Bash(RUST_BACKTRACE=1 cargo test --lib test_qundis_date_g_decoding -- --nocapture)",
+      "Bash(RUST_BACKTRACE=1 cargo test --test manufacturer_tests test_basic_manufacturer_conversion -- --nocapture)",
+      "Bash(make test-utils:*)",
+      "Bash(cargo eval:*)"
     ],
     "deny": [],
     "ask": [],

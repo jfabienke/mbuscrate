@@ -40,14 +40,10 @@
 //! let decrypted = crypto.decrypt_frame(&encrypted_frame, &device_info).unwrap();
 //! ```
 
-use super::crypto_hardware::{get_aes_backend, AesBackend};
-// Only referenced from the `crypto`-gated calculate_hmac_sha1 below; gating the
-// import too keeps it from reading as unused under the default feature set.
-#[cfg(feature = "crypto")]
-use super::sha_hardware::calculate_hmac_sha1 as hw_calculate_hmac_sha1;
 use crate::util::{hex, logging};
 use crate::vendors;
-use std::sync::Arc;
+use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::Aes128;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -196,8 +192,6 @@ pub struct WMBusCrypto {
     master_key: AesKey,
     #[allow(dead_code)]
     error_throttle: logging::LogThrottle,
-    /// Hardware acceleration backend
-    backend: Arc<dyn AesBackend>,
     /// Configuration flags
     add_crc_mode9: bool,
     verify_crc_mode9: bool,
@@ -207,14 +201,10 @@ pub struct WMBusCrypto {
 impl WMBusCrypto {
     /// Create new crypto instance with master key
     pub fn new(master_key: AesKey) -> Self {
-        let backend = get_aes_backend();
-        log::info!("WMBusCrypto initialized with backend: {}", backend.name());
-
         Self {
             master_key,
             error_throttle: logging::LogThrottle::new(1000, 3), // 3 errors per second
-            backend,
-            add_crc_mode9: false, // Default: no CRC for compatibility
+            add_crc_mode9: false,                               // Default: no CRC for compatibility
             verify_crc_mode9: false,
             full_tag_compatibility: true, // Default: use 16-byte tags for testing
         }
@@ -621,156 +611,76 @@ impl WMBusCrypto {
         Ok(data[..data.len() - pad_len].to_vec())
     }
 
-    /// AES-128 CTR mode processing (works for both encrypt and decrypt)
+    /// AES-128-CTR keystream processing (identical for encrypt and decrypt).
+    ///
+    /// `iv` is the full 16-byte initial counter block; the counter is treated as a
+    /// 128-bit big-endian integer, per NIST SP 800-38A and every wM-Bus profile that
+    /// uses CTR.
     fn aes_ctr_process(
         &mut self,
         key: &AesKey,
         data: &[u8],
         iv: &[u8; 16],
     ) -> Result<Vec<u8>, CryptoError> {
-        // Simplified CTR implementation - in production use `aes` crate
-        let mut result = Vec::with_capacity(data.len());
-        let mut counter = *iv;
-
-        for chunk in data.chunks(16) {
-            // Encrypt counter to get keystream
-            let keystream = self.aes_encrypt_block(key, &counter)?;
-
-            // XOR data with keystream
-            for (i, &byte) in chunk.iter().enumerate() {
-                result.push(byte ^ keystream[i]);
-            }
-
-            // Increment counter
-            self.increment_counter(&mut counter);
-        }
-
-        Ok(result)
+        use ctr::cipher::{KeyIvInit, StreamCipher};
+        let mut out = data.to_vec();
+        let mut cipher = ctr::Ctr128BE::<Aes128>::new(key.as_bytes().into(), iv.into());
+        cipher.apply_keystream(&mut out);
+        Ok(out)
     }
 
-    /// AES-128 CBC decryption
+    /// AES-128-CBC decryption with PKCS#7 padding removal.
     fn aes_cbc_decrypt(
         &mut self,
         key: &AesKey,
         ciphertext: &[u8],
         iv: &[u8; 16],
     ) -> Result<Vec<u8>, CryptoError> {
-        let mut result = Vec::new();
-        let mut prev_block = *iv;
-
-        for chunk in ciphertext.chunks_exact(16) {
-            let mut block = [0u8; 16];
-            block.copy_from_slice(chunk);
-
-            // Decrypt block
-            let decrypted_block = self.aes_decrypt_block(key, &block)?;
-
-            // XOR with previous ciphertext block (or IV)
-            let mut plaintext_block = [0u8; 16];
-            for i in 0..16 {
-                plaintext_block[i] = decrypted_block[i] ^ prev_block[i];
-            }
-
-            result.extend_from_slice(&plaintext_block);
-            prev_block = block;
-        }
-
-        // Remove padding
-        self.pkcs7_unpad(&result)
+        use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+        cbc::Decryptor::<Aes128>::new(key.as_bytes().into(), iv.into())
+            .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+            .map_err(|_| CryptoError::DecryptionFailed {
+                reason: "CBC unpad failed (wrong key or corrupt ciphertext)".to_string(),
+            })
     }
 
-    /// AES-128 CBC encryption
+    /// AES-128-CBC encryption with PKCS#7 padding.
     fn aes_cbc_encrypt(
         &mut self,
         key: &AesKey,
         plaintext: &[u8],
         iv: &[u8; 16],
     ) -> Result<Vec<u8>, CryptoError> {
-        let mut result = Vec::new();
-        let mut prev_block = *iv;
-
-        for chunk in plaintext.chunks_exact(16) {
-            let mut block = [0u8; 16];
-            block.copy_from_slice(chunk);
-
-            // XOR with previous ciphertext block (or IV)
-            for i in 0..16 {
-                block[i] ^= prev_block[i];
-            }
-
-            // Encrypt block
-            let encrypted_block = self.aes_encrypt_block(key, &block)?;
-
-            result.extend_from_slice(&encrypted_block);
-            prev_block = encrypted_block;
-        }
-
-        Ok(result)
+        use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+        Ok(
+            cbc::Encryptor::<Aes128>::new(key.as_bytes().into(), iv.into())
+                .encrypt_padded_vec_mut::<Pkcs7>(plaintext),
+        )
     }
 
-    /// AES-128 ECB decryption
+    /// AES-128-ECB decryption. ECB is used only by the legacy ELL profile; it is not
+    /// semantically secure and must never be used for new work.
     fn aes_ecb_decrypt(&mut self, key: &AesKey, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let mut result = Vec::new();
-
+        let cipher = Aes128::new(key.as_bytes().into());
+        let mut out = Vec::with_capacity(ciphertext.len());
         for chunk in ciphertext.chunks_exact(16) {
-            let mut block = [0u8; 16];
-            block.copy_from_slice(chunk);
-
-            let decrypted_block = self.aes_decrypt_block(key, &block)?;
-            result.extend_from_slice(&decrypted_block);
+            let mut block = *aes::Block::from_slice(chunk);
+            cipher.decrypt_block(&mut block);
+            out.extend_from_slice(&block);
         }
-
-        // Remove padding
-        self.pkcs7_unpad(&result)
+        self.pkcs7_unpad(&out)
     }
 
-    /// AES-128 ECB encryption
+    /// AES-128-ECB encryption (legacy ELL only — see [`Self::aes_ecb_decrypt`]).
     fn aes_ecb_encrypt(&mut self, key: &AesKey, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let mut result = Vec::new();
-
+        let cipher = Aes128::new(key.as_bytes().into());
+        let mut out = Vec::with_capacity(plaintext.len());
         for chunk in plaintext.chunks_exact(16) {
-            let mut block = [0u8; 16];
-            block.copy_from_slice(chunk);
-
-            let encrypted_block = self.aes_encrypt_block(key, &block)?;
-            result.extend_from_slice(&encrypted_block);
+            let mut block = *aes::Block::from_slice(chunk);
+            cipher.encrypt_block(&mut block);
+            out.extend_from_slice(&block);
         }
-
-        Ok(result)
-    }
-
-    /// Encrypt single AES block using real AES implementation
-    fn aes_encrypt_block(
-        &mut self,
-        key: &AesKey,
-        block: &[u8; 16],
-    ) -> Result<[u8; 16], CryptoError> {
-        let mut output = [0u8; 16];
-        self.backend
-            .encrypt_block(block, key.as_bytes(), &mut output);
-        Ok(output)
-    }
-
-    /// Decrypt single AES block using hardware-accelerated backend
-    fn aes_decrypt_block(
-        &mut self,
-        key: &AesKey,
-        block: &[u8; 16],
-    ) -> Result<[u8; 16], CryptoError> {
-        let mut output = [0u8; 16];
-        self.backend
-            .decrypt_block(block, key.as_bytes(), &mut output);
-        Ok(output)
-    }
-
-    /// Increment CTR mode counter
-    fn increment_counter(&self, counter: &mut [u8; 16]) {
-        for i in (0..16).rev() {
-            counter[i] = counter[i].wrapping_add(1);
-            if counter[i] != 0 {
-                break; // No carry needed
-            }
-        }
+        Ok(out)
     }
 
     /// Decrypt using AES-128 GCM mode (Mode 9) - OMS 7.3.6
@@ -1171,11 +1081,12 @@ impl WMBusCrypto {
         b0.push(msg.len() as u8);
 
         // Create CMAC instance
-        let mut mac =
-            Cmac::<Aes128>::new_from_slice(key).map_err(|_| CryptoError::InvalidKeyLength {
+        let mut mac = <Cmac<Aes128> as cmac::Mac>::new_from_slice(key).map_err(|_| {
+            CryptoError::InvalidKeyLength {
                 expected: 16,
                 actual: key.len(),
-            })?;
+            }
+        })?;
 
         // Update with B0 block
         mac.update(&b0);
@@ -1226,9 +1137,11 @@ impl WMBusCrypto {
     /// * 20-byte HMAC-SHA1 digest
     #[cfg(feature = "crypto")]
     pub fn calculate_hmac_sha1(&self, key: &[u8], message: &[u8]) -> Vec<u8> {
-        // Use hardware-accelerated HMAC-SHA1 if available
-        let result = hw_calculate_hmac_sha1(key, message);
-        result.to_vec()
+        use hmac::{Mac, SimpleHmac};
+        let mut mac = <SimpleHmac<sha1::Sha1> as Mac>::new_from_slice(key)
+            .expect("HMAC accepts keys of any length");
+        mac.update(message);
+        mac.finalize().into_bytes().to_vec()
     }
 
     /// Perform Qundis 3-step authentication
@@ -1356,20 +1269,53 @@ mod tests {
         assert_eq!(unpadded, data);
     }
 
+    /// NIST SP 800-38A F.5.1 (CTR-AES128) — a published known-answer vector, so this
+    /// pins our CTR mode to the standard rather than to our own implementation.
     #[test]
-    fn test_counter_increment() {
-        let master_key = AesKey::from_bytes(&[0; 16]).unwrap();
-        let crypto = WMBusCrypto::new(master_key);
+    fn ctr_matches_nist_sp800_38a_vector() {
+        let key = AesKey::from_hex("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
+        let mut crypto = WMBusCrypto::new(key.clone());
+        let iv: [u8; 16] = hex::decode_hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let plaintext = hex::decode_hex(
+            "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51\
+             30c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
+        )
+        .unwrap();
+        let expected = "874d6191b620e3261bef6864990db6ce9806f66b7970fdff8617187bb9fffdff\
+                        5ae4df3edbd5d35e5b4f09020db03eab1e031dda2fbe03d1792170a0f3009cee";
+        let ct = crypto.aes_ctr_process(&key, &plaintext, &iv).unwrap();
+        assert_eq!(
+            hex::encode_hex(&ct),
+            expected.replace(char::is_whitespace, "")
+        );
+        // CTR is its own inverse.
+        let back = crypto.aes_ctr_process(&key, &ct, &iv).unwrap();
+        assert_eq!(back, plaintext);
+    }
 
-        let mut counter = [0u8; 16];
-        crypto.increment_counter(&mut counter);
-        assert_eq!(counter[15], 1);
-
-        // Test carry
-        counter[15] = 255;
-        crypto.increment_counter(&mut counter);
-        assert_eq!(counter[15], 0);
-        assert_eq!(counter[14], 1);
+    /// NIST SP 800-38A F.2.1 (CBC-AES128). Our CBC applies PKCS#7, so the vector's
+    /// exact-block plaintext gains one padding block that we drop before comparing.
+    #[test]
+    fn cbc_matches_nist_sp800_38a_vector() {
+        let key = AesKey::from_hex("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
+        let mut crypto = WMBusCrypto::new(key.clone());
+        let iv: [u8; 16] = hex::decode_hex("000102030405060708090a0b0c0d0e0f")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let plaintext = hex::decode_hex(
+            "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51\
+             30c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
+        )
+        .unwrap();
+        let expected_prefix = "7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2\
+                               73bed6b8e3c1743b7116e69e222295163ff1caa1681fac09120eca307586e1a7";
+        let ct = crypto.aes_cbc_encrypt(&key, &plaintext, &iv).unwrap();
+        assert!(hex::encode_hex(&ct).starts_with(&expected_prefix.replace(char::is_whitespace, "")));
+        assert_eq!(crypto.aes_cbc_decrypt(&key, &ct, &iv).unwrap(), plaintext);
     }
 
     #[test]
