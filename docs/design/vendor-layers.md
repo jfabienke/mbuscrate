@@ -68,11 +68,14 @@ that means nothing is worse than "unknown", because a consumer cannot tell the
 difference. (Today `02 FF 20` decodes to `Manufacturer specific: 0.0` — exactly this
 failure.)
 
-**P4 — Quirks are evidence-gated, narrowly scoped, and default-off.**
+**P4 — Quirks are evidence-gated, narrowly scoped, and standard-by-default.**
 Every quirk carries: the deviation (what the standard says versus what the device
 does), the evidence, and the narrowest scope that fits — manufacturer *and* version or
-device type where known, not manufacturer-wide by reflex. Standard behaviour is always
-the default; the quirk is the exception that justifies itself.
+device type where known, not manufacturer-wide by reflex. "Default" means the standard
+behaviour: a device the scope does not match is decoded per specification, and a quirk
+whose evidence is merely `Provisional` does not apply unless the caller opts in. A
+`Verified` quirk, once registered, applies automatically within its scope — a quirk no
+decode path applies protects nobody.
 
 **P5 — A quirk that fires must say so.**
 If a quirk changed the outcome — CRC tolerated, field reinterpreted — the decoded
@@ -80,9 +83,15 @@ result records it. Otherwise two gateways silently disagree and neither can be a
 
 **P6 — Never apply a quirk on the strength of unverified data.**
 The manufacturer comes from the frame; a corrupt frame yields a corrupt manufacturer.
-Vendor dispatch requires that the frame passed its integrity checks. This is not
-hypothetical: applying one meter's cached record layout to another's values is exactly
-how the gateway came to report `1591213 W` from a water meter.
+Vendor dispatch therefore requires that the *identity-bearing* region — the link
+header carrying the M and A fields — passed its own integrity check. Checks **beyond**
+that region are exactly what a `tolerate_crc` quirk exists to relax, so integrity is
+tracked per region, never as one frame-level boolean: a quirk may tolerate a failed
+payload-block CRC, but no quirk may be selected by a manufacturer code that itself
+arrived corrupted. (Mode C type A provides this granularity directly — the header
+block carries its own CRC.) This is not hypothetical: applying one meter's cached
+record layout to another's values is exactly how the gateway came to report
+`1591213 W` from a water meter.
 
 **P7 — One path, not two.**
 No parallel `*_with_vendor` forks of the main decoder. A single path that takes a
@@ -126,9 +135,18 @@ pub struct DecodeContext<'a> {
     pub vendor: VendorBinding<'a>,
     /// Identity from the link header — the dispatch key.
     pub device: DeviceIdentity,
-    /// Whether the frame passed its integrity checks. Quirks do not dispatch
-    /// when false (P6).
+    /// Per-region integrity. The identity-bearing header block must be valid for
+    /// ANY vendor dispatch (P6); failures in later blocks are what a
+    /// `tolerate_crc` quirk may relax.
     pub integrity: Integrity,
+}
+
+pub struct Integrity {
+    /// The link-header block (M/A fields) validated. Gates all vendor dispatch.
+    pub header_valid: bool,
+    /// Validity of the payload blocks that followed; a scoped quirk may tolerate
+    /// failures here, recording that it did so (P5).
+    pub blocks: BlockValidity,
 }
 
 pub struct DeviceIdentity {
@@ -231,6 +249,8 @@ Two properties are machine-checkable and should be CI-enforced:
 - **Quirks are evidenced and visible (P4, P5).** Every registered quirk has a
   capture-backed or explicitly `Documented`/`Provisional` manifest, and a test proving
   that applying it changes the output *and* records a `QuirkApplied`.
+- **Identity gating holds (P6).** Decode a corpus of frames whose header block fails
+  its CRC; no vendor hook may have been consulted for any of them.
 
 ## 5. Current classification
 
@@ -303,7 +323,9 @@ Implement now, decoding the INFO bitmask, with
 better than the current `0.0` (which violates P3), it cites a source rather than
 inventing meaning, and the manifest makes the uncertainty legible. Our meter is a
 Multical 21 while the documented bitmask is from a 602, so the semantics are upgraded
-to `Verified` only when decoded from one of our own captures.
+to `Verified` only when decoded from one of our own captures. The raw info-code bytes
+are always emitted alongside the provisional interpretation, so P3 holds even if the
+Multical 21 semantics turn out to differ.
 
 ## 7. Migration
 
