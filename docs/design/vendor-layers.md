@@ -46,6 +46,47 @@ the crate believed and replaces it. They therefore deserve different defaults,
 different evidence bars, and different visibility in the output — which is what the
 principles below encode.
 
+### 1.1 Where the crate stops: the decode/configuration boundary
+
+All three layers live in `mbus-rs`, but the crate is not the whole system. It sits
+between two neighbours, and the boundary between them is **decoding versus
+configuration**, not generic versus proprietary:
+
+- **The crate decodes what a meter broadcasts.** All metering and instrumentation
+  decoding, including the *meaning* of status/alarm/INFO bits (see D2), value-fixing
+  quirks, and the wire mechanics of bidirectional/session frames. Given the bytes and
+  the inputs it needs, it produces typed readings and decoded status.
+- **The backend Device Manager owns device parameters and reference data**: meter
+  constants and scaling factors, and the authoritative model/firmware/configuration
+  catalog. It applies constants to the crate's readings, and it **sends the resolved
+  device profile downstream to the gateways on request**, so the crate can select a
+  model-specific decode where the frame alone cannot (§4.3).
+- **The configuration app commissions meters.** Commissioning is initiated there;
+  the crate supplies the bidirectional wire exchange so a round-trip through
+  gateway → backend confirms the provisioning chain end to end.
+
+This fixes four boundary cases that the layer model alone did not settle:
+
+1. **Status/alarm/INFO interpretation → crate.** Interpreting a *received* status field
+   is decoding the telegram's meaning, so the crate owns the bit tables and emits named
+   conditions. The model needed to pick the right table comes from case 3.
+2. **Meter constants / scaling factors → Device Manager.** These are configured device
+   parameters, absent from the telegram. The crate emits the raw typed value and the
+   Device Manager scales it; the crate ships no constants and never guesses one.
+3. **Model / firmware resolution → Device Manager, pushed to gateways on request.** The
+   crate decodes identity *bytes*; the Device Manager resolves them to a product and
+   sends that profile down, which the crate consumes as a decode input. Absent a
+   profile it cannot derive, the crate fails safe to raw (§4.3).
+4. **Bidirectional / session / commissioning → crate mechanics, config-app policy.** The
+   crate parses/packs session frames and runs the link state machine; *when* to
+   commission is the config app's decision; the confirming round-trip runs
+   config app → backend → gateway → crate → device and back.
+
+The dependency arrow: the Device Manager and gateways depend on the crate for decode
+primitives; the crate depends on nothing above it — reference data it needs (a device
+profile, a key) arrives as an **input**, never as a compiled-in table it sources itself,
+with the single exception of status-bit semantics, which are decode knowledge (case 1).
+
 ## 2. Principles
 
 **P1 — Frame-declared beats manufacturer-keyed.**
@@ -150,14 +191,23 @@ pub struct Integrity {
 }
 
 pub struct DeviceIdentity {
+    // Decoded from the frame's link header.
     pub manufacturer: ManufacturerCode, // e.g. "KAM"
     pub version: u8,
     pub device_type: u8,
     pub address: u32,
+    /// Resolved product/firmware profile supplied by the Device Manager (§1.1 case 3),
+    /// when available. Selects model-specific decode — e.g. which INFO bit table
+    /// applies. `None` when the gateway holds no profile for this device; the crate
+    /// then decodes from the frame alone and falls back to raw for anything the frame
+    /// cannot disambiguate.
+    pub profile: Option<DeviceProfile>,
 }
 ```
 
-An empty `VendorBinding` is the normal case and costs one branch.
+An empty `VendorBinding` is the normal case and costs one branch. `profile` is likewise
+usually `None` for a gateway that has not yet been sent a device catalog — decoding
+still works, it is simply less specific.
 
 ### 4.2 Two traits, one registration point
 
@@ -206,11 +256,12 @@ Most specific match wins; manufacturer-wide is the fallback, not the default.
 **Discriminators the frame does not carry.** Some behaviour varies by firmware or
 configuration code — Kamstrup's INFO bit tables differ across MULTICAL 602/66C/III/403
 (`docs/MULTICAL_VENDOR_EVENTS.md`), and neither firmware nor config code appears in the
-M/A link header. When the discriminator a correct interpretation needs is not derivable
-from the frame, the entry must **fail safe to raw** (P3) rather than guess a model:
-either the caller supplies the device profile out of band, or the value is emitted
-undecoded. A vendor entry may never assume a model it cannot prove from the frame or an
-explicit binding.
+M/A link header. The resolved discriminator arrives out of band as
+`DeviceIdentity.profile`, sent to the gateway by the Device Manager (§1.1 case 3). When
+no profile is available and the frame cannot determine the model, the entry must **fail
+safe to raw** (P3) rather than guess: the value is emitted undecoded (or, for a status
+field, as the raw bitmask). A vendor entry may never assume a model it cannot prove from
+the frame or the supplied profile.
 
 ### 4.4 Provenance is part of the entry
 
@@ -336,14 +387,17 @@ makes this a `decode_status_bits`-style interpretation keyed to the model, not a
 `decode_manufacturer_vif` hook — a materially different implementation than §5 first
 assumed, and one to confirm against a decoded capture before building.
 
-Either way it ships **provisional**: decode the INFO bitmask with
-`Evidence::Documented { source: "MULTICAL 602 register map" }` and `Status::Provisional`,
-surfaced as provisional in the output, with the raw bitmask value always emitted
-alongside the interpretation so P3 holds even if the semantics differ. The evidence
-document is explicit that the bit tables differ across MULTICAL 602, 66C, III and
-403/603/803, so the interpretation is scoped by model and **must not** be applied
-Kamstrup-wide (P4). Upgrade to `Verified` only from one of our own captures with a
-correlated optical read of register `0x0063`.
+The interpretation lives in the crate (§1.1 case 1): status/alarm meaning is decode
+knowledge, so the crate owns the bit tables and emits named conditions, not just a
+number. It ships **provisional**: `Evidence::Documented { source: "MULTICAL 602 register
+map" }` and `Status::Provisional`, surfaced as provisional in the output, with the raw
+bitmask value always emitted alongside the interpretation so P3 holds even if the
+semantics differ. The evidence document is explicit that the bit tables differ across
+MULTICAL 602, 66C, III and 403/603/803, so the applicable table is selected by the
+model in `DeviceIdentity.profile` — supplied by the Device Manager (§1.1 case 3) — and
+**must not** be applied Kamstrup-wide (P4). With no profile, the crate emits the raw
+bitmask only. Upgrade to `Verified` only from one of our own captures with a correlated
+optical read of register `0x0063`.
 
 ## 7. Migration
 
@@ -356,12 +410,21 @@ Each step is independently shippable and behaviour-preserving unless stated.
 3. **Split the traits**; port the QUNDIS date handling to `VendorQuirks` with a
    manifest and its existing capture-backed test. *Behaviour change:* QDS dates decode
    correctly in the live path, and the quirk is reported.
-4. **Add the KAM extension** for info codes per D2.
-5. **Surface `applied_quirks`** in metermon-rs JSON and the device store (P5).
-6. **Add the conformance harness** (§4.6) to CI.
-7. **Retire the `*_with_vendor` duplicates.** Keep `has_quirks` as the database's
+4. **Add `DeviceIdentity.profile`** as a decode input and the Device Manager → gateway
+   channel that supplies it (§1.1 case 3). Behaviour-preserving while the channel is
+   empty.
+5. **Add the KAM status-bit interpretation** for info codes per D2, table selected by
+   the supplied profile, raw bitmask always emitted.
+6. **Surface `applied_quirks`** (and applied status interpretation) in metermon-rs JSON
+   and the device store (P5).
+7. **Add the conformance harness** (§4.6) to CI.
+8. **Retire the `*_with_vendor` duplicates.** Keep `has_quirks` as the database's
    declaration of intent, but derive registration from the registry's own entries so
    the flag and the registered set cannot drift apart.
+
+The Device Manager's constant application (§1.1 case 2) and the session/commissioning
+round-trip (§1.1 case 4) are separate deliverables in their own repos, tracked there;
+this migration covers only the crate-side capability each depends on.
 
 ## 8. Out of scope
 
@@ -371,6 +434,19 @@ device credentials (e.g. the Zenner LoRa HCA) belong to the radio stack, not to 
 layering. This document does not add a second registry for wired M-Bus; the same
 binding applies to both transports, since the manufacturer is a property of the device,
 not the link.
+
+**Owned by the Device Manager, not the crate (§1.1).** Meter constants and scaling
+factors (pulse weight, meter factor, CT/VT ratios) are configured device parameters:
+the crate decodes and emits the raw typed value, and the Device Manager applies the
+constant. The authoritative model/firmware/configuration catalog is likewise the Device
+Manager's; the crate consumes a resolved profile as an input and ships no catalog of its
+own.
+
+**Session mechanics in the crate, commissioning policy in the config app (§1.1 case
+4).** The crate parses and packs bidirectional/session frames and runs the link state
+machine; deciding *when* to commission a meter is the configuration app's, and the
+confirming round-trip runs config app → backend → gateway → crate → device. The crate
+provides the wire capability; it does not own the commissioning workflow.
 
 **A different protocol, not a quirk.** `docs/MULTICAL_VENDOR_EVENTS.md` also documents
 Kamstrup's KMP logger commands (`A0`–`A3`, `9B`, `9C`), the 50-entry INFO history, and
