@@ -24,8 +24,9 @@ right side of that line by treating wmbusmeters strictly as a runtime **oracle**
 
 ## Install the oracle (pinned)
 
-Written against **wmbusmeters 1.17.1**. A different version may rename JSON fields; if
-you upgrade, re-check the field mapping in `compare.py`.
+Validated against **wmbusmeters 3.0.0** (the version `compare.py` pins). A different
+version may rename JSON fields; if you upgrade, re-check the field mapping in
+`compare.py` and update the pin.
 
 ```sh
 # Debian/Ubuntu/RPi
@@ -42,6 +43,11 @@ can use it as a decode dump even with no oracle present.
 
 Real AES keys and real meter captures are **never committed**. Everything under
 `keys/` and any `*.local.hex` / `*.keys` file is gitignored.
+
+> **Never paste a real key or capture into the hosted analyzer at wmbusmeters.org.**
+> The web service accepts keys and retains submitted telegrams and logs for up to a
+> month. Use the **local `wmbusmeters` binary** (which this harness invokes) for
+> anything involving a real key — the key stays on your machine.
 
 - Put real captured telegrams (one hex frame per line) in `captures.local.hex`.
 - Put keys in a JSON map `{ "<meterid>": "<32-hex key>" }` under `keys/` (or reuse the
