@@ -55,3 +55,12 @@ cross/
 .cache/
 Cargo.lock~  # Backup lockfiles
 
+
+# Secrets — AES key material must never be committed (see tools/oracle/README.md)
+*.keys
+*key*.json
+keys.jsonl
+keys/
+*.local.hex
+# Local device stores
+*.redb
