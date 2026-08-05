@@ -73,6 +73,24 @@ Output is a per-meter, per-field table: `OK` where the two agree, `!!` where the
 disagree (investigate against raw bytes), `..` where only one produced the field. The
 run never fails the build on a mismatch — resolving one is a human, evidence-based step.
 
+### Trace a single frame (`--analyze`)
+
+To debug a mismatch — or to tell a **wrong key** (decrypts to noise, CRCs fail) from
+**corrupt ciphertext** — add `--analyze` for the full wmbusmeters byte trace instead of
+the field table:
+
+```sh
+tools/oracle/compare.py \
+    --captures tools/oracle/captures.local.hex \
+    --keys keys/meters.json --analyze
+```
+
+It prints, per byte offset, the DLL/ELL/TPL headers, CI and security mode, every CRC
+result, and each decoded record — e.g. `017 : 1cc5 payload crc (calculated 1cc5 OK)`
+and `026 C!: C3630000 ("total_m3":25.539)`. Reading a trace is behavioural observation,
+not transcription: still oracle-only, still no tables copied. `--analyze` requires the
+local binary (it never uses the hosted service).
+
 ## Reading the results — a worked example
 
 A real run on meter 74644444 (Multical 21 cold water) validated our decoder and also

@@ -92,6 +92,35 @@ def run_wmbusmeters(telegram: str, driver: str, meter_id: str, key: str | None) 
     return None
 
 
+def run_wmbusmeters_analyze(telegram: str, driver: str, key: str | None) -> str | None:
+    """Full per-frame trace from `wmbusmeters --analyze` (local binary).
+
+    Unlike the JSON path this prints a byte-offset breakdown — DLL/ELL/TPL headers,
+    CI/security mode, CRC results, and per-record DIF/VIF decoding — which is the tool
+    for telling a *wrong key* (decrypts to noise, CRCs fail) from *corrupt ciphertext*
+    or a genuine decode discrepancy. Reading a trace is behavioural observation, not
+    transcription: still oracle, still no tables copied (README, D3/D4).
+
+    `--analyze` argument forms: `<key>` (auto-detect driver), `<driver>:<key>` (force
+    both), `<driver>` (force driver, no key), or empty (auto, no key).
+    """
+    tg = strip_mode_marker(telegram)
+    if key and driver != "auto":
+        arg = f"{driver}:{key}"
+    elif key:
+        arg = key
+    elif driver != "auto":
+        arg = driver
+    else:
+        arg = ""
+    cmd = ["wmbusmeters", f"--analyze={arg}" if arg else "--analyze", tg]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    return out.stdout or out.stderr
+
+
 def normalise_ours(row: dict) -> dict:
     fields = {}
     for rec in row.get("records") or []:
@@ -138,6 +167,12 @@ def main() -> int:
     ap.add_argument("--keys", type=Path, help="gitignored key file (JSON map or op:key lines)")
     ap.add_argument("--driver", default="auto", help="wmbusmeters driver, or 'auto'")
     ap.add_argument(
+        "--analyze",
+        action="store_true",
+        help="print the full wmbusmeters --analyze byte trace per telegram (debug a "
+        "mismatch / tell a wrong key from corrupt ciphertext) instead of the field table",
+    )
+    ap.add_argument(
         "--metermon",
         default="metermon-rs/target/release/metermon-rs",
         help="path to the metermon-rs binary",
@@ -157,6 +192,11 @@ def main() -> int:
 
     have_oracle = shutil.which("wmbusmeters") is not None
     if not have_oracle:
+        if args.analyze:
+            sys.exit(
+                f"--analyze needs the wmbusmeters binary (install v{PINNED_WMBUSMETERS}, "
+                "see README.md)"
+            )
         print(
             "NOTE: wmbusmeters not installed — showing our normalised output only.\n"
             f"      install v{PINNED_WMBUSMETERS} (see README.md) for a differential run.",
@@ -176,13 +216,26 @@ def main() -> int:
 
     ok = 0
     for i, ours in enumerate(ours_rows):
-        theirs = None
         meter_id = str(ours.get("meterid", ""))
-        if have_oracle and i < len(telegrams):
-            theirs = run_wmbusmeters(telegrams[i], args.driver, meter_id, keys.get(meter_id))
-        compare(normalise_ours(ours), normalise_theirs(theirs) if theirs else None)
+        if i >= len(telegrams):
+            continue
+        if args.analyze:
+            # Full byte trace for human inspection; our decode summary alongside it.
+            print(f"\n===== telegram {i} · meter {meter_id} =====")
+            o = normalise_ours(ours)
+            print("ours:", o["fields"] or "(no comparable fields)")
+            trace = run_wmbusmeters_analyze(telegrams[i], args.driver, keys.get(meter_id))
+            print(trace.rstrip() if trace else "(wmbusmeters --analyze produced no output)")
+        else:
+            theirs = (
+                run_wmbusmeters(telegrams[i], args.driver, meter_id, keys.get(meter_id))
+                if have_oracle
+                else None
+            )
+            compare(normalise_ours(ours), normalise_theirs(theirs) if theirs else None)
         ok += 1
-    print(f"\n{ok} telegram(s) compared; oracle {'present' if have_oracle else 'absent'}.")
+    verb = "traced" if args.analyze else "compared"
+    print(f"\n{ok} telegram(s) {verb}; oracle {'present' if have_oracle else 'absent'}.")
     return 0
 
 
