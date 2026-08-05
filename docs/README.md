@@ -13,6 +13,7 @@
 - [COMPLIANCE.md](COMPLIANCE.md) - Standards compliance (EN 13757)
 - [PAYLOADS.md](PAYLOADS.md) - Data payload parsing and encoding
 - [MODE13_TLS.md](MODE13_TLS.md) - Mode 13 TLS implementation
+- [MULTICAL_VENDOR_EVENTS.md](MULTICAL_VENDOR_EVENTS.md) - Kamstrup MULTICAL event and diagnostic fields
 
 ### Features & Extensions
 - [LORA.md](LORA.md) - LoRa radio support and decoders

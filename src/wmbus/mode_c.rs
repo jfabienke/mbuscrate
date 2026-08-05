@@ -64,6 +64,12 @@ pub struct WMBusLinkFrame {
     pub version: u8,
     /// Device type byte.
     pub device_type: u8,
+    /// Link-layer address bytes exactly as they appeared on the wire: M(2) then
+    /// A(6) = id(4) ‖ version ‖ type. Retained verbatim because ELL and TPL
+    /// encryption derive their initialisation vectors from these bytes, and
+    /// [`device_address`](Self::device_address) is BCD-*decoded* — reconstructing the
+    /// wire bytes from it would be lossy for any meter that does not use BCD.
+    pub link_header: [u8; 8],
     /// De-blocked application payload (CRCs stripped); begins with the CI byte when non-empty.
     pub payload: Vec<u8>,
     /// True iff every block CRC validated.
@@ -148,6 +154,8 @@ pub fn decode_mode_c(raw: &[u8]) -> Result<WMBusLinkFrame, DecodeError> {
     let l = raw[1] as usize;
     let control_field = raw[2];
     let manufacturer_id = u16::from_le_bytes([raw[3], raw[4]]);
+    let mut link_header = [0u8; 8];
+    link_header.copy_from_slice(&raw[3..11]);
     let device_address = bcd4(&raw[5..9]);
     let version = raw[9];
     let device_type = raw[10];
@@ -219,6 +227,7 @@ pub fn decode_mode_c(raw: &[u8]) -> Result<WMBusLinkFrame, DecodeError> {
         device_address,
         version,
         device_type,
+        link_header,
         payload,
         crc_ok,
     })

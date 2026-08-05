@@ -16,13 +16,14 @@ See full details in [CHANGELOG.md](CHANGELOG.md).
 
 ## Why mbus-rs?
 
-- ✅ **95% EN 13757 compliant** - Battle-tested with real meters from Kamstrup, Landis+Gyr, and more
-- ⚡ **Blazing fast** - Parse frames in <1ms with zero-copy nom parsers
-- 🔒 **Secure** - AES-128 encryption (Modes 5/7/9) with proven OMS compliance
+- ✅ **EN 13757 wired and wireless** - frame parsing, mode-C link layer, DIF/VIF records
+- 📻 **Reads real meters** - verified end-to-end against live Kamstrup traffic on a
+  Raspberry Pi gateway: ELL AES-CTR decryption, compact-frame expansion, scaled readings
+- 🔒 **Audited crypto primitives** - AES/CMAC/HMAC from the RustCrypto crates, never
+  hand-rolled; the `crypto` feature is on by default and cannot degrade to a no-op
 - 🚀 **Async-first** - Built on tokio for concurrent multi-device operations
-- 📡 **Wireless ready** - Native Raspberry Pi support with SX126x radio drivers
-- 🌐 **LoRa optimized** - Advanced CAD, RX Boost (+6dB), and regional configurations
-- 🛠️ **Production proven** - 85% test coverage with extensive real-world testing
+- 📡 **Wireless ready** - Native Raspberry Pi support with SX126x and RFM69 drivers
+- 🌐 **LoRa PHY** - CAD, RX Boost (+6dB), and regional configurations
 
 ## 🚀 Quick Start
 
@@ -126,12 +127,26 @@ More examples in [`examples/`](examples/) directory.
 
 ## Standards Compliance
 
-**95% compliant** with EN 13757 standards. Full details in [COMPLIANCE.md](COMPLIANCE.md).
+What is implemented and tested, rather than a single compliance percentage — the
+previous "95% compliant" and "85% test coverage" figures were not derived from any
+measurement and have been removed.
 
-- ✅ EN 13757-2/3 (Wired M-Bus): 100% compliant
-- ✅ EN 13757-4 (Wireless): S/T/C modes with LBT
-- ✅ OMS v4.0.4: Modes 5/7/9 encryption
-- ✅ Multi-telegram: FCB handling and frame reassembly
+- **EN 13757-2/3 (wired M-Bus)**: frame parsing/packing, fixed and variable data
+  records, DIF/VIF decoding with exponents pinned to Table 10 by test.
+- **EN 13757-4 (wireless)**: mode-C link layer (frame types A and B, per-block
+  CRC-16/EN-13757 verified against the standard's `0xC2B7` check value); mode C
+  receive is exercised on hardware. S and T mode framing is implemented but has not
+  been validated against live traffic.
+- **Extended Link Layer**: CI 0x8C–0x8F headers; AES-128-CTR decryption verified
+  against captured Kamstrup Multical 21 traffic.
+- **Compact frames**: layout learned from a full frame and re-applied, with the
+  format signature confirmed against captured traffic.
+- **OMS security profiles**: Mode 5 (CTR), 7 (CBC) and 9 (GCM) are implemented on
+  RustCrypto primitives and covered by NIST SP 800-38A known-answer vectors. They
+  have **not** been validated against live Mode 5/7/9 meter traffic — the meters
+  reachable from the test gateway use ELL encryption.
+- **Not implemented**: OMS master-key derivation (AES-CMAC). Supply the per-device
+  key directly; see `KeyMode`.
 
 ## 🌐 LoRa Features
 

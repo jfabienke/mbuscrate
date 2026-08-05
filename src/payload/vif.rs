@@ -94,6 +94,46 @@ mod tests {
     use proptest::prelude::*;
     use proptest::proptest;
 
+    /// EN 13757-3 Table 10 defines most primary VIFs algorithmically: a base unit and
+    /// a decimal exponent taken from the low bits of the code. Pinning the table to
+    /// those formulas is what keeps a reading correct — a wrong exponent here silently
+    /// scales every meter value by a power of ten, which no frame-level test catches.
+    #[test]
+    fn primary_vif_exponents_follow_en13757_3() {
+        // (first code, last code, base unit, exponent offset, uses low two bits)
+        const RANGES: &[(u8, u8, &str, i32, bool)] = &[
+            (0x00, 0x07, "Wh", 3, false),
+            (0x08, 0x0F, "J", 0, false),
+            (0x10, 0x17, "m^3", 6, false),
+            (0x18, 0x1F, "kg", 3, false),
+            (0x28, 0x2F, "W", 3, false),
+            (0x30, 0x37, "J/h", 0, false),
+            (0x38, 0x3F, "m^3/h", 6, false),
+            (0x40, 0x47, "m^3/min", 7, false),
+            (0x48, 0x4F, "m^3/s", 9, false),
+            (0x50, 0x57, "kg/h", 3, false),
+            (0x58, 0x5B, "C", 3, true),
+            (0x5C, 0x5F, "C", 3, true),
+            (0x60, 0x63, "K", 3, true),
+            (0x64, 0x67, "C", 3, true),
+            (0x68, 0x6B, "bar", 3, true),
+        ];
+        for &(lo, hi, unit, off, low2) in RANGES {
+            for code in lo..=hi {
+                let info = lookup_primary_vif(code).expect("primary VIF present");
+                let n = i32::from(if low2 { code - lo } else { code & 0x07 });
+                let want = 10f64.powi(n - off);
+                assert_eq!(info.unit, unit, "VIF {code:#04x} base unit");
+                assert!(
+                    (info.exponent - want).abs() <= want * 1e-9,
+                    "VIF {code:#04x}: table {} but EN 13757-3 says 10^{} {unit}",
+                    info.exponent,
+                    n - off
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_lookup_primary_vif_all_cases() {
         for (code, unit, exponent, quantity) in VIF_CODES.iter() {

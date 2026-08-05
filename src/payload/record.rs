@@ -311,7 +311,116 @@ pub fn parse_variable_record_consumed(input: &[u8]) -> Result<(MBusRecord, usize
         consumed += record.data_len; // the data bytes
     }
 
+    decode_record_value(&mut record);
     Ok((record, consumed))
+}
+
+/// Decode a record's data bytes into its value, unit and quantity.
+///
+/// Parsing the DRH only tells you *how* to read the data; without this step a record
+/// carries a header and a zero. The DIF's low nibble selects the encoding, and the
+/// VIB supplies the decimal exponent the raw integer is scaled by (e.g. VIF 0x13 is
+/// volume in 10⁻³ m³, so a raw 25555 becomes 25.555 m³).
+fn decode_record_value(record: &mut MBusRecord) {
+    // Manufacturer-specific and more-records-follow markers carry no scalar value.
+    if record.drh.dib.dif == MBUS_DIB_DIF_MANUFACTURER_SPECIFIC
+        || record.drh.dib.dif == MBUS_DIB_DIF_MORE_RECORDS_FOLLOW
+    {
+        return;
+    }
+
+    let vib = {
+        let v = &record.drh.vib;
+        let mut infos = Vec::with_capacity(1 + v.nvife);
+        if let Some(primary) = crate::payload::vif_maps::lookup_primary_vif(v.vif) {
+            infos.push(primary);
+        }
+        infos
+    };
+    let (unit, exponent, quantity) = match crate::payload::vif::normalize_vib(&vib) {
+        Ok(t) => t,
+        // Unknown VIF: leave the raw bytes for the caller rather than inventing a unit.
+        Err(_) => (String::new(), 1.0, String::new()),
+    };
+
+    let data = &record.data[..record.data_len];
+    let coding = record.drh.dib.dif & MBUS_DATA_RECORD_DIF_MASK_DATA;
+    let raw: Option<f64> = match coding {
+        0x00 => Some(0.0),                                      // no data
+        0x01..=0x04 | 0x06 | 0x07 => Some(int_le(data) as f64), // 8/16/24/32/48/64-bit int
+        0x05 => (data.len() >= 4)
+            .then(|| f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64),
+        0x09..=0x0C | 0x0E => bcd_le(data), // 2/4/6/8/12-digit BCD
+        0x0D => {
+            // Variable length (LVAR): text, kept verbatim.
+            record.is_numeric = false;
+            record.value = MBusRecordValue::String(
+                String::from_utf8_lossy(&data.iter().copied().rev().collect::<Vec<_>>())
+                    .into_owned(),
+            );
+            record.unit = unit;
+            record.quantity = quantity;
+            return;
+        }
+        _ => None, // selection for readout / special functions
+    };
+
+    if let Some(raw) = raw {
+        record.is_numeric = true;
+        record.value = MBusRecordValue::Numeric(raw * exponent);
+    }
+    record.unit = unit;
+    record.quantity = quantity;
+}
+
+/// Little-endian two's-complement integer of 1..=8 bytes, as M-Bus encodes them.
+fn int_le(data: &[u8]) -> i64 {
+    if data.is_empty() {
+        return 0;
+    }
+    let mut v: i64 = 0;
+    for (i, b) in data.iter().enumerate() {
+        v |= (*b as i64) << (8 * i);
+    }
+    // Sign-extend from the most significant byte present.
+    let bits = 8 * data.len() as u32;
+    if bits < 64 && (v >> (bits - 1)) & 1 == 1 {
+        v |= -1i64 << bits;
+    }
+    v
+}
+
+/// Little-endian packed BCD, as M-Bus encodes it. The most significant nibble of the
+/// last byte holds the sign (0xF = negative). Returns `None` for non-BCD nibbles.
+fn bcd_le(data: &[u8]) -> Option<f64> {
+    if data.is_empty() {
+        return None;
+    }
+    let (last, rest) = data.split_last()?;
+    let negative = (last >> 4) == 0x0F;
+    let mut digits = String::new();
+    if !negative {
+        let hi = last >> 4;
+        if hi > 9 {
+            return None;
+        }
+        digits.push(char::from_digit(hi as u32, 10)?);
+    }
+    let lo = last & 0x0F;
+    if lo > 9 {
+        return None;
+    }
+    digits.push(char::from_digit(lo as u32, 10)?);
+    for b in rest.iter().rev() {
+        for nib in [b >> 4, b & 0x0F] {
+            if nib > 9 {
+                return None;
+            }
+            digits.push(char::from_digit(nib as u32, 10)?);
+        }
+    }
+    let magnitude: f64 = digits.parse().ok()?;
+    Some(if negative { -magnitude } else { magnitude })
 }
 
 /// Parse one variable-data record. See [`parse_variable_record_consumed`] when you need the
@@ -628,6 +737,57 @@ fn parse_variable_data_length(input: u8) -> Result<usize, MBusError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Parsing a record header is not the same as reading a meter: these pin the
+    /// data-byte decoding and VIF scaling that turn a DRH plus bytes into a value.
+    #[test]
+    fn decodes_32bit_integer_with_vif_exponent() {
+        // DIF 0x04 (32-bit int), VIF 0x13 (volume, 10^-3 m3), raw 25555 -> 25.555 m3.
+        let (rec, used) = parse_variable_record_consumed(&[0x04, 0x13, 0xD3, 0x63, 0x00, 0x00])
+            .expect("record parses");
+        assert_eq!(used, 6);
+        match rec.value {
+            MBusRecordValue::Numeric(v) => assert!((v - 25.555).abs() < 1e-9, "got {v}"),
+            other => panic!("expected numeric, got {other:?}"),
+        }
+        assert_eq!(rec.unit, "m^3");
+    }
+
+    #[test]
+    fn decodes_8bit_integer_temperature() {
+        // DIF 0x01 (8-bit int), VIF 0x5B (flow temperature, degrees C), raw 18.
+        let (rec, _) = parse_variable_record_consumed(&[0x01, 0x5B, 0x12]).unwrap();
+        match rec.value {
+            MBusRecordValue::Numeric(v) => assert!((v - 18.0).abs() < 1e-9, "got {v}"),
+            other => panic!("expected numeric, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_packed_bcd_including_negative_sign_nibble() {
+        // DIF 0x0C (8-digit BCD), VIF 0x13: 0x12345678 little-endian BCD = 12345678.
+        let (rec, _) =
+            parse_variable_record_consumed(&[0x0C, 0x13, 0x78, 0x56, 0x34, 0x12]).unwrap();
+        match rec.value {
+            MBusRecordValue::Numeric(v) => assert!((v - 12345.678).abs() < 1e-9, "got {v}"),
+            other => panic!("expected numeric, got {other:?}"),
+        }
+        // 0xF in the top nibble of the last byte marks a negative magnitude.
+        assert_eq!(super::bcd_le(&[0x34, 0x12]), Some(1234.0));
+        assert_eq!(super::bcd_le(&[0x34, 0xF2]), Some(-234.0));
+        assert_eq!(
+            super::bcd_le(&[0x3A, 0x12]),
+            None,
+            "non-BCD nibble rejected"
+        );
+    }
+
+    #[test]
+    fn sign_extends_negative_integers() {
+        assert_eq!(super::int_le(&[0xFF]), -1);
+        assert_eq!(super::int_le(&[0x00, 0x80]), -32768);
+        assert_eq!(super::int_le(&[0xD3, 0x63, 0x00, 0x00]), 25555);
+    }
     use super::*;
     use crate::error::MBusError;
     use std::time::SystemTime;

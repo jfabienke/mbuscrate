@@ -400,7 +400,7 @@ impl Rfm69Driver {
             ("TESTDAGC", REG_TESTDAGC),
         ] {
             let v = self.read_register(reg).await.unwrap_or(0xEE);
-            info!("REGDUMP {name}(0x{reg:02X}) = 0x{v:02X}");
+            debug!("REGDUMP {name}(0x{reg:02X}) = 0x{v:02X}");
         }
 
         info!("wM-Bus configuration completed");
@@ -579,6 +579,8 @@ impl Rfm69Driver {
         info!("Interrupt handler task started");
 
         let mut last_status = Instant::now();
+        // Last reported operating mode, so only transitions are logged at `info`.
+        let mut last_opmode: Option<u8> = None;
         // Track the STRONGEST signal seen per window: RSSI reg is 2×(-dBm), so the
         // smallest register value = strongest signal. Sampling every loop (~1kHz)
         // catches the few-ms transmission bursts a 1Hz sample would miss.
@@ -600,6 +602,11 @@ impl Rfm69Driver {
             // Periodic radio-status diagnostic, rate-limited by wall time. A `tick % N`
             // cadence breaks when the idle loop spins faster than expected — it flooded the
             // log at ~47 lines/s; wall-time gating keeps it to ~1/s regardless of loop rate.
+            //
+            // This is a library on a gateway's hot path, so the per-second sample is `debug`
+            // (86k lines/day at `info` buried the events that matter). An operating-mode
+            // *transition* is a real event — losing RX is exactly what the watchdog hunts —
+            // so that is reported at `info` regardless of level.
             if last_status.elapsed() >= Duration::from_secs(1) {
                 last_status = Instant::now();
                 let op = Self::read_register_static(&spi, REG_OPMODE)
@@ -612,7 +619,16 @@ impl Rfm69Driver {
                     .await
                     .unwrap_or(0);
                 let buflen = packet_buffer.lock().unwrap().len();
-                info!(
+                if Some(op) != last_opmode {
+                    match last_opmode {
+                        Some(prev) => info!(
+                            "RFM69 opmode changed 0x{prev:02X} -> 0x{op:02X} (irq1=0x{f1:02X} irq2=0x{f2:02X})"
+                        ),
+                        None => info!("RFM69 opmode 0x{op:02X} (irq1=0x{f1:02X} irq2=0x{f2:02X})"),
+                    }
+                    last_opmode = Some(op);
+                }
+                debug!(
                     "RFM69 status: opmode=0x{op:02X} irq1=0x{f1:02X} irq2=0x{f2:02X} peak_rssi=-{}dBm buf={buflen}",
                     peak_rssi_reg / 2
                 );
@@ -754,7 +770,10 @@ impl Rfm69Driver {
 
         if complete {
             let packet: Vec<u8> = buf[..size as usize].to_vec();
-            info!(
+            // Raw capture line: `debug`, because the application above this layer logs the
+            // decoded frame at `info`. Run the gateway with RUST_LOG=debug to recover the
+            // on-air hex (that is how the test vectors in tests/wmbus_frames/ were captured).
+            debug!(
                 "FRAME afc={afc_hz}Hz len={} {}",
                 packet.len(),
                 hex::encode(&packet)
