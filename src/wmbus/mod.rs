@@ -40,7 +40,7 @@ pub use radio::rfm69::{Rfm69Config, Rfm69Driver, Rfm69Error, Rfm69Mode};
 pub use compact_cache::{CacheStats, CachedDeviceInfo, CompactFrameCache};
 pub use compact_frame::{CompactError, CompactLayoutCache, RecordLayout};
 #[cfg(feature = "crypto")]
-pub use crypto::{AesKey, CryptoError, DeviceInfo, EncryptionMode, WMBusCrypto};
+pub use crypto::{AesKey, CryptoError, DeviceInfo, EncryptionMode, KeyMode, WMBusCrypto};
 #[cfg(feature = "crypto")]
 pub use ell::{decrypt_ell_payload, DecryptedEll, EllError, EllHeader, EllSecurity};
 pub use encryption::WMBusEncryption;

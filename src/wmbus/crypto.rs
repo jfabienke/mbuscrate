@@ -153,12 +153,24 @@ impl AesKey {
         &self.key
     }
 
-    /// Derive key for specific device (per OMS specification)
+    /// Mix a device id and manufacturer into a key by XOR.
+    ///
+    /// **This is not a key derivation function and not the OMS scheme**, despite what
+    /// earlier revisions of this code claimed. It is XOR, so it provides none of the
+    /// one-wayness a KDF must have: an attacker who learns one device key recovers the
+    /// master key immediately, and with it every other device's key.
+    ///
+    /// Real meters ship with a per-device key, so the correct usage is to supply that
+    /// key directly ([`KeyMode::Direct`], the default). Proper OMS master-key
+    /// derivation is AES-CMAC based and is deliberately not implemented here rather
+    /// than guessed at: it requires the exact input encoding from OMS Vol. 2 Annex A,
+    /// and a plausible-looking wrong KDF is worse than an absent one.
+    #[deprecated(
+        note = "not a KDF: XOR is reversible and leaks the master key. Supply the device key directly."
+    )]
     pub fn derive_device_key(&self, device_id: u32, manufacturer: u16) -> Self {
-        // OMS key derivation: XOR master key with device-specific pattern
         let mut derived_key = self.key;
 
-        // Incorporate device ID into key (OMS 7.2.4.2)
         let device_bytes = device_id.to_le_bytes();
         for i in 0..4 {
             derived_key[i] ^= device_bytes[i];
@@ -187,9 +199,23 @@ pub struct DeviceInfo {
     pub access_number: Option<u64>,
 }
 
+/// How the key handed to [`WMBusCrypto`] relates to the key a frame is encrypted with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyMode {
+    /// The supplied key *is* the device key — the normal case, because meters ship
+    /// with a per-device key. This is the default.
+    #[default]
+    Direct,
+    /// Apply the deprecated XOR mixing to the supplied master key. Retained only for
+    /// compatibility with data produced by earlier revisions; see
+    /// [`AesKey::derive_device_key`].
+    DerivedFromMaster,
+}
+
 /// Enhanced wM-Bus cryptographic operations
 pub struct WMBusCrypto {
     master_key: AesKey,
+    key_mode: KeyMode,
     #[allow(dead_code)]
     error_throttle: logging::LogThrottle,
     /// Configuration flags
@@ -203,11 +229,18 @@ impl WMBusCrypto {
     pub fn new(master_key: AesKey) -> Self {
         Self {
             master_key,
+            key_mode: KeyMode::Direct,
             error_throttle: logging::LogThrottle::new(1000, 3), // 3 errors per second
             add_crc_mode9: false,                               // Default: no CRC for compatibility
             verify_crc_mode9: false,
             full_tag_compatibility: true, // Default: use 16-byte tags for testing
         }
+    }
+
+    /// Select how the supplied key relates to the frame key (default
+    /// [`KeyMode::Direct`]).
+    pub fn set_key_mode(&mut self, mode: KeyMode) {
+        self.key_mode = mode;
     }
 
     /// Enable CRC addition for Mode 9 encryption
@@ -282,17 +315,30 @@ impl WMBusCrypto {
         self.decrypt_frame(encrypted_frame, device_info)
     }
 
-    /// Decrypt wM-Bus frame with automatic mode detection, deriving the device key from the
-    /// master key (OMS key derivation).
+    /// Decrypt a wM-Bus frame with automatic mode detection.
+    ///
+    /// The key is used exactly as supplied ([`KeyMode::Direct`], the default), which is
+    /// what a per-device provisioned key requires. Under
+    /// [`KeyMode::DerivedFromMaster`] the deprecated XOR mixing is applied instead —
+    /// see [`AesKey::derive_device_key`] for why that is not a real KDF.
     pub fn decrypt_frame(
         &mut self,
         encrypted_frame: &[u8],
         device_info: &DeviceInfo,
     ) -> Result<Vec<u8>, CryptoError> {
-        let device_key = self
-            .master_key
-            .derive_device_key(device_info.device_id, device_info.manufacturer);
+        let device_key = self.effective_key(device_info);
         self.decrypt_frame_with_effective_key(encrypted_frame, device_info, &device_key)
+    }
+
+    /// The key to use for a device under the configured [`KeyMode`].
+    fn effective_key(&self, device_info: &DeviceInfo) -> AesKey {
+        match self.key_mode {
+            KeyMode::Direct => self.master_key.clone(),
+            #[allow(deprecated)]
+            KeyMode::DerivedFromMaster => self
+                .master_key
+                .derive_device_key(device_info.device_id, device_info.manufacturer),
+        }
     }
 
     /// Decrypt a wM-Bus frame using an explicit **effective** device key, performing NO
@@ -375,10 +421,7 @@ impl WMBusCrypto {
 
         let plaintext_payload = &plaintext_frame[payload_start..];
 
-        // Derive device-specific key
-        let device_key = self
-            .master_key
-            .derive_device_key(device_info.device_id, device_info.manufacturer);
+        let device_key = self.effective_key(device_info);
 
         // Encrypt based on mode
         let encrypted_payload = match mode {
@@ -1220,12 +1263,14 @@ mod tests {
     #[test]
     fn test_key_derivation() {
         let master_key = AesKey::from_bytes(&[0; 16]).unwrap();
+        #[allow(deprecated)]
         let device_key = master_key.derive_device_key(0x12345678, 0xABCD);
 
         // Derived key should be different from master key
         assert_ne!(device_key.as_bytes(), master_key.as_bytes());
 
         // Same derivation should produce same key
+        #[allow(deprecated)]
         let device_key2 = master_key.derive_device_key(0x12345678, 0xABCD);
         assert_eq!(device_key.as_bytes(), device_key2.as_bytes());
     }
@@ -1608,6 +1653,7 @@ mod tests {
             access_number: None,
         };
         // The device key `decrypt_frame` derives internally.
+        #[allow(deprecated)]
         let derived = master_key.derive_device_key(device_info.device_id, device_info.manufacturer);
         // XOR-based derivation must actually change the key, or the test proves nothing.
         assert_ne!(derived.as_bytes(), master_key.as_bytes());
@@ -1625,25 +1671,35 @@ mod tests {
             .encrypt_frame(&test_frame, &device_info, EncryptionMode::Mode5Ctr)
             .unwrap();
 
-        // Baseline: the standard path derives the device key internally.
+        // Default is KeyMode::Direct: the supplied key is the device key, so
+        // decrypt_frame must use it verbatim — that is what a provisioned meter key
+        // requires, and re-deriving it silently would make correct keys undecryptable.
         let via_decrypt = crypto.decrypt_frame(&encrypted, &device_info).unwrap();
-        // Supplying the derived device key as the effective key must reproduce the baseline
-        // exactly — i.e. the effective-key path does NOT derive a second time.
-        let via_derived = crypto
-            .decrypt_frame_with_effective_key(&encrypted, &device_info, &derived)
-            .unwrap();
-        assert_eq!(
-            via_derived, via_decrypt,
-            "effective key == derived device key must match decrypt_frame (no double-derive)"
-        );
-        // Supplying the raw master key must NOT reproduce it: proof the key is used as-is
-        // rather than re-derived (re-deriving the master would have matched the baseline).
         let via_master = crypto
             .decrypt_frame_with_effective_key(&encrypted, &device_info, &master_key)
             .unwrap();
-        assert_ne!(
+        assert_eq!(
             via_master, via_decrypt,
-            "raw master key used as-is must differ from the derived device key"
+            "KeyMode::Direct must use the supplied key as-is"
+        );
+
+        // Under the legacy mode the deprecated XOR mixing is applied instead, and the
+        // effective-key path with that same mixed key reproduces it — i.e. the
+        // effective-key path never derives a second time.
+        let mut legacy = WMBusCrypto::new(master_key.clone());
+        legacy.set_key_mode(KeyMode::DerivedFromMaster);
+        let legacy_encrypted = legacy
+            .encrypt_frame(&test_frame, &device_info, EncryptionMode::Mode5Ctr)
+            .unwrap();
+        let via_legacy = legacy
+            .decrypt_frame(&legacy_encrypted, &device_info)
+            .unwrap();
+        let via_derived = legacy
+            .decrypt_frame_with_effective_key(&legacy_encrypted, &device_info, &derived)
+            .unwrap();
+        assert_eq!(
+            via_derived, via_legacy,
+            "effective key == derived device key must match (no double-derive)"
         );
     }
 }
