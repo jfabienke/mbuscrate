@@ -426,6 +426,26 @@ The Device Manager's constant application (§1.1 case 2) and the session/commiss
 round-trip (§1.1 case 4) are separate deliverables in their own repos, tracked there;
 this migration covers only the crate-side capability each depends on.
 
+### 7.1 Cross-repo dependencies and the enabling seam
+
+Two clarifications about how this lands across repos:
+
+- **`DeviceIdentity.profile` is net-new infrastructure**, not a refactor. Today's
+  gateway receives no device profile from the backend — the Device Manager → gateway
+  push in step 4 does not exist yet. It is behaviour-preserving while the channel is
+  empty (decode simply stays less specific and falls back to raw), so the crate side can
+  land ahead of the backend side. But it is the **seam that makes decisions 1 and 3
+  real rather than notional**: without a profile arriving, the KAM status
+  interpretation (D2) cannot be model-scoped and must emit the raw bitmask only. Model-
+  specific status decoding is therefore gated on this channel existing end to end, not
+  on the crate code alone.
+- **The boundary is a contract, not just a split.** The crate must emit enough for the
+  Device Manager to do its half: raw typed values (for constant application, case 2),
+  decoded identity bytes (for the catalog lookup that produces the profile, case 3), and
+  which quirks and status interpretations fired (case 1, P5). That output shape is the
+  interface between the repos; changing it is a cross-repo change, and it should be
+  versioned as one.
+
 ## 8. Out of scope
 
 The generic core is not up for renegotiation here: ELL, compact-frame expansion, the
