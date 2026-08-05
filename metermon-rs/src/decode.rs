@@ -11,6 +11,7 @@
 
 use mbus_rs::id_to_manufacturer;
 use mbus_rs::payload::record::{parse_variable_record_consumed, MBusRecord, MBusRecordValue};
+use mbus_rs::wmbus::compact_frame::CompactLayoutCache;
 use mbus_rs::wmbus::ell;
 use mbus_rs::wmbus::frame_decode::FrameType;
 use mbus_rs::wmbus::mode_c::decode_mode_c;
@@ -23,6 +24,20 @@ use crate::keystore::KeyStore;
 /// Decode one normalized wM-Bus frame into a JSON object. Never panics; failures are
 /// reported as fields so the A/B diff stays aligned.
 pub fn decode_frame(raw: &[u8], cfg: &Config, keys: &KeyStore) -> Value {
+    // Stateless convenience wrapper: a throwaway cache cannot expand compact frames,
+    // since that needs a full frame seen earlier. Long-running callers should keep a
+    // cache and use [`decode_frame_with_cache`].
+    decode_frame_with_cache(raw, cfg, keys, &mut CompactLayoutCache::new())
+}
+
+/// Decode one frame, using (and updating) a compact-frame layout cache so compact
+/// frames from a meter whose full frame was seen earlier decode to real records.
+pub fn decode_frame_with_cache(
+    raw: &[u8],
+    cfg: &Config,
+    keys: &KeyStore,
+    cache: &mut CompactLayoutCache,
+) -> Value {
     let frame = match decode_mode_c(raw) {
         Ok(f) => f,
         Err(e) => {
@@ -68,7 +83,7 @@ pub fn decode_frame(raw: &[u8], cfg: &Config, keys: &KeyStore) -> Value {
         // No TPL header — plaintext records follow directly.
         0x78 => {
             obj.insert("encrypted".into(), json!(false));
-            insert_records(obj, after_ci);
+            decode_transport(obj, ci, after_ci, cache, meterid, frame.crc_ok);
         }
         // Short TPL header (OMS 7.2.4): ACC, STS, Configuration Word, then payload.
         0x7A => {
@@ -100,11 +115,8 @@ pub fn decode_frame(raw: &[u8], cfg: &Config, keys: &KeyStore) -> Value {
         }
         // Compact frame — records keyed by a format signature learned elsewhere.
         0x79 => {
-            if after_ci.len() >= 2 {
-                let sig = u16::from_le_bytes([after_ci[0], after_ci[1]]);
-                obj.insert("signature".into(), json!(format!("0x{sig:04X}")));
-            }
-            obj.insert("compact".into(), json!(true));
+            obj.insert("encrypted".into(), json!(false));
+            decode_transport(obj, ci, after_ci, cache, meterid, frame.crc_ok);
         }
         // Extended Link Layer. Encrypted variants are decrypted in place when a key
         // is held, and the recovered transport payload is dispatched exactly like an
@@ -126,7 +138,10 @@ pub fn decode_frame(raw: &[u8], cfg: &Config, keys: &KeyStore) -> Value {
             obj.insert("encrypted".into(), json!(header.is_encrypted()));
 
             if !header.is_encrypted() {
-                decode_transport(obj, &frame.payload[header.header_len..]);
+                let inner = &frame.payload[header.header_len..];
+                if let Some((&tci, rest)) = inner.split_first() {
+                    decode_transport(obj, tci, rest, cache, meterid, frame.crc_ok);
+                }
                 return out;
             }
             let Some(hexkey) = keys.get(meterid) else {
@@ -147,7 +162,9 @@ pub fn decode_frame(raw: &[u8], cfg: &Config, keys: &KeyStore) -> Value {
                         "ell_leading_field".into(),
                         json!(hex::encode(dec.leading_field)),
                     );
-                    decode_transport(obj, &dec.payload);
+                    if let Some((&tci, rest)) = dec.payload.split_first() {
+                        decode_transport(obj, tci, rest, cache, meterid, frame.crc_ok);
+                    }
                 }
                 Err(e) => {
                     obj.insert("decrypted".into(), json!(false));
@@ -165,30 +182,58 @@ pub fn decode_frame(raw: &[u8], cfg: &Config, keys: &KeyStore) -> Value {
     out
 }
 
-/// Dispatch a transport-layer payload (starting at its own CI byte) recovered from an
-/// ELL header — decrypted or not. Kamstrup emits `0x78` (full frame) and `0x79`
-/// (compact frame); anything else is reported rather than silently dropped.
-fn decode_transport(obj: &mut serde_json::Map<String, Value>, payload: &[u8]) {
-    let Some((&tpl_ci, rest)) = payload.split_first() else {
-        obj.insert("tpl_error".into(), json!("empty transport payload"));
-        return;
-    };
+/// Dispatch a transport-layer payload by its CI byte, learning record layouts from
+/// full frames and expanding compact frames with them.
+fn decode_transport(
+    obj: &mut serde_json::Map<String, Value>,
+    tpl_ci: u8,
+    body: &[u8],
+    cache: &mut CompactLayoutCache,
+    meter: u32,
+    crc_ok: bool,
+) {
     obj.insert("tpl_ci".into(), json!(format!("0x{tpl_ci:02X}")));
     match tpl_ci {
-        0x78 => insert_records(obj, rest),
+        // Full frame: the records are self-describing, so remember their layout for the
+        // compact frames that follow.
+        0x78 => {
+            // Only learn from a frame whose CRC validated: a layout taken from
+            // corrupted bytes would be applied to every later compact frame, turning
+            // one bad frame into a stream of confidently wrong readings.
+            if crc_ok {
+                match cache.learn(meter, body) {
+                    Ok(sig) => {
+                        obj.insert("signature".into(), json!(format!("0x{sig:04X}")));
+                    }
+                    Err(e) => {
+                        obj.insert("layout_error".into(), json!(e.to_string()));
+                    }
+                }
+            }
+            insert_records(obj, body);
+        }
+        // Compact frame: headers omitted; re-interleave them from the cached layout.
         0x79 => {
-            // Compact frame: 2-byte format signature, 2-byte full-frame signature, then
-            // bare values whose DIF/VIF layout lives in a previously-seen full frame.
-            if rest.len() >= 4 {
+            obj.insert("compact".into(), json!(true));
+            if body.len() >= 2 {
                 obj.insert(
                     "signature".into(),
-                    json!(format!("0x{:04X}", u16::from_le_bytes([rest[0], rest[1]]))),
+                    json!(format!("0x{:04X}", u16::from_le_bytes([body[0], body[1]]))),
                 );
             }
-            obj.insert("compact".into(), json!(true));
-            obj.insert("payload_hex".into(), json!(hex::encode(rest)));
+            match cache.expand_compact(meter, body) {
+                Ok(expanded) => {
+                    obj.insert("expanded".into(), json!(true));
+                    insert_records(obj, &expanded);
+                }
+                Err(e) => {
+                    // Typically "no full frame seen yet" — report it rather than guess.
+                    obj.insert("compact_error".into(), json!(e.to_string()));
+                    obj.insert("payload_hex".into(), json!(hex::encode(body)));
+                }
+            }
         }
-        _ => insert_records(obj, rest),
+        _ => insert_records(obj, body),
     }
 }
 

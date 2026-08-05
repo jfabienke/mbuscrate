@@ -6,6 +6,7 @@
 //!
 pub mod block;
 pub mod compact_cache;
+pub mod compact_frame;
 pub mod crc;
 #[cfg(feature = "crypto")]
 pub mod crypto;
@@ -37,6 +38,7 @@ pub use radio::rfm69::{Rfm69Config, Rfm69Driver, Rfm69Error, Rfm69Mode};
 
 // Re-export the necessary types and functions from the submodules
 pub use compact_cache::{CacheStats, CachedDeviceInfo, CompactFrameCache};
+pub use compact_frame::{CompactError, CompactLayoutCache, RecordLayout};
 #[cfg(feature = "crypto")]
 pub use crypto::{AesKey, CryptoError, DeviceInfo, EncryptionMode, WMBusCrypto};
 #[cfg(feature = "crypto")]

@@ -580,6 +580,9 @@ fn run_monitor(
         let mut radio_recoveries: u32 = 0;
         // CRC-failed frames with unknown (untrustworthy) ids, contained by the store.
         let mut contained: u64 = 0;
+        // Record layouts learned from full frames, so the compact frames that make up
+        // most of a Kamstrup meter's traffic decode to readings rather than blobs.
+        let mut layouts = mbus_rs::wmbus::compact_frame::CompactLayoutCache::new();
 
         loop {
             if shutdown.load(Ordering::SeqCst) {
@@ -589,7 +592,7 @@ fn run_monitor(
                 last_frame_at = Some(Instant::now()); // any received frame proves RX is alive
                 let (v, has_key) = {
                     let k = keys.lock().unwrap();
-                    let v = decode::decode_frame(&frame, &cfg, &k);
+                    let v = decode::decode_frame_with_cache(&frame, &cfg, &k, &mut layouts);
                     let meter = v["meterid"].as_u64().unwrap_or(0) as u32;
                     (v, k.get(meter).is_some())
                 };
@@ -597,6 +600,10 @@ fn run_monitor(
                 let crc_ok = v["crc_ok"].as_bool().unwrap_or(false);
                 let ft = v["frame_type"].as_str().unwrap_or("?").to_string();
                 let ci = v["ci"].as_str().unwrap_or("-").to_string();
+                // Human-readable summary of the decoded records (e.g. "25.555 m^3,
+                // 18 C"). Only from a CRC-valid frame: a corrupted frame's values are
+                // not a reading, however cleanly they happen to parse.
+                let reading = crc_ok.then(|| summarize_records(&v)).flatten();
 
                 // Persist to the device manager (info + significant/sampled events). The
                 // store decides attribution: a CRC-failed frame with an unknown id is
@@ -615,7 +622,7 @@ fn run_monitor(
                     crc_ok,
                     rssi,
                     has_key,
-                    reading: None, // populated once ELL decrypt lands (Phase 1.4b)
+                    reading: reading.clone(),
                     mode: radio.mode().to_string(),
                     freq_offset_hz: freq_offset,
                 };
@@ -641,9 +648,14 @@ fn run_monitor(
                     contained += 1;
                 }
 
-                log::info!(
-                    "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz"
-                );
+                match &reading {
+                    Some(r) => log::info!(
+                        "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz reading=[{r}]"
+                    ),
+                    None => log::info!(
+                        "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz"
+                    ),
+                }
             } else {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -773,6 +785,32 @@ fn run_monitor(
         log::info!("metermon-rs monitor stopped cleanly");
         Ok(())
     })
+}
+
+/// Condense a decoded frame's records into a short human-readable reading, e.g.
+/// `"25.555 m^3, 18 C"`. Returns `None` when the frame carried no decoded records
+/// (not plaintext, or encrypted without a usable key).
+#[cfg(feature = "radio")]
+fn summarize_records(v: &serde_json::Value) -> Option<String> {
+    let records = v["records"].as_array()?;
+    let parts: Vec<String> = records
+        .iter()
+        .filter_map(|r| {
+            let value = r.get("value")?;
+            let unit = r.get("unit").and_then(|u| u.as_str()).unwrap_or("");
+            let text = match value {
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::String(s) => s.clone(),
+                _ => return None,
+            };
+            Some(if unit.is_empty() {
+                text
+            } else {
+                format!("{text} {unit}")
+            })
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 #[cfg(feature = "radio")]
@@ -985,8 +1023,11 @@ fn run_replay(capture: &str, config_path: &str, keys_path: Option<&str>) -> Resu
     }
 
     let mut src = FileReplaySource::from_path(capture)?;
+    // A capture file is a time-ordered stream, so layouts learned from full frames
+    // apply to the compact frames that follow — same as live.
+    let mut layouts = mbus_rs::wmbus::compact_frame::CompactLayoutCache::new();
     while let Some(frame) = src.next_frame()? {
-        let decoded = decode::decode_frame(&frame, &cfg, &keys);
+        let decoded = decode::decode_frame_with_cache(&frame, &cfg, &keys, &mut layouts);
         println!("{}", serde_json::to_string(&decoded)?);
     }
     Ok(())
