@@ -399,6 +399,42 @@ model in `DeviceIdentity.profile` — supplied by the Device Manager (§1.1 case
 bitmask only. Upgrade to `Verified` only from one of our own captures with a correlated
 optical read of register `0x0063`.
 
+**D3 — wmbusmeters is a differential oracle, not a source to transcribe.**
+The upstream `wmbusmeters` project (GPL-3.0-or-later) has mature Kamstrup decoders and
+is a valuable reference. Because this crate is MIT, the boundary is strict and the use
+is narrow:
+
+- **Oracle only.** We run a pinned `wmbusmeters` build on *our own* captured telegrams
+  and keys and compare its normalized output against ours. Comparing outputs copies
+  nothing — it carries no license obligation. This is the sanctioned use.
+- **Tables come from primary sources, never from the driver.** VIF/unit meanings are
+  EN 13757, not wmbusmeters' work, so reproducing them is reproducing the standard. But
+  the vendor status-bit → condition tables are the driver's own compiled work and the
+  legally riskiest thing to lift; those are derived from Kamstrup's own documentation
+  (the MULTICAL technical descriptions) plus our decrypted captures, and validated
+  against the oracle — not read out of the XMQ.
+- **Vectors are ours.** A real captured telegram is a fact, but to sidestep any question
+  of upstream fixture provenance, committed regression vectors are our own captures
+  (keys never committed). This is also how the still-open Phase 1.2 test-vector work
+  gets done.
+
+Two consequences that scope the immediate work:
+
+- **Water first, heat later.** `kamheat.xmq` covers *heat* meters (302/403/602/603/803).
+  Our meters that decrypt today — 74644444 and 63398862 — are Multical 21 *water* meters,
+  a different driver family, and their status record is `02 FF 20` where heat is
+  `02 FF 22` (same manufacturer, different VIFE — exactly the model-specificity D2
+  predicts, so the tables are not interchangeable). The heat meter we own (80504381) is
+  the kamheat target but we hold no key, so heat-meter work is deferred until that key
+  is available.
+- **The Multical 21 status *table* is currently evidence-blocked.** Every valid capture
+  shows INFO = 0 (no fault), and the repo holds no primary-source Multical 21 water bit
+  table (only the 602 heat table, in `MULTICAL_VENDOR_EVENTS.md`). So the crate exposes
+  the raw INFO bitmask now and ships **no** named-condition mapping until a
+  primary-source table or a fault-correlated capture exists. Inventing the mapping from
+  the heat table would violate P4. The oracle harness is precisely what will let us
+  build and confirm the table safely when the evidence arrives.
+
 ## 7. Migration
 
 Each step is independently shippable and behaviour-preserving unless stated.
