@@ -203,6 +203,15 @@ pub struct VendorScope {
 
 Most specific match wins; manufacturer-wide is the fallback, not the default.
 
+**Discriminators the frame does not carry.** Some behaviour varies by firmware or
+configuration code — Kamstrup's INFO bit tables differ across MULTICAL 602/66C/III/403
+(`docs/MULTICAL_VENDOR_EVENTS.md`), and neither firmware nor config code appears in the
+M/A link header. When the discriminator a correct interpretation needs is not derivable
+from the frame, the entry must **fail safe to raw** (P3) rather than guess a model:
+either the caller supplies the device profile out of band, or the value is emitted
+undecoded. A vendor entry may never assume a model it cannot prove from the frame or an
+explicit binding.
+
 ### 4.4 Provenance is part of the entry
 
 Both layers carry provenance, so a reader can distinguish a behaviour verified against
@@ -316,16 +325,25 @@ one ELL-II sample from a non-Kamstrup device.** If that sample carries a valid C
 its payload, the generic path starts validating and KAM gains
 `kam-ell-leading-field-not-crc`.
 
-**D2 — KAM info codes ship as a provisional Layer 1 extension.**
-Implement now, decoding the INFO bitmask, with
-`Evidence::Documented { source: "MULTICAL 602 register map" }` and
-`Status::Provisional`, surfaced as provisional in the output. Rationale: it is strictly
-better than the current `0.0` (which violates P3), it cites a source rather than
-inventing meaning, and the manifest makes the uncertainty legible. Our meter is a
-Multical 21 while the documented bitmask is from a 602, so the semantics are upgraded
-to `Verified` only when decoded from one of our own captures. The raw info-code bytes
-are always emitted alongside the provisional interpretation, so P3 holds even if the
-Multical 21 semantics turn out to differ.
+**D2 — KAM info codes ship as a provisional status-bit interpretation, not a
+manufacturer-VIF extension.**
+`docs/MULTICAL_VENDOR_EVENTS.md` reshapes this. Kamstrup's own 403/603/803 profile
+documentation identifies register `369` as `Info bits` carried in ordinary C1
+datagrams — i.e. the INFO field very likely arrives as a **standard OMS/M-Bus data
+record**, not a proprietary CI payload. If so, the *transport* is Layer 0 (the generic
+record parser reads the bytes), and only the *bit meanings* are vendor knowledge. That
+makes this a `decode_status_bits`-style interpretation keyed to the model, not a
+`decode_manufacturer_vif` hook — a materially different implementation than §5 first
+assumed, and one to confirm against a decoded capture before building.
+
+Either way it ships **provisional**: decode the INFO bitmask with
+`Evidence::Documented { source: "MULTICAL 602 register map" }` and `Status::Provisional`,
+surfaced as provisional in the output, with the raw bitmask value always emitted
+alongside the interpretation so P3 holds even if the semantics differ. The evidence
+document is explicit that the bit tables differ across MULTICAL 602, 66C, III and
+403/603/803, so the interpretation is scoped by model and **must not** be applied
+Kamstrup-wide (P4). Upgrade to `Verified` only from one of our own captures with a
+correlated optical read of register `0x0063`.
 
 ## 7. Migration
 
@@ -353,3 +371,12 @@ device credentials (e.g. the Zenner LoRa HCA) belong to the radio stack, not to 
 layering. This document does not add a second registry for wired M-Bus; the same
 binding applies to both transports, since the manufacturer is a property of the device,
 not the link.
+
+**A different protocol, not a quirk.** `docs/MULTICAL_VENDOR_EVENTS.md` also documents
+Kamstrup's KMP logger commands (`A0`–`A3`, `9B`, `9C`), the 50-entry INFO history, and
+the event/error-hour counters. These are the **optical/wired KMP protocol**, and the
+evidence document states there is no proof the periodic wM-Bus telegram carries any of
+them. They are not vendor extensions to wM-Bus; they are a separate protocol that would
+warrant its own adapter, and are out of scope for the vendor layers entirely. Only the
+current INFO *bitmask*, if it appears in the wireless record stream, is in scope here
+(D2).
