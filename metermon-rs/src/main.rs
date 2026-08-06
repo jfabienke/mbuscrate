@@ -244,6 +244,9 @@ enum Cmd {
         /// Carrier frequency in Hz.
         #[arg(long, default_value_t = 868_950_000)]
         freq_hz: u32,
+        /// Write received frames as hex lines to this file (replay-compatible).
+        #[arg(long)]
+        capture: Option<String>,
         #[arg(long, default_value_t = 120)]
         seconds: u64,
     },
@@ -342,6 +345,7 @@ fn main() -> Result<()> {
             preamble_detect_bits,
             sync_hex,
             freq_hz,
+            capture,
             seconds,
         } => run_sx1262_rx(
             &spidev,
@@ -356,6 +360,7 @@ fn main() -> Result<()> {
             preamble_detect_bits,
             sync_hex,
             freq_hz,
+            capture,
             seconds,
         ),
         Cmd::MockBackend {
@@ -527,6 +532,11 @@ fn run_monitor(
         .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
         .and_then(|d| d.spidev.clone())
         .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
+    let radio_driver = cfg
+        .devices
+        .values()
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
+        .and_then(|d| d.driver.clone());
 
     // Shared keystore: seeded from config + optional `--keys` file, then fed live
     // from the MQTT control topic exactly as the C++ metermon is.
@@ -763,7 +773,7 @@ fn run_monitor(
             });
         }
 
-        let mut radio = source::Rfm69Source::open(&spidev).await?;
+        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
         radio.start().await?;
         log::info!("metermon-rs monitor on {spidev} — reporting every {report_secs}s");
 
@@ -920,7 +930,7 @@ fn run_monitor(
                     uptime_secs: uptime,
                     radio_opmode: opmode,
                     radio_state: opmode
-                        .map(|o| health::RadioState::from_opmode(o).as_str())
+                        .map(|o| radio.decode_state(o).as_str())
                         .unwrap_or("unknown"),
                     frames_per_min: if uptime > 0 {
                         total as f64 * 60.0 / uptime as f64
@@ -995,7 +1005,7 @@ fn run_monitor(
                     Err(e) => log::warn!("airwave sweep failed: {e}"),
                 }
                 // Always restore C reception.
-                radio = source::Rfm69Source::open(&spidev).await?;
+                radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
                 radio.start().await?;
                 last_sweep = Instant::now();
             }
@@ -1034,6 +1044,7 @@ fn run_sx1262_rx(
     preamble_detect_bits: u8,
     sync_hex: Option<String>,
     freq_hz: u32,
+    capture: Option<String>,
     seconds: u64,
 ) -> Result<()> {
     use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
@@ -1053,6 +1064,7 @@ fn run_sx1262_rx(
         preamble_detect_bits,
         sync_hex,
         freq_hz,
+        capture,
         seconds,
     )
 }
@@ -1072,6 +1084,7 @@ fn run_sx1262_rx(
     _preamble_detect_bits: u8,
     _sync_hex: Option<String>,
     _freq_hz: u32,
+    _capture: Option<String>,
     _seconds: u64,
 ) -> Result<()> {
     bail_no_radio("sx1262-rx")
@@ -1386,6 +1399,7 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
         .spidev
         .clone()
         .ok_or_else(|| anyhow::anyhow!("WMBUS device has no spidev"))?;
+    let radio_driver = device.driver.clone();
 
     let shadow_topic = shadow.then(|| format!("{}-rust", cfg.mqtt.data_topic));
     // Shared keystore: fed live from the control topic exactly as metermon is.
@@ -1397,7 +1411,7 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        let mut radio = source::Rfm69Source::open(&spidev).await?;
+        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
         let mut pub_ = publish::Publisher::connect(&cfg.mqtt, shadow_topic.as_deref(), None)?;
 
         // Subscribe to meter/control/<gwid> and install keys from op:key messages.
@@ -1449,10 +1463,15 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
         .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
         .and_then(|d| d.spidev.clone())
         .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
+    let radio_driver = cfg
+        .devices
+        .values()
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
+        .and_then(|d| d.driver.clone());
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        let mut radio = source::Rfm69Source::open(&spidev).await?;
+        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
         radio.start().await?;
         let mut file = std::fs::File::create(out)?;
         writeln!(

@@ -7,6 +7,9 @@
 
 use anyhow::Result;
 
+#[cfg(feature = "radio")]
+use mbus_rs::wmbus::radio::hal::Hal;
+
 /// A source of raw wM-Bus frames (each item is one frame: L-field..CRC inclusive).
 pub trait FrameSource {
     /// Return the next frame, or `Ok(None)` when the source is exhausted.
@@ -132,6 +135,202 @@ impl Rfm69Source {
     pub async fn stop(&mut self) -> Result<()> {
         self.driver.shutdown().await?;
         Ok(())
+    }
+}
+
+/// Live SX1262 radio source (Raspberry Pi only) — the Waveshare SX1262 XXXM HAT.
+///
+/// Pin assignments are the HAT's, verified empirically at bring-up: NSS is a plain
+/// GPIO (21), not a hardware chip-select, and the antenna switch needs GPIO6 held
+/// HIGH for the receive path in addition to DIO2 driving the other leg.
+#[cfg(feature = "radio")]
+pub struct Sx1262Source {
+    driver: mbus_rs::wmbus::radio::driver::Sx126xDriver<
+        mbus_rs::wmbus::radio::hal::RaspberryPiHal,
+    >,
+}
+
+#[cfg(feature = "radio")]
+impl Sx1262Source {
+    const FREQ_HZ: u32 = 868_950_000;
+    const BITRATE: u32 = 100_000;
+    /// Antenna-switch hold pin on the Waveshare HAT (TXEN, inverted: HIGH = RX).
+    const RF_SWITCH_GPIO: u8 = 6;
+
+    /// Open and initialize the SX1262 on `spidev` (radio not yet receiving).
+    pub async fn open(spidev: &str) -> Result<Self> {
+        use mbus_rs::wmbus::radio::driver::Sx126xDriver;
+        use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+        use mbus_rs::wmbus::radio::hal::RaspberryPiHal;
+
+        let pins = GpioPins {
+            nss: Some(21),
+            busy: 20,
+            dio1: 16,
+            dio2: None, // driven by the chip as the RF switch, not read by us
+            reset: Some(18),
+        };
+        let mut hal = RaspberryPiHal::from_spidev(spidev, &pins)?;
+        hal.reset()?;
+        Ok(Self {
+            driver: Sx126xDriver::new(hal, 32_000_000),
+        })
+    }
+
+    /// Configure for wM-Bus mode C and enter continuous receive.
+    pub async fn start(&mut self) -> Result<()> {
+        // The switch must be held before RX so the LNA is actually connected;
+        // a radio with the switch in TX is healthy-looking but ~9 dB deaf.
+        std::process::Command::new("pinctrl")
+            .args(["set", &Self::RF_SWITCH_GPIO.to_string(), "op", "dh"])
+            .status()
+            .ok();
+        // Recalibrate now that band and modem are known; the power-on pass ran
+        // before either was configured.
+        self.driver.calibrate(0x7F)?;
+        self.driver
+            .configure_for_wmbus(Self::FREQ_HZ, Self::BITRATE)?;
+        self.driver.set_dio2_as_rf_switch(true)?;
+        self.driver.set_rx_boosted_gain(true)?;
+        self.driver.set_rx_continuous()?;
+        Ok(())
+    }
+
+    /// Non-blocking poll for one received frame `(bytes, rssi_dbm, freq_offset_hz)`.
+    /// The SX126x does not report a per-frame AFC offset, so the third field is 0.
+    pub async fn poll(&mut self) -> Result<Option<(Vec<u8>, i16, i32)>> {
+        let hal = self.driver.hal_mut();
+
+        let mut irq_buf = [0u8; 3];
+        hal.read_command(0x12, &mut irq_buf)?; // GetIrqStatus (status + 2 bytes)
+        let irq = u16::from_be_bytes([irq_buf[1], irq_buf[2]]);
+        if irq == 0 {
+            return Ok(None);
+        }
+
+        let mut frame = None;
+        if irq & (1 << 1) != 0 {
+            // RxDone: fetch length/offset, sync-latched RSSI, then the payload.
+            let mut st = [0u8; 3];
+            hal.read_command(0x13, &mut st)?; // GetRxBufferStatus
+            let (len, offset) = (st[1], st[2]);
+
+            // GFSK GetPacketStatus reply: status, RxStatus, RssiSync, RssiAvg.
+            let mut pkt = [0u8; 4];
+            hal.read_command(0x14, &mut pkt)?;
+            let rssi_dbm = -(pkt[2] as i16) / 2;
+
+            let mut buf = vec![0u8; len as usize];
+            hal.read_register_buffer(offset, &mut buf)?;
+            frame = Some((buf, rssi_dbm, 0));
+        }
+        // Clear everything seen (preamble/sync events included) so DIO1 releases
+        // and the next frame produces a fresh edge.
+        hal.write_command(0x02, &[0xFF, 0xFF])?; // ClearIrqStatus
+        Ok(frame)
+    }
+
+    /// wM-Bus radio mode this source receives on (single-channel mode C).
+    pub fn mode(&self) -> &'static str {
+        "C"
+    }
+
+    /// Chip status byte for gateway health/watchdog, or `None` if the read fails.
+    /// Chip mode is bits 6:4 — 0x5 = RX, 0x2 = STBY_RC.
+    pub async fn opmode(&mut self) -> Option<u8> {
+        let mut b = [0u8; 1];
+        self.driver.hal_mut().read_command(0xC0, &mut b).ok()?;
+        Some(b[0])
+    }
+
+    /// Re-arm the receiver. `set_rx_continuous` restages the radio from standby
+    /// (fallback mode, buffer base, stale IRQs, packet params), which is the
+    /// documented recovery for a receiver that has fallen out of RX.
+    pub async fn recover(&mut self) -> Result<()> {
+        self.driver.calibrate(0x7F)?;
+        self.driver.set_rx_continuous()?;
+        Ok(())
+    }
+
+    /// Park the radio for process shutdown. Standby rather than sleep: sleep stops
+    /// the crystal, and a warm restart from that state cost this gateway hours of
+    /// debugging on the previous radio.
+    pub async fn stop(&mut self) -> Result<()> {
+        use mbus_rs::wmbus::radio::driver::StandbyMode;
+        self.driver.set_standby(StandbyMode::RC)?;
+        Ok(())
+    }
+}
+
+/// Live radio dispatch: the gateway's config names the driver, everything
+/// downstream sees one type. Methods mirror the source structs exactly.
+#[cfg(feature = "radio")]
+pub enum RadioSource {
+    Rfm69(Rfm69Source),
+    Sx1262(Box<Sx1262Source>),
+}
+
+#[cfg(feature = "radio")]
+impl RadioSource {
+    /// Open the radio named by `driver` ("sx1262" when absent — the installed HAT).
+    pub async fn open(driver: Option<&str>, spidev: &str) -> Result<Self> {
+        match driver.unwrap_or("sx1262") {
+            "sx1262" => Ok(Self::Sx1262(Box::new(Sx1262Source::open(spidev).await?))),
+            "rfm69" => Ok(Self::Rfm69(Rfm69Source::open(spidev).await?)),
+            other => anyhow::bail!("unknown radio driver {other:?} (want sx1262 or rfm69)"),
+        }
+    }
+
+    pub async fn start(&mut self) -> Result<()> {
+        match self {
+            Self::Rfm69(r) => r.start().await,
+            Self::Sx1262(r) => r.start().await,
+        }
+    }
+
+    pub async fn poll(&mut self) -> Result<Option<(Vec<u8>, i16, i32)>> {
+        match self {
+            Self::Rfm69(r) => r.poll().await,
+            Self::Sx1262(r) => r.poll().await,
+        }
+    }
+
+    pub fn mode(&self) -> &'static str {
+        match self {
+            Self::Rfm69(r) => r.mode(),
+            Self::Sx1262(r) => r.mode(),
+        }
+    }
+
+    pub async fn opmode(&mut self) -> Option<u8> {
+        match self {
+            Self::Rfm69(r) => r.opmode().await,
+            Self::Sx1262(r) => r.opmode().await,
+        }
+    }
+
+    /// Interpret a raw `opmode()` byte for this chip. The RFM69 reports RegOpMode
+    /// (mode in bits 4:2); the SX126x reports its status byte (mode in bits 6:4).
+    /// Same wire, different dialects — decoding must follow the speaker.
+    pub fn decode_state(&self, raw: u8) -> crate::health::RadioState {
+        match self {
+            Self::Rfm69(_) => crate::health::RadioState::from_opmode(raw),
+            Self::Sx1262(_) => crate::health::RadioState::from_sx126x_status(raw),
+        }
+    }
+
+    pub async fn recover(&mut self) -> Result<()> {
+        match self {
+            Self::Rfm69(r) => r.recover().await,
+            Self::Sx1262(r) => r.recover().await,
+        }
+    }
+
+    pub async fn stop(&mut self) -> Result<()> {
+        match self {
+            Self::Rfm69(r) => r.stop().await,
+            Self::Sx1262(r) => r.stop().await,
+        }
     }
 }
 

@@ -169,6 +169,7 @@ pub fn run(
     preamble_detect_bits: u8,
     sync_hex: Option<String>,
     freq_hz: u32,
+    capture: Option<String>,
     seconds: u64,
 ) -> Result<()> {
     println!("SX1262 wM-Bus mode C receive — 868.95 MHz, 100 kbps, sync 54 3D 54\n");
@@ -271,6 +272,16 @@ pub fn run(
     driver.set_rx_continuous().context("entering RX")?;
     println!("listening for {seconds}s (heartbeat every 15s)\n");
 
+    // Raw capture: one hex frame per line, the exact bytes handed to the decoder,
+    // so `metermon-rs replay` reproduces this session and A/B rigs feed the same
+    // decode path.
+    let mut capture_file = match capture.as_deref() {
+        Some(path) => Some(std::io::BufWriter::new(
+            std::fs::File::create(path).with_context(|| format!("creating {path}"))?,
+        )),
+        None => None,
+    };
+
     let start = Instant::now();
     let mut last_beat = Instant::now();
     let mut c = Counters::default();
@@ -311,6 +322,10 @@ pub fn run(
                 hal.read_register_buffer(offset, &mut buf)
                     .context("reading the RX buffer")?;
 
+                if let Some(f) = capture_file.as_mut() {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{}", hex::encode(&buf));
+                }
                 match decode_mode_c(&buf) {
                     Ok(f) => {
                         c.decoded_ok += 1;

@@ -80,6 +80,11 @@ pub struct DeviceConfig {
     #[serde(rename = "type")]
     pub dev_type: String,
     pub spidev: Option<String>,
+    /// Radio driver for this device: "sx1262" (default) or "rfm69". The default
+    /// tracks the hardware on the gateway; the RFM69 HAT has been replaced by the
+    /// Waveshare SX1262 XXXM, but the driver remains selectable for other boards.
+    #[serde(default)]
+    pub driver: Option<String>,
 }
 
 impl Config {
