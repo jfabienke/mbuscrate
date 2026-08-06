@@ -124,6 +124,10 @@ enum Cmd {
         /// Each sweep pauses C reception for ~2 min and records a `discovery` event.
         #[arg(long, default_value_t = 12)]
         sweep_hours: u64,
+        /// Publish decoded frames to `<data-topic>-rust` instead of the live data
+        /// topic, for running alongside another gateway without disturbing it.
+        #[arg(long)]
+        shadow: bool,
     },
     /// Show the device manager's stored device table and recent events (no radio).
     Devices {
@@ -232,7 +236,8 @@ fn main() -> Result<()> {
             keys,
             db,
             sweep_hours,
-        } => run_monitor(&config, report, keys.as_deref(), &db, sweep_hours),
+            shadow,
+        } => run_monitor(&config, report, keys.as_deref(), &db, sweep_hours, shadow),
         Cmd::Devices {
             db,
             events,
@@ -400,6 +405,7 @@ fn run_monitor(
     keys_path: Option<&str>,
     db_path: &str,
     sweep_hours: u64,
+    shadow: bool,
 ) -> Result<()> {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -485,9 +491,15 @@ fn run_monitor(
 
         // AES key pull + gateway status. Non-fatal if the broker is unreachable — the radio
         // monitor keeps running on whatever keys were seeded (store-and-forward via redb).
+        // Shadow publishing sends decoded frames to `<data-topic>-rust`, so the
+        // gateway can run beside another publisher without disturbing the live feed.
+        let shadow_topic = shadow.then(|| format!("{}-rust", cfg.mqtt.data_topic));
+        if let Some(t) = &shadow_topic {
+            log::info!("shadow mode: publishing decoded frames to {t}");
+        }
         let mut publisher = match publish::Publisher::connect(
             &cfg.mqtt,
-            None,
+            shadow_topic.as_deref(),
             Some((status_topic.clone(), offline_payload)),
         ) {
             Ok(mut p) => {
@@ -744,6 +756,22 @@ fn run_monitor(
                     contained += 1;
                 }
 
+                // Publish upstream. Only CRC-valid frames: a corrupted frame's fields
+                // are not a measurement, and emitting them would put values into the
+                // backend that the gateway itself does not believe.
+                if crc_ok {
+                    if let Some(p) = publisher.as_mut() {
+                        let mut msg = v.clone();
+                        if let Some(obj) = msg.as_object_mut() {
+                            obj.insert("ts".into(), serde_json::json!(devices::now_unix()));
+                            obj.insert("rssi".into(), serde_json::json!(rssi));
+                        }
+                        if let Err(e) = p.publish_json(&msg) {
+                            log::warn!("publish failed for meter {meter}: {e}");
+                        }
+                    }
+                }
+
                 match &reading {
                     Some(r) => log::info!(
                         "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz reading=[{r}]"
@@ -964,6 +992,7 @@ fn run_monitor(
     _keys_path: Option<&str>,
     _db_path: &str,
     _sweep_hours: u64,
+    _shadow: bool,
 ) -> Result<()> {
     bail_no_radio("monitor")
 }
