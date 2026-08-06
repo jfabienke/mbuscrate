@@ -357,24 +357,52 @@ incrementing per frame. All standard. **Layer 0 only — no vendor code needed.*
 null result matters: the abstraction must not pressure us into writing an extension for
 every manufacturer we can name.
 
-### Others observed (KAW, RVI, YKM, KEM, ZZI, UNK …)
+### KAW — six cold-water meters (evidenced 2026-08-06)
 
-Header-only sightings, largely from CRC-failed frames. **No classification**: P4
-requires evidence and P6 forbids attributing anything from a frame that failed
-integrity. Their presence in the manufacturer database is Layer 0 metadata, not an
-extension.
+Once reception improved (~40 dB), six KAW cold-water meters appeared with **CRC-valid**
+frames (`53231343`, `53231360`, `53231368`, `53231369`, `53231731`, `53520685`). So KAW
+is now evidenced, not a ghost artefact — but everything observed is standard OMS, and we
+hold no keys, so like ZRI it is **Layer 0 only, no vendor code**. Open question worth
+resolving before any KAW-specific work: KAW is a *distinct* manufacturer flag from KAM
+(Kamstrup, `0x2C2D`) — confirm whether it is a Kamstrup sub-brand or a different maker,
+since that decides whether it could ever share a profile.
+
+### Others observed (RVI, YKM, KEM, ZZI, UNK …)
+
+Header-only sightings. **No classification**: P4 requires evidence and P6 forbids
+attributing anything from a frame that failed integrity. Their presence in the
+manufacturer database is Layer 0 metadata, not an extension. The store now holds **31
+real devices** across these codes (24 KAM incl. a ~22-meter district-heating cluster,
+6 KAW, 1 ZRI) — a useful reminder that the layers must stay thin: nearly all of that
+traffic is Layer 0, and only two meters (the keyed KAM water pair) are even readable.
 
 ## 6. Decisions
 
-**D1 — The KAM ELL leading field stays Layer 0 for now.**
-Our captures prove Kamstrup does not populate it as a payload CRC (identical values
-across differing payloads; no CRC-16 variant reproduces it). But this may be an
-ambiguity in the standard rather than a deviation, and P4 requires a conforming
-interpretation for the device to contradict. Resting state: generic, tolerant, not used
-for authentication, documented in `wmbus::ell`. **Promotion to a quirk is blocked on
-one ELL-II sample from a non-Kamstrup device.** If that sample carries a valid CRC over
-its payload, the generic path starts validating and KAM gains
-`kam-ell-leading-field-not-crc`.
+**D1 — The KAM ELL leading field is Layer 0, and its CRC status is REOPENED (corrected
+2026-08-06).**
+This decision previously claimed the field is *not* a payload CRC. That was wrong on two
+counts, found via the oracle's `--analyze` trace:
+
+- **The evidence was mis-attributed.** The "identical value across differing payloads"
+  observation came from the *Zenner* meter (55298170, TPL Mode 5) — not the KAM ELL
+  field. For KAM the field *does* vary with the payload (`1cc5` for two identical compact
+  readings, `3d19` for the full frame), which is how a CRC behaves.
+- **The oracle validates it as a CRC.** `wmbusmeters --analyze` reports
+  `017 : 1cc5 payload crc (calculated 1cc5 OK)` — it treats the field as a payload CRC
+  and confirms it.
+
+So this is almost certainly a **standard ELL payload CRC we simply had not decoded**, not
+a vendor deviation — which removes the earlier "promote to a quirk" framing entirely.
+The open part: no standard CRC-16 variant we tried reproduces `1cc5` over the obvious
+plaintext range, so the exact computation is not yet understood. It must be derived from
+EN 13757-4 §12 (the ELL definition), **not** from wmbusmeters' GPL code (D3).
+
+Resting state unchanged until the algorithm is pinned: the field is exposed as
+`leading_field`, not used for authentication, and decrypt acceptance rests on the TPL-CI
+plausibility heuristic. **Next step:** reproduce the ELL payload CRC from the spec; if
+confirmed, use it to authenticate ELL decrypts (replacing the ~97% heuristic with a real
+integrity check) — a **Layer 0** improvement, since it is standard behaviour, not
+Kamstrup-specific.
 
 **D2 — KAM info codes ship as a provisional status-bit interpretation, not a
 manufacturer-VIF extension.**
