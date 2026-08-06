@@ -57,6 +57,68 @@ For `9B`, the documented status bits are in status byte 2: bit 0 means the
 interval log has unread records and bit 1 means the RTC log has unread records.
 These are logger-availability flags, not the current meter fault bitmask.
 
+## Wireless research findings
+
+The public wireless documentation narrows the implementation considerably, but
+does not provide complete event-history vectors.
+
+### Confirmed wireless facts
+
+- The MULTICAL 602 C-mode module advertises `Info code` in both its standard and
+  alternative current-data packages. These modules are encrypted, one-way C1,
+  and transmit every 16 seconds; the fixed-network C-mode module transmits every
+  96 seconds. The data-update interval can differ from the RF transmission
+  interval, so the gateway must measure both where possible.
+  ([602 C-mode datasheet](https://kamstrup-delivery.sitecorecontenthub.cloud/api/public/content/62343-downloadOriginal?v=a39970bb),
+  [fixed-network module datasheet](https://kamstrup-delivery.sitecorecontenthub.cloud/api/public/content/61253-downloadOriginal?v=c8cf212d))
+- Kamstrup's newer 403/603/803 profile document identifies register `369` as
+  `Info bits` in many C1 datagrams. This confirms that current status can be an
+  ordinary OMS/M-Bus data record rather than a proprietary CI payload.
+  ([Logger Profiles and Datagrams](https://kamstrup-delivery.sitecorecontenthub.cloud/api/public/content/63144-downloadOriginal?v=a62bca35))
+- The MULTICAL 602 technical description defines INFO as an additive bitmask,
+  documents response/settling times, and says the event counter increments when
+  the INFO value changes. Those timings describe meter state changes, not proof
+  of an immediate wireless transmission.
+  ([602 technical description](https://www.heatingandprocess.com/wp-content/uploads/2016/04/Kamstrup-Multical-602-Heat-Meter-MID-Approved-Technical-Description.pdf))
+- A public IM3060 LoRaWAN module specification lists MULTICAL 602 compatibility
+  and maps `0x0063` (INFO), `0x0071` (INFOEV), and `0x00AF`
+  (ERRORHOURCOUNTER). Its application payload is a header followed by register
+  IDs and values. This is useful evidence for an IM3060-like module, but it is
+  not evidence that arbitrary raw LoRa packets use the same format.
+  ([IM3060 payload specification](https://www.nasys.no/wp-content/uploads/LoRaWAN_Multical_Module_IM3060.pdf))
+- Kamstrup's current built-in LoRaWAN product documentation names MULTICAL
+  403/603/803, not 602. The meter module must therefore be identified before
+  selecting a LoRa decoder.
+  ([Kamstrup LoRaWAN announcement](https://www.kamstrup.com/en-en/news-and-events/news/lorawan-communication-module))
+
+### Remaining capture-dependent gaps
+
+1. The exact decrypted 602 wM-Bus DIF/VIF record for INFO (width, encoding,
+   ordering, and profile-dependent presence) is not published in the documents
+   found here.
+2. There is no evidence that the 602 periodic wM-Bus telegram carries the
+   50-entry INFO history, INFO-event counter, or error-hour counter. Those may be
+   optical/KMP-only logger values.
+3. The gateway's LoRa path currently returns raw payload bytes and metadata;
+   it does not implement LoRaWAN MAC/session processing. A LoRaWAN module needs
+   network/application keys, frame counters, ports, and a post-MAC payload
+   decoder. A raw point-to-point LoRa device needs a separate application
+   protocol specification.
+4. Event tables vary by model, firmware, configuration code, and installed
+   module. A single global Kamstrup bit table would be unsafe.
+5. The repository has no KAM extension registered yet, and
+   [`WMBusHandle`](../src/wmbus/handle.rs) performs structural frame parsing
+   while the LoRa branch remains intentionally raw.
+
+### Required capture set
+
+For each supported meter/module combination, retain the model, firmware,
+configuration, module part number, raw RF bytes, timestamps, radio mode, RSSI,
+decryption key or known plaintext, and corresponding optical reads of `0x0063`,
+`0x0071`, and `0x00AF`. Include normal frames and frames correlated with known
+INFO changes. Do not infer wireless event-history support from optical KMP
+records alone.
+
 ## Evidence and implementation status
 
 Primary references are the [MULTICAL 602 technical description](</Users/jvindahl/Development/kamstrup-meters/MeterLogger/documentation/Technical_description_MULTICAL_602.pdf>),
@@ -70,8 +132,7 @@ but the MeterLogger sampling loop currently requests only eight measurement
 registers ([`kmp_request.c`](/Users/jvindahl/Development/kamstrup-meters/MeterLogger/user/kamstrup/kmp_request.c:354)).
 No repository source implements the `A0`–`A3`, `9B`, or `9C` logger commands.
 
-The 602 documentation lists M-Bus, radio, and wireless M-Bus C1 module
-variants, but the repositories contain no wireless on-air event examples.
-Before adding a wM-Bus event decoder, correlate an optical INFO/KMP read with
-captured radio frames and retain the raw vendor records, meter model, and
-configuration number.
+The sibling repositories still contain no wireless on-air event examples.
+Until the capture set above exists, implementation should preserve unknown
+records and expose the raw INFO value rather than claim complete event-history
+support.

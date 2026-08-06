@@ -106,8 +106,9 @@ removing detail, it is not an extension; it is a quirk.
 **P3 — Never invent a value.**
 Where neither layer knows what bytes mean, emit the raw bytes and a reason. A number
 that means nothing is worse than "unknown", because a consumer cannot tell the
-difference. (Today `02 FF 20` decodes to `Manufacturer specific: 0.0` — exactly this
-failure.)
+difference. (Today `02 FF 20` decodes to a bare `Manufacturer specific: 0.0`: the value
+is real, but presented as an unidentified float, so a *nonzero* INFO would read as a
+meaningless number rather than named conditions or a labelled raw bitmask.)
 
 **P4 — Quirks are evidence-gated, narrowly scoped, and standard-by-default.**
 Every quirk carries: the deviation (what the standard says versus what the device
@@ -314,18 +315,19 @@ Two properties are machine-checkable and should be CI-enforced:
 
 ## 5. Current classification
 
-### KAM — Kamstrup Multical 21
+### KAM — Kamstrup Multical 21 (cold water)
 
-Evidence: live captures from the production gateway, decrypted and cross-checked
-against an independent implementation.
+Evidence: live captures from the production gateway, decrypted and cross-checked against
+an independent implementation (wmbusmeters, oracle-only). The KAM *heat* meters we also
+hear (the ~22-meter cluster in §5 Others) are unclassified — no keys, so header-only.
 
 | Behaviour | Layer | Notes |
 |---|---|---|
 | ELL CI `0x8D`, AES-CTR | 0 | Frame-declared (P1). Already generic. |
 | Compact frames, format signature | 0 | OMS mechanism; signature confirmed on KAM traffic. A vendor differing would miss the lookup — safe failure. Assumption labelled in `wmbus::compact_frame`. |
 | Type B framing, BCD address | 0 | Standard. |
-| `02 FF 20` info codes | **1** | VIF `0xFF` is the standard's manufacturer slot. Currently decodes to `Manufacturer specific: 0.0` — a P3 violation. |
-| Leading 2-byte ELL field is not a payload CRC | **0 for now** | See decision D1. |
+| `02 FF 20` info codes | **0 transport / 1 meaning** | Arrives as a standard OMS record, so reading the raw bitmask is Layer 0; only the bit *meanings* are Layer 1 (D2). Today it decodes to a bare `Manufacturer specific: 0.0` — the value is real (INFO 0) but unidentified as a status field, so a nonzero value would surface as a meaningless number. Interpretation table is evidence-blocked (D3). |
+| Leading 2-byte ELL field | **0** | Almost certainly a *standard* ELL payload CRC we had not decoded — not a vendor deviation (D1, corrected). Algorithm to be reproduced from EN 13757-4 §12; would then authenticate ELL decrypts. |
 
 ### QDS — QUNDIS HCA (implemented today, misfiled)
 
@@ -357,24 +359,52 @@ incrementing per frame. All standard. **Layer 0 only — no vendor code needed.*
 null result matters: the abstraction must not pressure us into writing an extension for
 every manufacturer we can name.
 
-### Others observed (KAW, RVI, YKM, KEM, ZZI, UNK …)
+### KAW — six cold-water meters (evidenced 2026-08-06)
 
-Header-only sightings, largely from CRC-failed frames. **No classification**: P4
-requires evidence and P6 forbids attributing anything from a frame that failed
-integrity. Their presence in the manufacturer database is Layer 0 metadata, not an
-extension.
+Once reception improved (~40 dB), six KAW cold-water meters appeared with **CRC-valid**
+frames (`53231343`, `53231360`, `53231368`, `53231369`, `53231731`, `53520685`). So KAW
+is now evidenced, not a ghost artefact — but everything observed is standard OMS, and we
+hold no keys, so like ZRI it is **Layer 0 only, no vendor code**. Open question worth
+resolving before any KAW-specific work: KAW is a *distinct* manufacturer flag from KAM
+(Kamstrup, `0x2C2D`) — confirm whether it is a Kamstrup sub-brand or a different maker,
+since that decides whether it could ever share a profile.
+
+### Others observed (RVI, YKM, KEM, ZZI, UNK …)
+
+Header-only sightings. **No classification**: P4 requires evidence and P6 forbids
+attributing anything from a frame that failed integrity. Their presence in the
+manufacturer database is Layer 0 metadata, not an extension. The store now holds **31
+real devices** across these codes (24 KAM incl. a ~22-meter district-heating cluster,
+6 KAW, 1 ZRI) — a useful reminder that the layers must stay thin: nearly all of that
+traffic is Layer 0, and only two meters (the keyed KAM water pair) are even readable.
 
 ## 6. Decisions
 
-**D1 — The KAM ELL leading field stays Layer 0 for now.**
-Our captures prove Kamstrup does not populate it as a payload CRC (identical values
-across differing payloads; no CRC-16 variant reproduces it). But this may be an
-ambiguity in the standard rather than a deviation, and P4 requires a conforming
-interpretation for the device to contradict. Resting state: generic, tolerant, not used
-for authentication, documented in `wmbus::ell`. **Promotion to a quirk is blocked on
-one ELL-II sample from a non-Kamstrup device.** If that sample carries a valid CRC over
-its payload, the generic path starts validating and KAM gains
-`kam-ell-leading-field-not-crc`.
+**D1 — The KAM ELL leading field is Layer 0, and its CRC status is REOPENED (corrected
+2026-08-06).**
+This decision previously claimed the field is *not* a payload CRC. That was wrong on two
+counts, found via the oracle's `--analyze` trace:
+
+- **The evidence was mis-attributed.** The "identical value across differing payloads"
+  observation came from the *Zenner* meter (55298170, TPL Mode 5) — not the KAM ELL
+  field. For KAM the field *does* vary with the payload (`1cc5` for two identical compact
+  readings, `3d19` for the full frame), which is how a CRC behaves.
+- **The oracle validates it as a CRC.** `wmbusmeters --analyze` reports
+  `017 : 1cc5 payload crc (calculated 1cc5 OK)` — it treats the field as a payload CRC
+  and confirms it.
+
+So this is almost certainly a **standard ELL payload CRC we simply had not decoded**, not
+a vendor deviation — which removes the earlier "promote to a quirk" framing entirely.
+The open part: no standard CRC-16 variant we tried reproduces `1cc5` over the obvious
+plaintext range, so the exact computation is not yet understood. It must be derived from
+EN 13757-4 §12 (the ELL definition), **not** from wmbusmeters' GPL code (D3).
+
+Resting state unchanged until the algorithm is pinned: the field is exposed as
+`leading_field`, not used for authentication, and decrypt acceptance rests on the TPL-CI
+plausibility heuristic. **Next step:** reproduce the ELL payload CRC from the spec; if
+confirmed, use it to authenticate ELL decrypts (replacing the ~97% heuristic with a real
+integrity check) — a **Layer 0** improvement, since it is standard behaviour, not
+Kamstrup-specific.
 
 **D2 — KAM info codes ship as a provisional status-bit interpretation, not a
 manufacturer-VIF extension.**
@@ -384,8 +414,8 @@ datagrams — i.e. the INFO field very likely arrives as a **standard OMS/M-Bus 
 record**, not a proprietary CI payload. If so, the *transport* is Layer 0 (the generic
 record parser reads the bytes), and only the *bit meanings* are vendor knowledge. That
 makes this a `decode_status_bits`-style interpretation keyed to the model, not a
-`decode_manufacturer_vif` hook — a materially different implementation than §5 first
-assumed, and one to confirm against a decoded capture before building.
+`decode_manufacturer_vif` hook — a materially different implementation from a
+manufacturer-VIF extension, and one to confirm against a decoded capture before building.
 
 The interpretation lives in the crate (§1.1 case 1): status/alarm meaning is decode
 knowledge, so the crate owns the bit tables and emits named conditions, not just a
