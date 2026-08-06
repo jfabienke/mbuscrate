@@ -385,6 +385,23 @@ impl RaspberryPiHal {
     ///
     /// // Radio is now in clean state and ready for commands
     /// ```
+    /// Read `buf.len()` bytes from the radio's data buffer starting at `offset`.
+    ///
+    /// ReadBuffer (0x1E) answers with three status bytes before the payload, so the
+    /// data begins at index 3 of the response.
+    pub fn read_register_buffer(&mut self, offset: u8, buf: &mut [u8]) -> Result<(), HalError> {
+        self.wait_for_busy_low(100).map_err(|_| HalError::Spi)?;
+        let mut tx = vec![0x1E, offset, 0x00];
+        tx.resize(3 + buf.len(), 0x00);
+        let mut rx = vec![0u8; tx.len()];
+        self.select();
+        let result = self.spi.transfer(&mut rx, &tx);
+        self.deselect();
+        result.map_err(|_| HalError::Spi)?;
+        buf.copy_from_slice(&rx[3..]);
+        Ok(())
+    }
+
     /// Assert NSS (active low) for boards using a GPIO chip-select. No-op otherwise.
     fn select(&mut self) {
         if let Some(ref mut nss) = self.nss_pin {

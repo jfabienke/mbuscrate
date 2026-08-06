@@ -26,6 +26,8 @@ mod source;
 mod sweep;
 #[cfg(feature = "radio")]
 mod sx1262_probe;
+#[cfg(feature = "radio")]
+mod sx1262_rx;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -208,6 +210,25 @@ enum Cmd {
         #[arg(long)]
         tcxo_mv: Option<u32>,
     },
+    /// Receive wM-Bus mode C on an SX1262, with the full receive chain instrumented
+    /// (preamble/sync/RxDone counters, decoded device errors, noise-floor heartbeat).
+    Sx1262Rx {
+        #[arg(long, default_value = "/dev/spidev0.0")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        /// GPIO holding the antenna switch in receive (Waveshare HAT: BCM6, HIGH=RX).
+        #[arg(long, default_value_t = 6)]
+        rf_switch: u8,
+        #[arg(long, default_value_t = 120)]
+        seconds: u64,
+    },
     /// Run the mock backend Device Manager: watch the gateway's data topic and answer
     /// op:startup / op:profile_request with op:profile messages from a catalog file.
     /// Stand-in for the real Device Manager (vendor-layers §7.2); serves model names
@@ -290,6 +311,15 @@ fn main() -> Result<()> {
             reset,
             tcxo_mv,
         } => run_sx1262_probe(&spidev, nss, busy, dio1, dio2, reset, tcxo_mv),
+        Cmd::Sx1262Rx {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            rf_switch,
+            seconds,
+        } => run_sx1262_rx(&spidev, nss, busy, dio1, reset, rf_switch, seconds),
         Cmd::MockBackend {
             config,
             catalog,
@@ -949,6 +979,46 @@ fn run_monitor(
         log::info!("metermon-rs monitor stopped cleanly");
         Ok(())
     })
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_sx1262_rx(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    rf_switch: u8,
+    seconds: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    sx1262_rx::run(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        Some(rf_switch),
+        seconds,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_sx1262_rx(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _rf_switch: u8,
+    _seconds: u64,
+) -> Result<()> {
+    bail_no_radio("sx1262-rx")
 }
 
 #[cfg(feature = "radio")]

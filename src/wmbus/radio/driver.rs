@@ -819,6 +819,12 @@ impl<H: Hal> Sx126xDriver<H> {
         Ok(())
     }
 
+    /// Direct access to the HAL, for diagnostics that need the chip's raw status,
+    /// IRQ and buffer registers rather than the driver's interpretation of them.
+    pub fn hal_mut(&mut self) -> &mut H {
+        &mut self.hal
+    }
+
     pub fn set_rx_continuous(&mut self) -> Result<(), DriverError> {
         self.set_rx(0xFFFFFF)?; // Infinite timeout
         Ok(())
@@ -1090,25 +1096,33 @@ impl<H: Hal> Sx126xDriver<H> {
         };
         self.set_modulation_params(mod_params)?;
 
-        // Configure packet parameters for wM-Bus
+        // Packet handling mirrors the RFM69 configuration that receives this fleet
+        // today. Two settings are load-bearing and were previously wrong here:
+        //
+        // * `crc_on: false` — wM-Bus carries its own per-block CRC-16/EN-13757 *inside*
+        //   the payload, which this crate verifies in software. Letting the radio also
+        //   apply a CRC makes it discard every frame as corrupt.
+        // * fixed-length reception — the byte after the sync word is the mode-C frame
+        //   marker (0x3D type B / 0xCD type A), not a length field, so the variable-
+        //   length engine would mis-size every packet. The link decoder derives the
+        //   true length from the L-field.
         let packet_params = PacketParams::Gfsk {
-            preamble_len: 48,                  // 48-bit preamble (wM-Bus standard)
-            header_type: HeaderType::Variable, // Variable length packets
-            payload_len: 255,                  // Maximum payload size
-            crc_on: true,                      // Enable CRC
-            crc_type: CrcType::Byte2,          // 2-byte CRC
-            sync_word_len: 4,                  // 4-byte sync word
+            preamble_len: 32, // 4 bytes, as the working RFM69 config uses
+            header_type: HeaderType::Fixed,
+            payload_len: 255, // read the whole buffer; the L-field bounds the frame
+            crc_on: false,
+            crc_type: CrcType::Byte2,
+            sync_word_len: 3, // 54 3D 54
         };
         self.set_packet_params(packet_params)?;
 
-        // Configure CRC with CCITT polynomial
-        self.configure_crc(0x1021)?;
-
-        // Disable whitening (required for wM-Bus)
+        // No whitening on wM-Bus.
         self.disable_whitening()?;
 
-        // Set wM-Bus S-mode sync word pattern
-        self.set_sync_word([0xB4, 0xB6, 0x5A, 0x5A, 0, 0, 0, 0])?;
+        // Mode-C sync word: 54 3D 54. This is what triggers reception — the previous
+        // value here was the S-mode pattern (B4 B6 5A 5A), which never matches mode-C
+        // traffic and is why the label said mode_c while the radio listened for S.
+        self.set_sync_word([0x54, 0x3D, 0x54, 0, 0, 0, 0, 0])?;
 
         // Configure power amplifier for +14 dBm output
         self.set_pa_config(0x04, 0x00, 0x00)?;
@@ -1976,6 +1990,17 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// * `Ok(())` - Gain mode set successfully
     /// * `Err(DriverError)` - Configuration failed
+    /// Let the chip drive DIO2 as the antenna-switch control.
+    ///
+    /// Boards with an external RF switch (e.g. a PE4259) route DIO2 to it, so without
+    /// this the antenna is never connected to the receiver and the radio hears
+    /// nothing while looking perfectly healthy.
+    pub fn set_dio2_as_rf_switch(&mut self, enabled: bool) -> Result<(), DriverError> {
+        self.hal
+            .write_command(0x9D, &[u8::from(enabled)])
+            .map_err(DriverError::Hal)
+    }
+
     pub fn set_rx_boosted_gain(&mut self, enabled: bool) -> Result<(), DriverError> {
         self.set_standby(StandbyMode::RC)?;
 
