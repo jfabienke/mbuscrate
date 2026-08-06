@@ -62,10 +62,23 @@ fn device_error_names(errs: u16) -> Vec<&'static str> {
         .collect()
 }
 
-fn read1(hal: &mut RaspberryPiHal, op: u8) -> Result<u8> {
+/// Read a command whose reply *is* the status byte (GetStatus alone).
+fn read_status(hal: &mut RaspberryPiHal, op: u8) -> Result<u8> {
     let mut b = [0u8; 1];
     hal.read_command(op, &mut b)?;
     Ok(b[0])
+}
+
+/// Read a one-byte result that follows the status byte.
+///
+/// Every SX126x Get* reply begins with status; asking for a one-byte buffer
+/// returns that status and nothing else. Reading it as the result is silent —
+/// the status byte in RX mode is 0xD2, which as an RSSI decodes to a perfectly
+/// believable -105 dBm that never changes.
+fn read1_after_status(hal: &mut RaspberryPiHal, op: u8) -> Result<u8> {
+    let mut b = [0u8; 2];
+    hal.read_command(op, &mut b)?;
+    Ok(b[1])
 }
 
 fn read_u16_after_status(hal: &mut RaspberryPiHal, op: u8) -> Result<u16> {
@@ -75,8 +88,20 @@ fn read_u16_after_status(hal: &mut RaspberryPiHal, op: u8) -> Result<u16> {
 }
 
 /// Running tally, printed on the heartbeat so a silent radio still reports its state.
-#[derive(Default)]
 struct Counters {
+    /// Noise-floor spread over the heartbeat window. A receiver with no antenna
+    /// reads a dead-flat floor; a connected one wanders by several dB as ambient
+    /// energy comes and goes. That difference distinguishes "quiet band" from
+    /// "nothing plugged in", which otherwise look identical.
+    rssi_min: i16,
+    rssi_max: i16,
+    rssi_samples: u64,
+    /// Histogram over the raw RSSI byte. Preamble detection depends on the whole
+    /// modem being configured correctly, but a transmission is visible as raw energy
+    /// regardless: a wM-Bus frame is ~10 ms of carrier, so if meters are audible at
+    /// all the distribution must show a tail well above the floor. No tail means the
+    /// problem is in front of the modem, not inside it.
+    rssi_hist: [u32; 256],
     preambles: u64,
     syncs: u64,
     rx_done: u64,
@@ -85,7 +110,62 @@ struct Counters {
     decode_fail: u64,
 }
 
-pub fn run(spidev: &str, pins: GpioPins, rf_switch: Option<u8>, seconds: u64) -> Result<()> {
+impl Default for Counters {
+    fn default() -> Self {
+        Self {
+            rssi_min: i16::MAX,
+            rssi_max: i16::MIN,
+            rssi_samples: 0,
+            rssi_hist: [0u32; 256],
+            preambles: 0,
+            syncs: 0,
+            rx_done: 0,
+            crc_err: 0,
+            decoded_ok: 0,
+            decode_fail: 0,
+        }
+    }
+}
+
+impl Counters {
+    /// Percentile over the raw RSSI byte. The raw value ascends as the signal
+    /// weakens, so the histogram is walked from the top down to go from weak to
+    /// strong.
+    fn percentile(&self, p: f64) -> i16 {
+        let total: u32 = self.rssi_hist.iter().sum();
+        let target = ((total as f64) * p) as u32;
+        let mut acc = 0u32;
+        for (raw, n) in self.rssi_hist.iter().enumerate().rev() {
+            acc += n;
+            if acc >= target && *n > 0 {
+                return -(raw as i16) / 2;
+            }
+        }
+        0
+    }
+
+    /// Samples more than 12 dB above the median, i.e. plausible transmissions.
+    fn bursts_above(&self, threshold_dbm: i16) -> u32 {
+        self.rssi_hist
+            .iter()
+            .enumerate()
+            .filter(|(raw, _)| -(*raw as i16) / 2 >= threshold_dbm)
+            .map(|(_, n)| *n)
+            .sum()
+    }
+}
+
+pub fn run(
+    spidev: &str,
+    pins: GpioPins,
+    rf_switch: Option<u8>,
+    rf_switch_high: bool,
+    dio2_rf_switch: bool,
+    sync_bytes: u8,
+    preamble_detect_bits: u8,
+    sync_hex: Option<String>,
+    seconds: u64,
+) -> Result<()> {
     println!("SX1262 wM-Bus mode C receive — 868.95 MHz, 100 kbps, sync 54 3D 54\n");
 
     let mut hal = RaspberryPiHal::from_spidev(spidev, &pins).context("opening SPI/GPIO")?;
@@ -95,20 +175,49 @@ pub fn run(spidev: &str, pins: GpioPins, rf_switch: Option<u8>, seconds: u64) ->
     // HAT that is BCM6, and the sense is inverted from the usual convention: HIGH
     // selects RX. Get this wrong and the radio is healthy but deaf.
     if let Some(pin) = rf_switch {
+        let level = if rf_switch_high { "dh" } else { "dl" };
         std::process::Command::new("pinctrl")
-            .args(["set", &pin.to_string(), "op", "dh"])
+            .args(["set", &pin.to_string(), "op", level])
             .status()
             .ok();
-        println!("RF switch: GPIO{pin} driven HIGH (receive path)");
+        println!(
+            "RF switch: GPIO{pin} driven {} · DIO2-as-RF-switch {}",
+            if rf_switch_high { "HIGH" } else { "LOW" },
+            if dio2_rf_switch { "on" } else { "off" }
+        );
     }
 
     let mut driver = Sx126xDriver::new(hal, 32_000_000);
-    driver
-        .set_dio2_as_rf_switch(true)
-        .context("DIO2 as RF switch")?;
+    let mut profile = mbus_rs::wmbus::radio::driver::WmbusProfile::mode_c(WMBUS_FREQ_HZ, WMBUS_BITRATE);
+    profile.sync_word_len = sync_bytes;
+    profile.preamble_detect_bits = preamble_detect_bits;
+    if let Some(h) = sync_hex.as_deref() {
+        let raw = hex::decode(h).context("--sync-hex must be hex bytes")?;
+        for (slot, b) in profile.sync_word.iter_mut().zip(raw.iter()) {
+            *slot = *b;
+        }
+    }
+    // Re-run the chip's self-calibration before configuring. The power-on pass
+    // happens before the chip knows its band or modem, and this is a bring-up tool
+    // where paying a few milliseconds for a known-good starting point is worth it.
+    driver.calibrate(0x7F).context("calibrating")?;
+    // configure_for_wmbus selects the GFSK modem and applies the stock profile;
+    // re-applying with the overrides keeps that setup and only changes detection.
     driver
         .configure_for_wmbus(WMBUS_FREQ_HZ, WMBUS_BITRATE)
+        .context("selecting the GFSK modem")?;
+    driver
+        .apply_wmbus_profile(&profile)
         .context("applying the wM-Bus mode C profile")?;
+    println!(
+        "sync {:02X?} · match {sync_bytes} byte(s) · preamble detector {preamble_detect_bits} bits",
+        &profile.sync_word[..sync_bytes as usize]
+    );
+    // After the profile: applying it rewrites the DIO configuration, so claiming DIO2
+    // for the antenna switch beforehand would be undone.
+    driver
+        .set_dio2_as_rf_switch(dio2_rf_switch)
+        .context("DIO2 as RF switch")?;
     driver
         .set_rx_boosted_gain(true)
         .context("enabling RX boosted gain")?;
@@ -118,14 +227,15 @@ pub fn run(spidev: &str, pins: GpioPins, rf_switch: Option<u8>, seconds: u64) ->
     let hal = driver.hal_mut();
     let mut sync = [0u8; 3];
     hal.read_register(0x06C0, &mut sync).ok();
-    let status = read1(hal, OP_GET_STATUS)?;
+    let _ = &sync;
+    let status = read_status(hal, OP_GET_STATUS)?;
     let errs = read_u16_after_status(hal, OP_GET_DEVICE_ERRORS)?;
     println!(
-        "config readback: sync {:02X?} (want [54, 3D, 54]) · status 0x{status:02X} · errors {:?}",
+        "config readback: sync {:02X?} · status 0x{status:02X} · errors {:?}",
         sync,
         device_error_names(errs)
     );
-    if sync != [0x54, 0x3D, 0x54] {
+    if sync[..sync_bytes.min(3) as usize] != profile.sync_word[..sync_bytes.min(3) as usize] {
         println!("  WARNING: sync word did not take — reception will not work.");
     }
 
@@ -135,6 +245,7 @@ pub fn run(spidev: &str, pins: GpioPins, rf_switch: Option<u8>, seconds: u64) ->
     let start = Instant::now();
     let mut last_beat = Instant::now();
     let mut c = Counters::default();
+    let mut last_rssi_sample = Instant::now();
 
     while start.elapsed() < Duration::from_secs(seconds) {
         let hal = driver.hal_mut();
@@ -192,13 +303,24 @@ pub fn run(spidev: &str, pins: GpioPins, rf_switch: Option<u8>, seconds: u64) ->
             hal.write_command(OP_CLEAR_IRQ_STATUS, &[0xFF, 0xFF])?;
         }
 
+        if last_rssi_sample.elapsed() >= Duration::from_millis(2) {
+            let hal = driver.hal_mut();
+            let raw = read1_after_status(hal, OP_GET_RSSI_INST)?;
+            c.rssi_hist[raw as usize] += 1;
+            let r = -(raw as i16) / 2;
+            c.rssi_min = c.rssi_min.min(r);
+            c.rssi_max = c.rssi_max.max(r);
+            c.rssi_samples += 1;
+            last_rssi_sample = Instant::now();
+        }
+
         if last_beat.elapsed() >= Duration::from_secs(15) {
             let hal = driver.hal_mut();
-            let status = read1(hal, OP_GET_STATUS)?;
+            let status = read_status(hal, OP_GET_STATUS)?;
             let errs = read_u16_after_status(hal, OP_GET_DEVICE_ERRORS)?;
-            let rssi = read1(hal, OP_GET_RSSI_INST)?;
+            let rssi = read1_after_status(hal, OP_GET_RSSI_INST)?;
             println!(
-                "  ── {:>3}s · mode {} · noise floor {} dBm · preamble {} sync {} rxdone {} crcerr {} decoded {}/{} · errors {:?}",
+                "  ── {:>3}s · mode {} · floor {} dBm (min {} max {} spread {} over {} samples) · preamble {} sync {} rxdone {} crcerr {} decoded {}/{} · errors {:?}",
                 start.elapsed().as_secs(),
                 match (status >> 4) & 0x07 {
                     0x2 => "STBY_RC",
@@ -209,6 +331,10 @@ pub fn run(spidev: &str, pins: GpioPins, rf_switch: Option<u8>, seconds: u64) ->
                     _ => "?",
                 },
                 -(rssi as i16) / 2,
+                c.rssi_min,
+                c.rssi_max,
+                c.rssi_max - c.rssi_min,
+                c.rssi_samples,
                 c.preambles,
                 c.syncs,
                 c.rx_done,
@@ -217,9 +343,41 @@ pub fn run(spidev: &str, pins: GpioPins, rf_switch: Option<u8>, seconds: u64) ->
                 c.decoded_ok + c.decode_fail,
                 device_error_names(errs),
             );
+            // Machine-readable twin of the line above, so the radio's state can be
+            // scraped, trended or shipped upstream without parsing prose.
+            let floor = c.percentile(0.5);
+            println!(
+                "TELEMETRY {{\"t\":{},\"mode\":\"{}\",\"chip_status\":{},\"errors\":{},\
+                 \"rssi_floor_dbm\":{},\"rssi_p90_dbm\":{},\"rssi_p99_dbm\":{},\"rssi_max_dbm\":{},\
+                 \"rssi_samples\":{},\"bursts\":{},\"preamble\":{},\"sync\":{},\"rxdone\":{},\
+                 \"crcerr\":{},\"decoded\":{},\"decode_fail\":{}}}",
+                start.elapsed().as_secs(),
+                match (status >> 4) & 0x07 {
+                    0x2 => "STBY_RC",
+                    0x3 => "STBY_XOSC",
+                    0x4 => "FS",
+                    0x5 => "RX",
+                    0x6 => "TX",
+                    _ => "?",
+                },
+                status,
+                errs,
+                floor,
+                c.percentile(0.10),
+                c.percentile(0.01),
+                c.rssi_max,
+                c.rssi_samples,
+                c.bursts_above(floor + 12),
+                c.preambles,
+                c.syncs,
+                c.rx_done,
+                c.crc_err,
+                c.decoded_ok,
+                c.decode_fail,
+            );
             last_beat = Instant::now();
         }
-        std::thread::sleep(Duration::from_millis(2));
+        std::thread::sleep(Duration::from_micros(200));
     }
 
     println!(
@@ -232,6 +390,23 @@ pub fn run(spidev: &str, pins: GpioPins, rf_switch: Option<u8>, seconds: u64) ->
         c.decoded_ok,
         c.decoded_ok + c.decode_fail
     );
+    let total: u32 = c.rssi_hist.iter().sum();
+    let floor = c.percentile(0.5);
+    let burst_threshold = floor + 12;
+    let bursts = c.bursts_above(burst_threshold);
+    println!(
+        "  RSSI {} samples · p50 {} · p90 {} · p99 {} · max {} dBm\n  \
+         samples >{} dBm (floor+12): {} ({:.3}%)",
+        total,
+        floor,
+        c.percentile(0.10),
+        c.percentile(0.01),
+        c.rssi_max,
+        burst_threshold,
+        bursts,
+        100.0 * bursts as f64 / total.max(1) as f64
+    );
+
     if c.rx_done == 0 {
         println!(
             "\n  No packets completed. Read the counters above:\n  \

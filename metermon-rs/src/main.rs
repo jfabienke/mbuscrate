@@ -226,6 +226,21 @@ enum Cmd {
         /// GPIO holding the antenna switch in receive (Waveshare HAT: BCM6, HIGH=RX).
         #[arg(long, default_value_t = 6)]
         rf_switch: u8,
+        /// Drive the RF-switch GPIO low instead of high.
+        #[arg(long)]
+        rf_switch_low: bool,
+        /// Do not let the chip drive DIO2 as the antenna-switch control.
+        #[arg(long)]
+        no_dio2_rf_switch: bool,
+        /// Sync word bytes to match (3 = 54 3D 54, 2 = 54 3D).
+        #[arg(long, default_value_t = 3)]
+        sync_bytes: u8,
+        /// Preamble bits required before sync is sought; 0 disables the gate.
+        #[arg(long, default_value_t = 8)]
+        preamble_detect_bits: u8,
+        /// Override the sync word, as hex (e.g. 5555 to lock on the raw preamble).
+        #[arg(long)]
+        sync_hex: Option<String>,
         #[arg(long, default_value_t = 120)]
         seconds: u64,
     },
@@ -318,8 +333,26 @@ fn main() -> Result<()> {
             dio1,
             reset,
             rf_switch,
+            rf_switch_low,
+            no_dio2_rf_switch,
+            sync_bytes,
+            preamble_detect_bits,
+            sync_hex,
             seconds,
-        } => run_sx1262_rx(&spidev, nss, busy, dio1, reset, rf_switch, seconds),
+        } => run_sx1262_rx(
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            rf_switch,
+            !rf_switch_low,
+            !no_dio2_rf_switch,
+            sync_bytes,
+            preamble_detect_bits,
+            sync_hex,
+            seconds,
+        ),
         Cmd::MockBackend {
             config,
             catalog,
@@ -990,6 +1023,11 @@ fn run_sx1262_rx(
     dio1: u8,
     reset: u8,
     rf_switch: u8,
+    rf_switch_high: bool,
+    dio2_rf_switch: bool,
+    sync_bytes: u8,
+    preamble_detect_bits: u8,
+    sync_hex: Option<String>,
     seconds: u64,
 ) -> Result<()> {
     use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
@@ -1003,6 +1041,11 @@ fn run_sx1262_rx(
             reset: Some(reset),
         },
         Some(rf_switch),
+        rf_switch_high,
+        dio2_rf_switch,
+        sync_bytes,
+        preamble_detect_bits,
+        sync_hex,
         seconds,
     )
 }
@@ -1016,6 +1059,11 @@ fn run_sx1262_rx(
     _dio1: u8,
     _reset: u8,
     _rf_switch: u8,
+    _rf_switch_high: bool,
+    _dio2_rf_switch: bool,
+    _sync_bytes: u8,
+    _preamble_detect_bits: u8,
+    _sync_hex: Option<String>,
     _seconds: u64,
 ) -> Result<()> {
     bail_no_radio("sx1262-rx")

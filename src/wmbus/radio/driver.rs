@@ -345,6 +345,16 @@ pub struct WmbusProfile {
     pub frequency_hz: u32,
     /// On-air bitrate in bits/s (e.g. `100_000` for mode C).
     pub bitrate: u32,
+    /// Sync word bytes to match, from the value written to the sync registers.
+    /// Mode C normally matches all three of `54 3D 54`, leaving the frame marker
+    /// (`0xCD`/`0x3D`) as the first payload byte. Matching only `54 3D` is more
+    /// permissive and also catches mode T.
+    pub sync_word_len: u8,
+    /// Preamble bits required before the sync word is looked for; 0 disables the gate.
+    pub preamble_detect_bits: u8,
+    /// Bytes written to the sync word registers, zero-padded. Only the first
+    /// `sync_word_len` of them are matched.
+    pub sync_word: [u8; 8],
 }
 
 impl WmbusProfile {
@@ -354,6 +364,9 @@ impl WmbusProfile {
         Self {
             frequency_hz,
             bitrate,
+            sync_word_len: 3,
+            preamble_detect_bits: 8,
+            sync_word: [0x54, 0x3D, 0x54, 0, 0, 0, 0, 0],
         }
     }
 }
@@ -620,39 +633,41 @@ impl<H: Hal> Sx126xDriver<H> {
                 crc_on,
                 crc_type,
                 sync_word_len,
+                preamble_detect_bits,
             } => {
-                let mut buf = [0u8; 9];
-
-                // Packet type (GFSK = 0x00)
-                buf[0] = 0x00;
-
-                // Preamble length in bits (16-bit value)
-                buf[1] = (preamble_len >> 8) as u8; // MSB
-                buf[2] = preamble_len as u8; // LSB
-
-                // Header type (Variable=0x01, Fixed=0x00)
-                buf[3] = match header_type {
-                    HeaderType::Variable => 0x01,
-                    HeaderType::Fixed => 0x00,
-                };
-
-                // Maximum payload length
-                buf[4] = payload_len;
-
-                // CRC enable/disable
-                buf[5] = if crc_on { 0x01 } else { 0x00 };
-
-                // CRC type (1-byte=0x01, 2-byte=0x00)
-                buf[6] = match crc_type {
-                    CrcType::Byte1 => 0x01,
-                    CrcType::Byte2 => 0x00,
-                };
-
-                // Sync word length in bytes
-                buf[7] = sync_word_len;
-
-                // DC-free encoding (disabled for wM-Bus)
-                buf[8] = 0x00;
+                // Datasheet order for SetPacketParams in GFSK. There is no packet-type
+                // byte here — the type is selected separately by SetPacketType (0x8A) —
+                // and every field is positional, so an extra leading byte shifts the
+                // whole frame and silently programs a receiver that detects nothing.
+                let buf = [
+                    (preamble_len >> 8) as u8,
+                    preamble_len as u8,
+                    match preamble_detect_bits {
+                        0 => 0x00,
+                        1..=8 => 0x04,
+                        9..=16 => 0x05,
+                        17..=24 => 0x06,
+                        _ => 0x07,
+                    },
+                    // Sync word length is expressed in BITS, while callers describe it
+                    // in bytes.
+                    sync_word_len.saturating_mul(8),
+                    0x00, // address filtering off
+                    match header_type {
+                        HeaderType::Variable => 0x01,
+                        HeaderType::Fixed => 0x00,
+                    },
+                    payload_len,
+                    // Note the encoding is not a flag: 0x01 disables the CRC while
+                    // 0x00 selects a one-byte CRC, so the intuitive "0 means off" is
+                    // precisely backwards and silently makes the radio drop every frame.
+                    match (crc_on, crc_type) {
+                        (false, _) => 0x01,
+                        (true, CrcType::Byte1) => 0x00,
+                        (true, CrcType::Byte2) => 0x02,
+                    },
+                    0x00, // whitening off
+                ];
 
                 self.hal.write_command(0x8C, &buf)?; // SetPacketParams command
             }
@@ -711,8 +726,10 @@ impl<H: Hal> Sx126xDriver<H> {
                 // Modulation shaping
                 buf[3] = params.modulation_shaping;
 
-                // RX bandwidth
-                buf[4] = params.bandwidth;
+                // RX bandwidth. The chip takes an index into a fixed set of filter
+                // settings, not a frequency, so a bandwidth in kHz written straight to
+                // this byte is simply an invalid setting.
+                buf[4] = Self::gfsk_rx_bandwidth_reg(params.bandwidth);
 
                 // Frequency deviation
                 let fdev_reg = (params.fdev as u64 * (1 << 25)) / self.xtal_freq as u64;
@@ -746,6 +763,39 @@ impl<H: Hal> Sx126xDriver<H> {
         }
         self.current_mod_params = Some(mod_params);
         Ok(())
+    }
+
+    /// Map a double-sideband bandwidth in kHz to its SX126x filter setting,
+    /// choosing the narrowest filter that is still at least as wide as requested.
+    fn gfsk_rx_bandwidth_reg(khz: u16) -> u8 {
+        const TABLE: &[(u16, u8)] = &[
+            (5, 0x1F),
+            (6, 0x17),
+            (7, 0x0F),
+            (10, 0x1E),
+            (12, 0x16),
+            (15, 0x0E),
+            (20, 0x1D),
+            (23, 0x15),
+            (29, 0x0D),
+            (39, 0x1C),
+            (47, 0x14),
+            (59, 0x0C),
+            (78, 0x1B),
+            (94, 0x13),
+            (117, 0x0B),
+            (156, 0x1A),
+            (187, 0x12),
+            (234, 0x0A),
+            (312, 0x19),
+            (374, 0x11),
+            (467, 0x09),
+        ];
+        TABLE
+            .iter()
+            .find(|(w, _)| *w >= khz)
+            .map(|(_, reg)| *reg)
+            .unwrap_or(0x09)
     }
 
     pub fn set_sync_word(&mut self, sync_word: [u8; 8]) -> Result<(), DriverError> {
@@ -1037,14 +1087,12 @@ impl<H: Hal> Sx126xDriver<H> {
     /// # wM-Bus Configuration Details
     ///
     /// This method configures:
-    /// - GFSK modulation with Gaussian 0.5 shaping
-    /// - 156 kHz receiver bandwidth
+    /// - 2-FSK with no shaping, as mode C is plain NRZ
+    /// - 234 kHz double-sideband receiver bandwidth
     /// - Frequency deviation = bitrate / 2
-    /// - 48-bit preamble
-    /// - Variable length packets with 2-byte CRC
-    /// - CCITT CRC polynomial (0x1021)
-    /// - wM-Bus S-mode sync word (0xB4B65A5A)
-    /// - +14 dBm output power
+    /// - Mode-C sync word `54 3D 54`, leaving the frame marker as the first payload byte
+    /// - Fixed-length reception: the byte after the sync word is that marker, not a length
+    /// - Hardware CRC off, because wM-Bus carries its own per-block CRC-16/EN-13757
     /// - Whitening disabled (wM-Bus requirement)
     ///
     /// # Examples
@@ -1082,15 +1130,22 @@ impl<H: Hal> Sx126xDriver<H> {
     /// [`Sx126xDriver::switch_profile`] funnel through here, so there is a single
     /// GFSK-apply path.
     pub fn apply_wmbus_profile(&mut self, profile: &WmbusProfile) -> Result<(), DriverError> {
-        // Set RF frequency
+        // Set RF frequency, then calibrate the image for that band — skipping this
+        // leaves the chip calibrated for its default band and quietly costs
+        // sensitivity, which presents as a receiver that hears only strong signals.
         self.set_rf_frequency(profile.frequency_hz)?;
+        self.calibrate_image(profile.frequency_hz)?;
 
         // Configure GFSK modulation parameters
         let mod_params = ModulationParams::Gfsk {
             params: GfskModParams {
                 bitrate: profile.bitrate,
-                modulation_shaping: 1,     // Gaussian 0.5 (typical for wM-Bus)
-                bandwidth: 156,            // 156 kHz receiver bandwidth
+                // No shaping on receive: mode C is plain NRZ 2-FSK with no encoding,
+                // and this field takes a datasheet code (0x00 none, 0x08-0x0B Gaussian)
+                // rather than a free-form number.
+                modulation_shaping: 0x00,
+                // Double-sideband, so ~2x the deviation plus the bitrate.
+                bandwidth: 234,
                 fdev: profile.bitrate / 2, // Frequency deviation = bitrate/2 (typical FSK)
             },
         };
@@ -1112,7 +1167,12 @@ impl<H: Hal> Sx126xDriver<H> {
             payload_len: 255, // read the whole buffer; the L-field bounds the frame
             crc_on: false,
             crc_type: CrcType::Byte2,
-            sync_word_len: 3, // 54 3D 54
+            // 54 3D 54. The mode-C air format is preamble 55 55 55 55, then 54 3D,
+            // then the signalling byte 54, then the frame marker (0xCD type A / 0x3D
+            // type B). Matching all three leaves that marker as the first payload byte,
+            // which is what the link decoder expects.
+            sync_word_len: profile.sync_word_len,
+            preamble_detect_bits: profile.preamble_detect_bits,
         };
         self.set_packet_params(packet_params)?;
 
@@ -1122,7 +1182,7 @@ impl<H: Hal> Sx126xDriver<H> {
         // Mode-C sync word: 54 3D 54. This is what triggers reception — the previous
         // value here was the S-mode pattern (B4 B6 5A 5A), which never matches mode-C
         // traffic and is why the label said mode_c while the radio listened for S.
-        self.set_sync_word([0x54, 0x3D, 0x54, 0, 0, 0, 0, 0])?;
+        self.set_sync_word(profile.sync_word)?;
 
         // Configure power amplifier for +14 dBm output
         self.set_pa_config(0x04, 0x00, 0x00)?;
@@ -1131,15 +1191,26 @@ impl<H: Hal> Sx126xDriver<H> {
         // Set buffer base addresses
         self.set_buffer_base_addresses(0, 0)?;
 
-        // Configure interrupt routing
+        // Interrupt routing.
+        //
+        // The general mask decides which events may set a bit in GetIrqStatus at all,
+        // so PreambleDetected and SyncwordValid must be enabled even though nothing
+        // waits on them: without that a diagnostic reading GetIrqStatus can never
+        // observe them, and "no preamble detected" becomes indistinguishable from
+        // "preamble detection not reported".
+        //
+        // DIO2 is deliberately given no IRQ. On boards that use SetDIO2AsRfSwitchCtrl
+        // the pin drives the antenna switch and cannot also be an interrupt output —
+        // assigning one here silently disables the RF switch.
         self.set_dio_irq_params(
-            // IRQ mask: RX done, TX done, CRC error, timeout
             IrqMaskBit::RxDone as u16
                 | IrqMaskBit::TxDone as u16
+                | IrqMaskBit::PreambleDetected as u16
+                | IrqMaskBit::SyncwordValid as u16
                 | IrqMaskBit::CrcErr as u16
                 | IrqMaskBit::Timeout as u16,
-            IrqMaskBit::RxDone as u16, // DIO1: RX done
-            IrqMaskBit::TxDone as u16, // DIO2: TX done
+            IrqMaskBit::RxDone as u16, // DIO1: the only line we wait on
+            0,                         // DIO2: reserved for the RF switch
             0,                         // DIO3: unused
         )?;
 
@@ -2003,6 +2074,43 @@ impl<H: Hal> Sx126xDriver<H> {
             if enabled { "25" } else { "4.6" }
         );
         Ok(())
+    }
+
+    /// Run the chip's self-calibration.
+    ///
+    /// `0x7F` calibrates every block (RC64k, RC13M, PLL, ADC bulk/pulse/tuning, image).
+    /// The power-on calibration happens before the chip knows its final configuration,
+    /// and an uncalibrated ADC or PLL leaves the receiver reporting a healthy RSSI while
+    /// the demodulator never recovers a single bit.
+    pub fn calibrate(&mut self, blocks: u8) -> Result<(), DriverError> {
+        self.set_standby(StandbyMode::RC)?;
+        self.hal
+            .write_command(0x89, &[blocks])
+            .map_err(DriverError::Hal)?;
+        // Calibration drives BUSY high for a few ms. No sleep here: the HAL waits for
+        // BUSY to fall before issuing the next command, which is the authoritative
+        // signal and does not stall callers that are driving a mock.
+        Ok(())
+    }
+
+    /// Calibrate the image rejection for the band containing `frequency_hz`.
+    ///
+    /// Required by the datasheet whenever the operating band changes: the
+    /// calibration performed at reset is for the default band, and running outside
+    /// it costs receive sensitivity. Band edges are the datasheet's (Table 9-3).
+    pub fn calibrate_image(&mut self, frequency_hz: u32) -> Result<(), DriverError> {
+        let mhz = frequency_hz / 1_000_000;
+        let (f1, f2) = match mhz {
+            430..=440 => (0x6B, 0x6F),
+            470..=510 => (0x75, 0x81),
+            779..=787 => (0xC1, 0xC5),
+            863..=870 => (0xD7, 0xDB),
+            902..=928 => (0xE1, 0xE9),
+            _ => return Ok(()), // outside the documented bands: leave calibration alone
+        };
+        self.hal
+            .write_command(0x98, &[f1, f2])
+            .map_err(DriverError::Hal)
     }
 
     /// Let the chip drive DIO2 as the antenna-switch control.
