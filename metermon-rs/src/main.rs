@@ -183,6 +183,12 @@ enum Cmd {
         /// Device catalog: JSON {"<meterid>": {"model": "...", "firmware": null}}.
         #[arg(long)]
         catalog: String,
+        /// Optional AES key file (JSON map or op:key lines) to serve on op:startup,
+        /// restoring the provisioning chain the retired backend provided. Keep it
+        /// gitignored; keys cross the broker in cleartext, so use a trusted broker.
+        /// Omitted, the mock serves no key material.
+        #[arg(long)]
+        keys: Option<String>,
     },
     /// Remove a persisted AES key from the redb store (e.g. one bound to the wrong
     /// meter id). Run with the monitor stopped (redb is single-writer).
@@ -239,7 +245,11 @@ fn main() -> Result<()> {
         } => run_sweep(&config, &db, seconds),
         Cmd::Import { db, from } => run_import(&db, &from),
         Cmd::ImportKeys { db, from_config } => run_import_keys(&db, &from_config),
-        Cmd::MockBackend { config, catalog } => mock_backend::run(&config, &catalog),
+        Cmd::MockBackend {
+            config,
+            catalog,
+            keys,
+        } => mock_backend::run(&config, &catalog, keys.as_deref()),
         Cmd::RemoveKey { db, meterid } => {
             let dm = devices::DeviceManager::open(&db, 20, 600)?;
             if dm.remove_key(meterid)? {
