@@ -1990,17 +1990,6 @@ impl<H: Hal> Sx126xDriver<H> {
     ///
     /// * `Ok(())` - Gain mode set successfully
     /// * `Err(DriverError)` - Configuration failed
-    /// Let the chip drive DIO2 as the antenna-switch control.
-    ///
-    /// Boards with an external RF switch (e.g. a PE4259) route DIO2 to it, so without
-    /// this the antenna is never connected to the receiver and the radio hears
-    /// nothing while looking perfectly healthy.
-    pub fn set_dio2_as_rf_switch(&mut self, enabled: bool) -> Result<(), DriverError> {
-        self.hal
-            .write_command(0x9D, &[u8::from(enabled)])
-            .map_err(DriverError::Hal)
-    }
-
     pub fn set_rx_boosted_gain(&mut self, enabled: bool) -> Result<(), DriverError> {
         self.set_standby(StandbyMode::RC)?;
 
@@ -2014,6 +2003,17 @@ impl<H: Hal> Sx126xDriver<H> {
             if enabled { "25" } else { "4.6" }
         );
         Ok(())
+    }
+
+    /// Let the chip drive DIO2 as the antenna-switch control.
+    ///
+    /// Boards with an external RF switch (e.g. a PE4259) route DIO2 to it, so without
+    /// this the antenna is never connected to the receiver and the radio hears
+    /// nothing while looking perfectly healthy.
+    pub fn set_dio2_as_rf_switch(&mut self, enabled: bool) -> Result<(), DriverError> {
+        self.hal
+            .write_command(0x9D, &[u8::from(enabled)])
+            .map_err(DriverError::Hal)
     }
 
     /// Sets regulator mode for optimal power efficiency
