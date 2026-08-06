@@ -107,6 +107,14 @@ pub trait VendorQuirks: Send + Sync {
     fn reinterpret_record(&self, _record: &mut MBusRecord) -> Option<QuirkApplied> {
         None
     }
+
+    /// A record (DIF/VIF/data bytes) that demonstrates the deviation.
+    ///
+    /// Required, not optional: the conformance harness parses these bytes with and
+    /// without the quirk and asserts the outcome differs *and* is attributed. A quirk
+    /// that cannot demonstrate its deviation cannot justify overriding the standard —
+    /// this makes P4's evidence requirement mechanical instead of social.
+    fn evidence_record(&self) -> &'static [u8];
 }
 
 #[cfg(test)]

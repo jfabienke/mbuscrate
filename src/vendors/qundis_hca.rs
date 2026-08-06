@@ -368,6 +368,13 @@ impl VendorQuirks for QundisDateQuirk {
             provisional: self.manifest.status == QuirkStatus::Provisional,
         })
     }
+
+    fn evidence_record(&self) -> &'static [u8] {
+        // DIF 0x02, VIF 0x04, data 0xF8 0x10: December 2015 in QUNDIS encoding —
+        // read per the standard this is 434.0 (10^1 Wh) energy; the deviation is
+        // exactly that it is not.
+        &[0x02, 0x04, 0xF8, 0x10]
+    }
 }
 
 #[cfg(test)]

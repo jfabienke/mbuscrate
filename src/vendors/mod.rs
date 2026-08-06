@@ -343,6 +343,12 @@ impl VendorRegistry {
             .collect()
     }
 
+    /// Every registered quirk, regardless of scope — the conformance harness
+    /// iterates this so new vendors are covered without editing the harness.
+    pub fn registered_quirks(&self) -> Vec<Arc<dyn VendorQuirks>> {
+        self.quirks.lock().unwrap().clone()
+    }
+
     /// Get list of registered manufacturers
     pub fn registered_manufacturers(&self) -> Vec<String> {
         let inner = self.inner.lock().unwrap();
