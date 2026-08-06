@@ -496,6 +496,42 @@ The Device Manager's constant application (§1.1 case 2) and the session/commiss
 round-trip (§1.1 case 4) are separate deliverables in their own repos, tracked there;
 this migration covers only the crate-side capability each depends on.
 
+### 7.2 Profile channel wire contract (step 4)
+
+The Device Manager → gateway profile channel reuses the proven key-channel shape:
+request-driven (§1.1 case 3), MQTT-carried, and **durable-before-live** — a profile is
+persisted to redb before it is installed in memory, and loaded from redb at startup
+before any broker contact, so the gateway keeps its device knowledge across restarts
+and broker outages exactly as it keeps its keys.
+
+**Request** (gateway → backend, on the data topic, alongside `op:startup`):
+
+```json
+{ "op": "profile_request", "gw": "6543", "meters": [74644444, 63398862] }
+```
+
+Sent at monitor startup with the ids the device store currently tracks. The backend
+also treats a plain `op:startup` as an implicit request for everything it knows about
+that gateway.
+
+**Response** (backend → gateway, on the control topic, one message per device):
+
+```json
+{ "op": "profile", "meterid": 74644444, "model": "MULTICAL 21", "firmware": null }
+```
+
+`model` is required and bounded; `firmware` optional. The gateway validates, persists
+(`profiles` table in redb, keyed by meter id), installs, and from the next frame
+onward builds `DeviceIdentity.profile = Some(DeviceProfile { model, firmware })` for
+that meter. The decode JSON carries `"profile": "<model>"` so the effect is
+observable end to end even before anything *interprets* the profile (that is step 5).
+
+The crate itself needs no change for this step: `DeviceIdentity.profile` has been the
+waiting seam since migration step 1. Until the real Device Manager exists, a **mock
+backend** (`metermon-rs mock-backend`, catalog-file driven) implements the contract so
+the gateway side is testable end to end; the mock is the contract's reference
+implementation and is superseded by the Device Manager repo, not extended.
+
 ### 7.1 Cross-repo dependencies and the enabling seam
 
 Two clarifications about how this lands across repos:
