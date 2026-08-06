@@ -22,6 +22,7 @@ use std::sync::OnceLock;
 
 use crate::config::Config;
 use crate::keystore::KeyStore;
+use crate::profiles::ProfileStore;
 
 /// Process-wide vendor registry (QUNDIS today, KAM when its interpretation lands).
 /// Threading this through the decode context is what makes the crate's vendor layer
@@ -35,18 +36,27 @@ fn vendor_registry() -> &'static VendorRegistry {
 /// reported as fields so the A/B diff stays aligned.
 pub fn decode_frame(raw: &[u8], cfg: &Config, keys: &KeyStore) -> Value {
     // Stateless convenience wrapper: a throwaway cache cannot expand compact frames,
-    // since that needs a full frame seen earlier. Long-running callers should keep a
-    // cache and use [`decode_frame_with_cache`].
-    decode_frame_with_cache(raw, cfg, keys, &mut CompactLayoutCache::new())
+    // since that needs a full frame seen earlier, and no profiles are available.
+    // Long-running callers should keep both and use [`decode_frame_with_cache`].
+    decode_frame_with_cache(
+        raw,
+        cfg,
+        keys,
+        &mut CompactLayoutCache::new(),
+        &ProfileStore::new(),
+    )
 }
 
 /// Decode one frame, using (and updating) a compact-frame layout cache so compact
-/// frames from a meter whose full frame was seen earlier decode to real records.
+/// frames from a meter whose full frame was seen earlier decode to real records, and
+/// consulting the backend-supplied profile store to resolve the device model
+/// (vendor-layers §7.2).
 pub fn decode_frame_with_cache(
     raw: &[u8],
     cfg: &Config,
     keys: &KeyStore,
     cache: &mut CompactLayoutCache,
+    profiles: &ProfileStore,
 ) -> Value {
     let frame = match decode_mode_c(raw) {
         Ok(f) => f,
@@ -71,7 +81,10 @@ pub fn decode_frame_with_cache(
             version: frame.version,
             device_type: frame.device_type,
             address: meterid,
-            profile: None, // Device Manager → gateway profile channel: migration step 4
+            // The Device Manager's answer for this meter, when the gateway holds one
+            // (migration step 4). Selects model-specific interpretation in the crate;
+            // absent, decode falls back to raw for anything the frame cannot settle.
+            profile: profiles.get(meterid).cloned(),
         },
         Integrity {
             header_valid: frame.crc_ok,
@@ -83,6 +96,7 @@ pub fn decode_frame_with_cache(
         FrameType::TypeB => "B",
         FrameType::Unknown => "?",
     };
+    let resolved_model = ctx.device.profile.as_ref().map(|p| p.model.clone());
     let mut out = json!({
         "gwid": cfg.gwid,
         "meterid": meterid,
@@ -95,6 +109,11 @@ pub fn decode_frame_with_cache(
         "crc_ok": frame.crc_ok,
     });
     let obj = out.as_object_mut().unwrap();
+    // Make the profile channel observable end to end (§7.2), even before anything
+    // interprets the model (that is migration step 5).
+    if let Some(model) = resolved_model {
+        obj.insert("profile".into(), json!(model));
+    }
 
     // No application payload (e.g. ACC-NR / SND-NKE short frames).
     let ci = match frame.ci() {
@@ -343,6 +362,34 @@ fn record_to_json(rec: &MBusRecord) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Step 4 observable end to end: with a backend-supplied profile installed, the
+    /// decode carries the resolved model — the crate's DeviceIdentity.profile seam is
+    /// fed, even though nothing interprets it yet (that is step 5).
+    #[test]
+    fn resolved_profile_appears_in_decode_output() {
+        use mbus_rs::vendors::DeviceProfile;
+        let raw = hex::decode("3d12442d2c785634121b16780413e80300009a1f").unwrap();
+        let mut profiles = ProfileStore::new();
+        profiles.install(
+            12345678,
+            DeviceProfile {
+                model: "MULTICAL 21".into(),
+                firmware: None,
+            },
+        );
+        let v = decode_frame_with_cache(
+            &raw,
+            &empty_cfg(),
+            &KeyStore::new(),
+            &mut mbus_rs::wmbus::compact_frame::CompactLayoutCache::new(),
+            &profiles,
+        );
+        assert_eq!(v["profile"], "MULTICAL 21");
+        // Without a profile the field is absent, not invented.
+        let v2 = decode_frame(&raw, &empty_cfg(), &KeyStore::new());
+        assert!(v2.get("profile").is_none());
+    }
 
     /// The vendor layer is live: a QUNDIS frame decoded through the ordinary path
     /// gets its repurposed VIF 0x04 interpreted as a date, because decode_frame now
