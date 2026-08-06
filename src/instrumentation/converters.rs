@@ -405,6 +405,7 @@ mod tests {
             data_len: 0,
             data: [0; 256],
             more_records_follow: 0,
+            applied_quirks: Vec::new(),
         }];
 
         let inst = from_mbus_frame(&frame, &records, None);

@@ -4,7 +4,9 @@
 //! to the M-Bus protocol, allowing external crates to override standard behavior
 //! at specific extension points defined in EN 13757.
 
+pub mod context;
 pub mod manufacturer;
+pub mod quirks;
 pub mod qundis_hca;
 
 use std::collections::HashMap;
@@ -12,6 +14,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::MBusError;
 use crate::mbus::secondary_addressing::SecondaryAddress;
+pub use context::{DecodeContext, DeviceIdentity, DeviceProfile, Integrity};
+pub use quirks::{Evidence, QuirkApplied, QuirkManifest, QuirkStatus, VendorQuirks, VendorScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -252,10 +256,13 @@ pub trait VendorExtension: Send + Sync {
     }
 }
 
-/// Registry for vendor extensions
+/// Registry for vendor extensions (Layer 1) and quirks (Layer 2).
 #[derive(Default, Clone)]
 pub struct VendorRegistry {
     inner: Arc<Mutex<HashMap<String, Arc<dyn VendorExtension>>>>,
+    /// Registered quirks. Selection is by each quirk's manifest scope, not by a map
+    /// key, because a quirk is usually narrower than a manufacturer (P4).
+    quirks: Arc<Mutex<Vec<Arc<dyn VendorQuirks>>>>,
 }
 
 impl VendorRegistry {
@@ -311,6 +318,37 @@ impl VendorRegistry {
         inner.contains_key(&key)
     }
 
+    /// Register a Layer 2 quirk. Its manifest's scope and status decide where and
+    /// whether it applies; registration itself grants nothing wider.
+    pub fn register_quirk(&self, quirk: Arc<dyn VendorQuirks>) {
+        self.quirks.lock().unwrap().push(quirk);
+    }
+
+    /// The quirks applicable to one device (P4): scope must match, and `Provisional`
+    /// entries are excluded unless the caller explicitly opted in.
+    pub fn quirks_for(
+        &self,
+        device: &context::DeviceIdentity,
+        allow_provisional: bool,
+    ) -> Vec<Arc<dyn VendorQuirks>> {
+        self.quirks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|q| {
+                let m = q.manifest();
+                m.scope.matches(device) && (allow_provisional || m.status == QuirkStatus::Verified)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Every registered quirk, regardless of scope — the conformance harness
+    /// iterates this so new vendors are covered without editing the harness.
+    pub fn registered_quirks(&self) -> Vec<Arc<dyn VendorQuirks>> {
+        self.quirks.lock().unwrap().clone()
+    }
+
     /// Get list of registered manufacturers
     pub fn registered_manufacturers(&self) -> Vec<String> {
         let inner = self.inner.lock().unwrap();
@@ -321,9 +359,11 @@ impl VendorRegistry {
     pub fn with_defaults() -> Result<Self, MBusError> {
         let registry = Self::new();
 
-        // Register QUNDIS HCA extension
+        // Register QUNDIS HCA extension (Layer 1: header enrichment, metrics).
         let qundis_extension = Arc::new(crate::vendors::qundis_hca::QundisHcaExtension::new());
         registry.register("QDS", qundis_extension)?;
+        // QUNDIS date handling is a Layer 2 quirk: it overrides a standard VIF.
+        registry.register_quirk(Arc::new(crate::vendors::qundis_hca::QundisDateQuirk::new()));
 
         // Future vendor extensions can be added here
         // e.g., registry.register("KAM", kamstrup_extension)?;

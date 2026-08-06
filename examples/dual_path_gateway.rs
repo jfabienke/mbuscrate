@@ -61,6 +61,7 @@ fn demo_mbus_dual_path() {
             data_len: 0,
             data: [0; 256],
             more_records_follow: 0,
+            applied_quirks: Vec::new(),
         },
         // Bad reading - negative energy (invalid)
         MBusRecord {
@@ -77,6 +78,7 @@ fn demo_mbus_dual_path() {
             data_len: 0,
             data: [0; 256],
             more_records_follow: 0,
+            applied_quirks: Vec::new(),
         },
         // Good reading - valid temperature
         MBusRecord {
@@ -93,6 +95,7 @@ fn demo_mbus_dual_path() {
             data_len: 0,
             data: [0; 256],
             more_records_follow: 0,
+            applied_quirks: Vec::new(),
         },
         // Bad reading - out of bounds temperature
         MBusRecord {
@@ -109,6 +112,7 @@ fn demo_mbus_dual_path() {
             data_len: 0,
             data: [0; 256],
             more_records_follow: 0,
+            applied_quirks: Vec::new(),
         },
     ];
 
