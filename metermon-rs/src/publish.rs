@@ -8,7 +8,18 @@ use std::time::Duration;
 
 use crate::config::MqttConfig;
 
-type ControlHandler = Arc<Mutex<Option<Box<dyn Fn(&serde_json::Value) + Send>>>>;
+type BoxedHandler = Box<dyn Fn(&serde_json::Value) + Send>;
+
+struct ControlSlot {
+    handler: Option<BoxedHandler>,
+    /// Messages that arrived before a handler was registered. With a persistent
+    /// session the broker redelivers queued QoS1 messages the instant the connection
+    /// opens — racing subscribe_control — and dropping them here would silently lose
+    /// exactly the keys/profiles that were queued while the gateway was offline.
+    pending: Vec<serde_json::Value>,
+}
+
+type ControlHandler = Arc<Mutex<ControlSlot>>;
 
 pub struct Publisher {
     client: Client,
@@ -66,16 +77,26 @@ impl Publisher {
         }
         let (client, mut connection) = Client::new(opts, 16);
 
-        let control: ControlHandler = Arc::new(Mutex::new(None));
+        let control: ControlHandler = Arc::new(Mutex::new(ControlSlot {
+            handler: None,
+            pending: Vec::new(),
+        }));
         let control_cb = control.clone();
         std::thread::spawn(move || {
             for event in connection.iter() {
                 match event {
                     Ok(Event::Incoming(Incoming::Publish(p))) => {
-                        if let Some(handler) = control_cb.lock().unwrap().as_ref() {
-                            if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&p.payload)
-                            {
-                                handler(&msg);
+                        if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&p.payload) {
+                            let mut slot = control_cb.lock().unwrap();
+                            match &slot.handler {
+                                Some(handler) => handler(&msg),
+                                None => {
+                                    // Bounded: a runaway publisher must not exhaust
+                                    // memory before the handler registers.
+                                    if slot.pending.len() < 256 {
+                                        slot.pending.push(msg);
+                                    }
+                                }
                             }
                         }
                     }
@@ -99,7 +120,25 @@ impl Publisher {
     where
         F: Fn(&serde_json::Value) + Send + 'static,
     {
-        *self.control.lock().unwrap() = Some(Box::new(handler));
+        // Register, then replay anything the persistent session delivered before the
+        // handler existed — queued-while-offline messages beat this call to the wire.
+        let backlog = {
+            let mut slot = self.control.lock().unwrap();
+            slot.handler = Some(Box::new(handler));
+            std::mem::take(&mut slot.pending)
+        };
+        if !backlog.is_empty() {
+            log::info!(
+                "delivering {} control message(s) queued before handler registration",
+                backlog.len()
+            );
+            let slot = self.control.lock().unwrap();
+            if let Some(h) = &slot.handler {
+                for msg in &backlog {
+                    h(msg);
+                }
+            }
+        }
         self.client.subscribe(control_topic, QoS::AtLeastOnce)?;
         Ok(())
     }

@@ -19,6 +19,8 @@ mod decode;
 mod devices;
 mod health;
 mod keystore;
+mod mock_backend;
+mod profiles;
 mod publish;
 mod source;
 mod sweep;
@@ -171,6 +173,23 @@ enum Cmd {
         #[arg(long)]
         from_config: String,
     },
+    /// Run the mock backend Device Manager: watch the gateway's data topic and answer
+    /// op:startup / op:profile_request with op:profile messages from a catalog file.
+    /// Stand-in for the real Device Manager (vendor-layers §7.2); serves model names
+    /// only, never key material.
+    MockBackend {
+        #[arg(long, default_value = "metermon.conf")]
+        config: String,
+        /// Device catalog: JSON {"<meterid>": {"model": "...", "firmware": null}}.
+        #[arg(long)]
+        catalog: String,
+        /// Optional AES key file (JSON map or op:key lines) to serve on op:startup,
+        /// restoring the provisioning chain the retired backend provided. Keep it
+        /// gitignored; keys cross the broker in cleartext, so use a trusted broker.
+        /// Omitted, the mock serves no key material.
+        #[arg(long)]
+        keys: Option<String>,
+    },
     /// Remove a persisted AES key from the redb store (e.g. one bound to the wrong
     /// meter id). Run with the monitor stopped (redb is single-writer).
     RemoveKey {
@@ -226,6 +245,11 @@ fn main() -> Result<()> {
         } => run_sweep(&config, &db, seconds),
         Cmd::Import { db, from } => run_import(&db, &from),
         Cmd::ImportKeys { db, from_config } => run_import_keys(&db, &from_config),
+        Cmd::MockBackend {
+            config,
+            catalog,
+            keys,
+        } => mock_backend::run(&config, &catalog, keys.as_deref()),
         Cmd::RemoveKey { db, meterid } => {
             let dm = devices::DeviceManager::open(&db, 20, 600)?;
             if dm.remove_key(meterid)? {
@@ -416,6 +440,26 @@ fn run_monitor(
         let dm = Arc::new(devices::DeviceManager::open(db_path, 20, 600)?);
         log::info!("device store: {db_path}");
 
+        // Device profiles: same durable-before-live discipline as keys. Load from redb
+        // before broker contact so the gateway decodes with its device knowledge even
+        // when the backend is unreachable.
+        let profile_store = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::profiles::ProfileStore::new(),
+        ));
+        match dm.load_profiles() {
+            Ok(rows) => {
+                let mut ps = profile_store.lock().unwrap();
+                for (id, model, firmware) in rows {
+                    ps.install(
+                        id,
+                        mbus_rs::vendors::DeviceProfile { model, firmware },
+                    );
+                }
+                log::info!("profile store holds {} device profile(s) from redb", ps.len());
+            }
+            Err(e) => anyhow::bail!("failed to load persisted device profiles from redb: {e}"),
+        }
+
         // Load durably-persisted AES keys locally, before MQTT/radio init, so the gateway has
         // credentials immediately and never blocks on the control-topic pull for them. Fail
         // startup clearly if the persisted keys cannot be read or installed.
@@ -456,10 +500,34 @@ fn run_monitor(
                 }
                 match &cfg.mqtt.control_topic {
                     Some(control) => {
-                        match p.subscribe_control(
-                            control,
-                            key_install_handler(keys.clone(), dm.clone()),
-                        ) {
+                        let key_handler = key_install_handler(keys.clone(), dm.clone());
+                        let ps_cb = profile_store.clone();
+                        let dm_profile = dm.clone();
+                        match p.subscribe_control(control, move |msg| {
+                            key_handler(msg);
+                            if let Some((id, profile)) =
+                                crate::profiles::ProfileStore::parse_profile_message(msg)
+                            {
+                                // Durable first, live second — a profile is never in
+                                // use before it would survive a restart.
+                                match dm_profile.store_profile(
+                                    id,
+                                    &profile.model,
+                                    profile.firmware.as_deref(),
+                                ) {
+                                    Ok(()) => {
+                                        log::info!(
+                                            "installed + persisted profile for meter {id}: {}",
+                                            profile.model
+                                        );
+                                        ps_cb.lock().unwrap().install(id, profile);
+                                    }
+                                    Err(e) => {
+                                        log::warn!("rejected profile for meter {id}: {e}")
+                                    }
+                                }
+                            }
+                        }) {
                             Ok(()) => log::info!("pulling AES keys from control topic {control}"),
                             Err(e) => log::warn!("control-topic subscribe failed: {e}"),
                         }
@@ -475,6 +543,23 @@ fn run_monitor(
                     cfg.mqtt.control_topic.as_deref(),
                 )) {
                     log::warn!("startup announce failed: {e}");
+                }
+                // Ask the Device Manager for profiles covering the fleet we actually
+                // track (vendor-layers §7.2). Answers arrive as op:profile messages.
+                match dm.device_ids() {
+                    Ok(meters) => {
+                        let req = serde_json::json!({
+                            "op": "profile_request", "gw": cfg.gwid, "meters": meters,
+                        });
+                        match p.publish_json(&req) {
+                            Ok(()) => log::info!(
+                                "requested device profiles for {} meter(s)",
+                                req["meters"].as_array().map_or(0, |m| m.len())
+                            ),
+                            Err(e) => log::warn!("profile request failed: {e}"),
+                        }
+                    }
+                    Err(e) => log::warn!("could not enumerate devices for profile request: {e}"),
                 }
                 log::info!("gateway status → {status_topic}, health → {health_topic}");
                 Some(p)
@@ -592,7 +677,10 @@ fn run_monitor(
                 last_frame_at = Some(Instant::now()); // any received frame proves RX is alive
                 let (v, has_key) = {
                     let k = keys.lock().unwrap();
-                    let v = decode::decode_frame_with_cache(&frame, &cfg, &k, &mut layouts);
+                    let v = {
+                        let ps = profile_store.lock().unwrap();
+                        decode::decode_frame_with_cache(&frame, &cfg, &k, &mut layouts, &ps)
+                    };
                     let meter = v["meterid"].as_u64().unwrap_or(0) as u32;
                     (v, k.get(meter).is_some())
                 };
@@ -1035,7 +1123,13 @@ fn run_replay(capture: &str, config_path: &str, keys_path: Option<&str>) -> Resu
     // apply to the compact frames that follow — same as live.
     let mut layouts = mbus_rs::wmbus::compact_frame::CompactLayoutCache::new();
     while let Some(frame) = src.next_frame()? {
-        let decoded = decode::decode_frame_with_cache(&frame, &cfg, &keys, &mut layouts);
+        let decoded = decode::decode_frame_with_cache(
+            &frame,
+            &cfg,
+            &keys,
+            &mut layouts,
+            &crate::profiles::ProfileStore::new(),
+        );
         println!("{}", serde_json::to_string(&decoded)?);
     }
     Ok(())

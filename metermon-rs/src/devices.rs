@@ -30,6 +30,10 @@ const UNATTRIBUTED_KEY: &str = "unattributed_crc_fail";
 /// keys here lets the gateway load credentials locally at startup — before, and independent
 /// of, the MQTT control-topic pull.
 const KEYS: TableDefinition<u32, &str> = TableDefinition::new("keys");
+/// Device profiles pushed by the backend Device Manager: meter id -> JSON
+/// `{"model":..,"firmware":..}`. Persisted before install (durable-before-live) and
+/// loaded at startup before broker contact, exactly like KEYS.
+const PROFILES: TableDefinition<u32, &str> = TableDefinition::new("profiles");
 
 /// A well-formed AES-128 key is exactly 32 hex chars (16 bytes). Validated before any key is
 /// stored; the key value itself is never logged.
@@ -149,6 +153,7 @@ impl DeviceManager {
             w.open_table(EVENTS)?;
             w.open_table(META)?;
             w.open_table(KEYS)?; // initialize the keys table on first database creation
+            w.open_table(PROFILES)?;
         }
         w.commit()?;
         Ok(Self {
@@ -203,6 +208,58 @@ impl DeviceManager {
         }
         w.commit()?;
         Ok(existed)
+    }
+
+    /// Durably store a device profile (write-through when one is pushed by the
+    /// backend). Validation happened at parse; this is the atomic persistence half.
+    pub fn store_profile(&self, meterid: u32, model: &str, firmware: Option<&str>) -> Result<()> {
+        if meterid == 0 || model.is_empty() {
+            anyhow::bail!("refusing to store malformed profile for meter {meterid}");
+        }
+        let json = serde_json::json!({ "model": model, "firmware": firmware }).to_string();
+        let w = self.db.begin_write()?;
+        {
+            let mut t = w.open_table(PROFILES)?;
+            t.insert(meterid, json.as_str())?;
+        }
+        w.commit()?;
+        Ok(())
+    }
+
+    /// Load all persisted `(meterid, model, firmware)` profiles, to seed the profile
+    /// store at startup before MQTT contact.
+    pub fn load_profiles(&self) -> Result<Vec<(u32, String, Option<String>)>> {
+        let r = self.db.begin_read()?;
+        let t = match r.open_table(PROFILES) {
+            Ok(t) => t,
+            // A store created before the profiles table existed: nothing to load.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (k, v) = row?;
+            let j: serde_json::Value = serde_json::from_str(v.value())?;
+            let model = j["model"].as_str().unwrap_or_default().to_string();
+            if model.is_empty() {
+                continue;
+            }
+            let firmware = j["firmware"].as_str().map(str::to_string);
+            out.push((k.value(), model, firmware));
+        }
+        Ok(out)
+    }
+
+    /// Meter ids currently tracked by the device store — the payload of a
+    /// profile_request, so the backend answers for the fleet we actually hear.
+    pub fn device_ids(&self) -> Result<Vec<u32>> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(DEVICES)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            out.push(row?.0.value());
+        }
+        Ok(out)
     }
 
     /// Load all persisted `(meterid, hexkey)` pairs, to seed the keystore at startup before
@@ -909,6 +966,51 @@ mod tests {
         assert!(!has_device(&dm, 63398870), "ghost removed");
         assert!(has_device(&dm, 74644444), "validated device kept");
         assert_eq!(count_events(&dm, 74644444, "first_seen"), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Profiles follow the key discipline: validated, atomically persisted, loaded
+    /// on reopen before any broker contact, tolerant of stores that predate the table.
+    #[test]
+    fn stores_and_loads_profiles_surviving_reopen() {
+        let path = tmp_db();
+        {
+            let dm = DeviceManager::open(&path, 20, 600).unwrap();
+            dm.store_profile(74644444, "MULTICAL 21", None).unwrap();
+            dm.store_profile(63398862, "MULTICAL 21", Some("FW54"))
+                .unwrap();
+            assert!(dm.store_profile(0, "X", None).is_err(), "meter 0 refused");
+            assert!(
+                dm.store_profile(1, "", None).is_err(),
+                "empty model refused"
+            );
+        }
+        let dm = DeviceManager::open(&path, 20, 600).unwrap();
+        let mut rows = dm.load_profiles().unwrap();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    63398862,
+                    "MULTICAL 21".to_string(),
+                    Some("FW54".to_string())
+                ),
+                (74644444, "MULTICAL 21".to_string(), None),
+            ]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn device_ids_lists_the_tracked_fleet() {
+        let path = tmp_db();
+        let dm = DeviceManager::open(&path, 20, 600).unwrap();
+        dm.record_frame(&obs(74644444, true, false)).unwrap();
+        dm.record_frame(&obs(63398862, true, false)).unwrap();
+        let mut ids = dm.device_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec![63398862, 74644444]);
         let _ = std::fs::remove_file(&path);
     }
 
