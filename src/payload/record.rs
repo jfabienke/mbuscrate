@@ -21,6 +21,9 @@ pub struct MBusRecord {
     pub data_len: usize,
     pub data: [u8; 256],
     pub more_records_follow: u8,
+    /// Quirks that changed this record's interpretation (vendor-layers P5). Empty for
+    /// a purely standard decode; a consumer can always tell an overridden reading.
+    pub applied_quirks: Vec<crate::vendors::QuirkApplied>,
 }
 
 /// Represents the M-Bus data record header.
@@ -274,6 +277,7 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
             data
         },
         more_records_follow: 0,
+        applied_quirks: Vec::new(),
     };
 
     Ok(record)
@@ -456,6 +460,7 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
         data_len: 0,
         data: [0; 256],
         more_records_follow: 0,
+        applied_quirks: Vec::new(),
     };
 
     // Skip idle filler bytes if present (they are optional)
@@ -646,12 +651,12 @@ fn apply_vendor_value(
     };
 }
 
-/// Offer a parsed record to the context's vendor binding at the extension points the
-/// standard reserves for manufacturers (DIF 0x0F/0x1F, VIF 0x7F/0xFF, status bits).
-///
-/// The QUNDIS VIF 0x04 branch below is a mis-filed Layer 2 quirk temporarily riding
-/// the extension hook — it moves to `VendorQuirks` in migration step 3, which is when
-/// the manufacturer-name comparison leaves this file.
+/// Offer a parsed record to the context's vendor binding: first the extension points
+/// the standard reserves for manufacturers (DIF 0x0F/0x1F, VIF 0x7F/0xFF, status
+/// bits — Layer 1, additive), then the scope-matched quirks (Layer 2, overriding),
+/// each of which records its application on the record (P5). No manufacturer name is
+/// ever compared here: extensions are keyed by the context's binding and quirks by
+/// their own manifests, so generic code stays vendor-blind (P1/P7).
 fn apply_vendor_hooks(
     record: &mut MBusRecord,
     ctx: &vendors::DecodeContext,
@@ -691,17 +696,6 @@ fn apply_vendor_hooks(
         }
     }
 
-    // QUNDIS repurposes standard VIF 0x04 as a date (a quirk; see doc above).
-    if mfr_id == "QDS" && record.drh.vib.vif == 0x04 {
-        if let Some((unit, exp, qty, var)) = ext.parse_vif_manufacturer_specific(
-            mfr_id,
-            record.drh.vib.vif,
-            &record.data[..record.data_len],
-        )? {
-            apply_vendor_value(record, unit, exp, qty, var);
-        }
-    }
-
     // Vendor-defined status bits [7:5] in the trailing data byte.
     if record.data_len > 0 {
         let status_byte = record.data[record.data_len - 1];
@@ -722,6 +716,14 @@ fn apply_vendor_hooks(
                     record.quantity = format!("{} [{}]", record.quantity, status_str);
                 }
             }
+        }
+    }
+
+    // Layer 2: quirks override the standard reading where the device deviates from
+    // the specification. Every application is recorded on the record (P5).
+    for quirk in ctx.quirks() {
+        if let Some(applied) = quirk.reinterpret_record(record) {
+            record.applied_quirks.push(applied);
         }
     }
 
@@ -987,6 +989,7 @@ mod tests {
             data_len: 0,
             data: [0; 256],
             more_records_follow: 0,
+            applied_quirks: Vec::new(),
         };
         mbus_data_record_append(&mut record);
         assert_eq!(record.quantity, "Manufacturer specific");

@@ -307,13 +307,26 @@ fn record_to_json(rec: &MBusRecord) -> Value {
         MBusRecordValue::Numeric(n) => json!(n),
         MBusRecordValue::String(s) => json!(s),
     };
-    json!({
+    let mut obj = json!({
         "dif": format!("0x{:02X}", rec.drh.dib.dif),
         "vif": format!("0x{:02X}", rec.drh.vib.vif),
         "value": value,
         "unit": rec.unit,
         "quantity": rec.quantity,
-    })
+    });
+    // A quirk-overridden reading is not the same fact as a standard one (P5): name
+    // the quirk so two gateways that disagree can be audited.
+    if !rec.applied_quirks.is_empty() {
+        obj["quirks"] = json!(rec
+            .applied_quirks
+            .iter()
+            .map(|q| q.quirk_id)
+            .collect::<Vec<_>>());
+        if rec.applied_quirks.iter().any(|q| q.provisional) {
+            obj["quirk_provisional"] = json!(true);
+        }
+    }
+    obj
 }
 
 #[cfg(test)]
@@ -336,6 +349,8 @@ mod tests {
         let date = recs[0]["value"].as_str().expect("QUNDIS date is a string");
         assert!(date.contains("2015") && date.contains("12"), "got {date}");
         assert_eq!(recs[0]["unit"], "Date");
+        // P5: the overriding quirk is named in the output.
+        assert_eq!(recs[0]["quirks"][0], "qds-vif04-date");
     }
 
     /// P6 end to end: the same QUNDIS frame with a corrupted CRC decodes with NO

@@ -39,9 +39,13 @@
 //! ```
 
 use crate::error::MBusError;
-use crate::vendors::{VendorDeviceInfo, VendorExtension, VendorVariable};
+use crate::payload::record::MBusRecord;
+use crate::vendors::quirks::{
+    Evidence, QuirkApplied, QuirkManifest, QuirkStatus, VendorQuirks, VendorScope,
+};
+use crate::vendors::{VendorDeviceInfo, VendorExtension};
 use chrono::{DateTime, NaiveDate, Utc};
-use log::{debug, warn};
+use log::debug;
 use std::collections::HashMap;
 
 /// QUNDIS manufacturer code
@@ -223,64 +227,6 @@ impl Default for QundisHcaExtension {
 }
 
 impl VendorExtension for QundisHcaExtension {
-    /// Handle QUNDIS VIF 0x04 date encoding
-    fn parse_vif_manufacturer_specific(
-        &self,
-        manufacturer_id: &str,
-        vif: u8,
-        data: &[u8],
-    ) -> Result<Option<(String, i8, String, VendorVariable)>, MBusError> {
-        if manufacturer_id != QUNDIS_MANUFACTURER_ID {
-            return Ok(None);
-        }
-
-        match vif {
-            QUNDIS_VIF_DATE => {
-                debug!("Parsing QUNDIS VIF 0x04 date field");
-
-                if data.len() < 2 {
-                    return Err(MBusError::Other(
-                        "Insufficient data for QUNDIS date field".to_string(),
-                    ));
-                }
-
-                // Convert data to u32 for processing
-                let raw_value = match data.len() {
-                    2 => u16::from_le_bytes([data[0], data[1]]) as u32,
-                    3 => u32::from_le_bytes([data[0], data[1], data[2], 0]),
-                    4 => u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
-                    _ => {
-                        warn!("Unexpected QUNDIS date field length: {}", data.len());
-                        u32::from_le_bytes([data[0], data[1], 0, 0])
-                    }
-                };
-
-                // Decode using QUNDIS algorithm
-                let datetime = if data.len() >= 4 {
-                    Self::decode_mbus_value_datetime_g(raw_value)?
-                } else {
-                    Self::decode_mbus_value_date_g(raw_value)?
-                };
-
-                debug!(
-                    "QUNDIS date decoded: {}",
-                    datetime.format("%Y-%m-%d %H:%M:%S")
-                );
-
-                Ok(Some((
-                    "Date".to_string(),        // unit
-                    0,                         // exponent
-                    "QUNDIS Date".to_string(), // quantity
-                    VendorVariable::String(datetime.format("%Y-%m-%d %H:%M:%S").to_string()),
-                )))
-            }
-            _ => {
-                // Other VIF codes - fall back to standard handling
-                Ok(None)
-            }
-        }
-    }
-
     /// Enrich QUNDIS device information
     fn enrich_device_header(
         &self,
@@ -349,6 +295,81 @@ impl VendorExtension for QundisHcaExtension {
     }
 }
 
+/// The QUNDIS date quirk (Layer 2).
+///
+/// QUNDIS repurposes **VIF `0x04`** — Energy, 10¹ Wh in EN 13757-3 — as a date field
+/// with the non-contiguous year packing decoded by
+/// [`QundisHcaExtension::decode_mbus_value_date_g`]. Reading such a record per the
+/// standard yields a confidently wrong energy value (the historical "10-year offset"
+/// HCA bug), which is precisely the definition of a quirk: the standard interpretation
+/// exists and is wrong for this device.
+pub struct QundisDateQuirk {
+    manifest: QuirkManifest,
+}
+
+impl Default for QundisDateQuirk {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QundisDateQuirk {
+    pub fn new() -> Self {
+        Self {
+            manifest: QuirkManifest {
+                id: "qds-vif04-date",
+                scope: VendorScope {
+                    manufacturer: QUNDIS_MANUFACTURER_ID,
+                    versions: None,
+                    device_types: None,
+                },
+                deviation: "VIF 0x04 (Energy, 10^1 Wh per EN 13757-3) carries a date \
+                            in QUNDIS MbusValueDateG bit packing",
+                evidence: Evidence::Documented {
+                    source: "QUNDIS MbusValueDateG encoding; pinned by the Dec-2015 \
+                             (0x10F8) test vectors",
+                },
+                status: QuirkStatus::Verified,
+            },
+        }
+    }
+}
+
+impl VendorQuirks for QundisDateQuirk {
+    fn manifest(&self) -> &QuirkManifest {
+        &self.manifest
+    }
+
+    fn reinterpret_record(&self, record: &mut MBusRecord) -> Option<QuirkApplied> {
+        if record.drh.vib.vif != QUNDIS_VIF_DATE || record.data_len < 2 {
+            return None;
+        }
+        let data = &record.data[..record.data_len];
+        let raw_value = match data.len() {
+            2 => u16::from_le_bytes([data[0], data[1]]) as u32,
+            3 => u32::from_le_bytes([data[0], data[1], data[2], 0]),
+            _ => u32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+        };
+        let datetime = if data.len() >= 4 {
+            QundisHcaExtension::decode_mbus_value_datetime_g(raw_value)
+        } else {
+            QundisHcaExtension::decode_mbus_value_date_g(raw_value)
+        }
+        .ok()?; // Undecodable bits: leave the standard reading rather than guess (P3).
+
+        record.unit = "Date".to_string();
+        record.quantity = "QUNDIS Date".to_string();
+        record.is_numeric = false;
+        record.value = crate::payload::record::MBusRecordValue::String(
+            datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
+        );
+        Some(QuirkApplied {
+            quirk_id: self.manifest.id,
+            provisional: self.manifest.status == QuirkStatus::Provisional,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,41 +434,43 @@ mod tests {
     }
 
     #[test]
-    fn test_qundis_vendor_extension() {
-        let extension = QundisHcaExtension::new();
+    fn test_qundis_date_quirk_reinterprets_vif04() {
+        use crate::payload::record::parse_variable_record;
+        let quirk = QundisDateQuirk::new();
 
-        // Test VIF 0x04 parsing with valid date (December 2015)
-        // Using the same test data as above: 0x10F8
-        let data = vec![0xF8, 0x10]; // Little-endian representation of 0x10F8
-        let result = extension
-            .parse_vif_manufacturer_specific("QDS", 0x04, &data)
-            .unwrap();
-
-        assert!(result.is_some());
-        let (unit, exponent, quantity, value) = result.unwrap();
-        assert_eq!(unit, "Date");
-        assert_eq!(exponent, 0);
-        assert_eq!(quantity, "QUNDIS Date");
-
-        // Should return a date string
-        if let VendorVariable::String(date_str) = value {
-            assert!(date_str.contains("2015")); // Should be year 2015
-            assert!(date_str.contains("12")); // Should be month 12
-            println!("Decoded date string: {}", date_str);
-        } else {
-            panic!("Expected string value for date");
+        // Record: DIF 0x02 (16-bit), VIF 0x04, data 0xF8 0x10 (Dec 2015 in QUNDIS
+        // encoding) — the same vector the old extension-hook test used.
+        let mut record = parse_variable_record(&[0x02, 0x04, 0xF8, 0x10]).unwrap();
+        let applied = quirk.reinterpret_record(&mut record).expect("quirk fires");
+        assert_eq!(applied.quirk_id, "qds-vif04-date");
+        assert!(!applied.provisional);
+        assert_eq!(record.unit, "Date");
+        assert_eq!(record.quantity, "QUNDIS Date");
+        match &record.value {
+            crate::payload::record::MBusRecordValue::String(date_str) => {
+                assert!(date_str.contains("2015"), "got {date_str}");
+                assert!(date_str.contains("12"), "got {date_str}");
+            }
+            other => panic!("expected date string, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_non_qundis_fallback() {
-        let extension = QundisHcaExtension::new();
-
-        // Should return None for non-QUNDIS manufacturers
-        let result = extension
-            .parse_vif_manufacturer_specific("KAM", 0x04, &[0xE0, 0xA3])
-            .unwrap();
-        assert!(result.is_none());
+    fn test_quirk_scope_excludes_other_manufacturers() {
+        use crate::vendors::context::DeviceIdentity;
+        let quirk = QundisDateQuirk::new();
+        // Scope matching happens OUTSIDE the quirk (registry/context), keyed by its
+        // manifest — a KAM device never has this quirk in its context.
+        let kam = DeviceIdentity {
+            manufacturer: "KAM".into(),
+            ..DeviceIdentity::default()
+        };
+        assert!(!quirk.manifest().scope.matches(&kam));
+        let qds = DeviceIdentity {
+            manufacturer: "QDS".into(),
+            ..DeviceIdentity::default()
+        };
+        assert!(quirk.manifest().scope.matches(&qds));
     }
 
     #[test]

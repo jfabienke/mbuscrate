@@ -12,7 +12,7 @@
 //!   pairs, resolved differently at every call site.
 //! - **P9** — the binding is resolved once per frame, at construction, not per field.
 
-use crate::vendors::{VendorExtension, VendorRegistry};
+use crate::vendors::{VendorExtension, VendorQuirks, VendorRegistry};
 use std::sync::Arc;
 
 /// Identity of the transmitting device, decoded from the frame's link header.
@@ -82,6 +82,10 @@ pub struct DecodeContext {
     /// Extension resolved for this frame, if any. Private: hook sites go through
     /// [`extension`](Self::extension) so the P6 gate cannot be bypassed.
     extension: Option<Arc<dyn VendorExtension>>,
+    /// Quirks whose scope matched this device (P4), resolved under the same P6 gate.
+    /// `Provisional` quirks are excluded here; opt-in wiring arrives with the first
+    /// provisional entry (the KAM status interpretation, migration step 5).
+    quirks: Vec<Arc<dyn VendorQuirks>>,
 }
 
 impl DecodeContext {
@@ -102,15 +106,19 @@ impl DecodeContext {
         device: DeviceIdentity,
         integrity: Integrity,
     ) -> Self {
-        let extension = if integrity.header_valid {
-            registry.and_then(|r| r.get(&device.manufacturer))
+        let (extension, quirks) = if integrity.header_valid {
+            (
+                registry.and_then(|r| r.get(&device.manufacturer)),
+                registry.map_or_else(Vec::new, |r| r.quirks_for(&device, false)),
+            )
         } else {
-            None
+            (None, Vec::new())
         };
         Self {
             device,
             integrity,
             extension,
+            quirks,
         }
     }
 
@@ -137,6 +145,11 @@ impl DecodeContext {
     pub fn manufacturer(&self) -> &str {
         &self.device.manufacturer
     }
+
+    /// Quirks bound to this frame (scope-matched, status-gated, P6-gated).
+    pub fn quirks(&self) -> &[Arc<dyn VendorQuirks>] {
+        &self.quirks
+    }
 }
 
 impl std::fmt::Debug for DecodeContext {
@@ -145,6 +158,7 @@ impl std::fmt::Debug for DecodeContext {
             .field("device", &self.device)
             .field("integrity", &self.integrity)
             .field("has_extension", &self.extension.is_some())
+            .field("quirks", &self.quirks.len())
             .finish()
     }
 }
@@ -178,6 +192,7 @@ mod tests {
             ctx.extension().is_none(),
             "P6: a corrupt manufacturer code must not select vendor code"
         );
+        assert!(ctx.quirks().is_empty(), "P6 applies to quirks identically");
     }
 
     #[test]
