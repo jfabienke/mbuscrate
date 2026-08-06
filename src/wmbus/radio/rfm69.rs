@@ -1535,9 +1535,14 @@ impl Rfm69Driver {
                 }
             }
 
-            // Put radio to sleep
-            if let Err(e) = self.set_mode(Rfm69Mode::Sleep).await {
-                warn!("Failed to put radio to sleep during shutdown: {}", e);
+            // Park in STANDBY, not SLEEP. Sleep powers down the crystal oscillator,
+            // and this hardware repeatedly failed to restart it: every wedge observed
+            // so far followed a process restart, with ModeReady and PllLock stuck low
+            // afterwards. Standby quiesces the receiver (no RX, SPI idle — which is
+            // what shutdown needs) while keeping the oscillator running, so the next
+            // process never has to cold-start it.
+            if let Err(e) = self.set_mode(Rfm69Mode::Standby).await {
+                warn!("Failed to park radio in standby during shutdown: {e}");
             }
 
             info!("RFM69 driver shutdown completed");
