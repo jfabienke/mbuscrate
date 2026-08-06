@@ -106,8 +106,9 @@ removing detail, it is not an extension; it is a quirk.
 **P3 — Never invent a value.**
 Where neither layer knows what bytes mean, emit the raw bytes and a reason. A number
 that means nothing is worse than "unknown", because a consumer cannot tell the
-difference. (Today `02 FF 20` decodes to `Manufacturer specific: 0.0` — exactly this
-failure.)
+difference. (Today `02 FF 20` decodes to a bare `Manufacturer specific: 0.0`: the value
+is real, but presented as an unidentified float, so a *nonzero* INFO would read as a
+meaningless number rather than named conditions or a labelled raw bitmask.)
 
 **P4 — Quirks are evidence-gated, narrowly scoped, and standard-by-default.**
 Every quirk carries: the deviation (what the standard says versus what the device
@@ -314,18 +315,19 @@ Two properties are machine-checkable and should be CI-enforced:
 
 ## 5. Current classification
 
-### KAM — Kamstrup Multical 21
+### KAM — Kamstrup Multical 21 (cold water)
 
-Evidence: live captures from the production gateway, decrypted and cross-checked
-against an independent implementation.
+Evidence: live captures from the production gateway, decrypted and cross-checked against
+an independent implementation (wmbusmeters, oracle-only). The KAM *heat* meters we also
+hear (the ~22-meter cluster in §5 Others) are unclassified — no keys, so header-only.
 
 | Behaviour | Layer | Notes |
 |---|---|---|
 | ELL CI `0x8D`, AES-CTR | 0 | Frame-declared (P1). Already generic. |
 | Compact frames, format signature | 0 | OMS mechanism; signature confirmed on KAM traffic. A vendor differing would miss the lookup — safe failure. Assumption labelled in `wmbus::compact_frame`. |
 | Type B framing, BCD address | 0 | Standard. |
-| `02 FF 20` info codes | **1** | VIF `0xFF` is the standard's manufacturer slot. Currently decodes to `Manufacturer specific: 0.0` — a P3 violation. |
-| Leading 2-byte ELL field is not a payload CRC | **0 for now** | See decision D1. |
+| `02 FF 20` info codes | **0 transport / 1 meaning** | Arrives as a standard OMS record, so reading the raw bitmask is Layer 0; only the bit *meanings* are Layer 1 (D2). Today it decodes to a bare `Manufacturer specific: 0.0` — the value is real (INFO 0) but unidentified as a status field, so a nonzero value would surface as a meaningless number. Interpretation table is evidence-blocked (D3). |
+| Leading 2-byte ELL field | **0** | Almost certainly a *standard* ELL payload CRC we had not decoded — not a vendor deviation (D1, corrected). Algorithm to be reproduced from EN 13757-4 §12; would then authenticate ELL decrypts. |
 
 ### QDS — QUNDIS HCA (implemented today, misfiled)
 
@@ -412,8 +414,8 @@ datagrams — i.e. the INFO field very likely arrives as a **standard OMS/M-Bus 
 record**, not a proprietary CI payload. If so, the *transport* is Layer 0 (the generic
 record parser reads the bytes), and only the *bit meanings* are vendor knowledge. That
 makes this a `decode_status_bits`-style interpretation keyed to the model, not a
-`decode_manufacturer_vif` hook — a materially different implementation than §5 first
-assumed, and one to confirm against a decoded capture before building.
+`decode_manufacturer_vif` hook — a materially different implementation from a
+manufacturer-VIF extension, and one to confirm against a decoded capture before building.
 
 The interpretation lives in the crate (§1.1 case 1): status/alarm meaning is decode
 knowledge, so the crate owns the bit tables and emits named conditions, not just a
