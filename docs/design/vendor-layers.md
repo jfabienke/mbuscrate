@@ -467,6 +467,10 @@ Two consequences that scope the immediate work:
 
 ## 7. Migration
 
+**Status (2026-08-06, PR #8):** steps 1–3 and 6–7 are implemented. Remaining: step 4
+(Device Manager → gateway profile channel, needs the backend side), step 5 (KAM status
+interpretation, evidence-blocked per D2/D3), step 8 (delete the deprecated shims).
+
 Each step is independently shippable and behaviour-preserving unless stated.
 
 1. **Introduce `DecodeContext` and collapse to one path** (P7, P9). Registry empty;
