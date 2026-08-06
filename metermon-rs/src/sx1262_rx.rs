@@ -21,6 +21,10 @@ const OP_GET_RX_BUFFER_STATUS: u8 = 0x13;
 const OP_GET_PACKET_STATUS: u8 = 0x14;
 const OP_GET_RSSI_INST: u8 = 0x15;
 const OP_READ_BUFFER: u8 = 0x1E;
+const OP_GET_PACKET_TYPE: u8 = 0x11;
+/// Holds an ASCII chip identifier ("SX1261" / "SX1262"). Reading it proves the SPI
+/// link carries real data rather than plausible-looking zeros.
+const REG_VERSION_STRING: u16 = 0x0320;
 
 /// wM-Bus mode C: 868.95 MHz, 100 kbps.
 const WMBUS_FREQ_HZ: u32 = 868_950_000;
@@ -164,6 +168,7 @@ pub fn run(
     sync_bytes: u8,
     preamble_detect_bits: u8,
     sync_hex: Option<String>,
+    freq_hz: u32,
     seconds: u64,
 ) -> Result<()> {
     println!("SX1262 wM-Bus mode C receive — 868.95 MHz, 100 kbps, sync 54 3D 54\n");
@@ -188,7 +193,7 @@ pub fn run(
     }
 
     let mut driver = Sx126xDriver::new(hal, 32_000_000);
-    let mut profile = mbus_rs::wmbus::radio::driver::WmbusProfile::mode_c(WMBUS_FREQ_HZ, WMBUS_BITRATE);
+    let mut profile = mbus_rs::wmbus::radio::driver::WmbusProfile::mode_c(freq_hz, WMBUS_BITRATE);
     profile.sync_word_len = sync_bytes;
     profile.preamble_detect_bits = preamble_detect_bits;
     if let Some(h) = sync_hex.as_deref() {
@@ -204,13 +209,14 @@ pub fn run(
     // configure_for_wmbus selects the GFSK modem and applies the stock profile;
     // re-applying with the overrides keeps that setup and only changes detection.
     driver
-        .configure_for_wmbus(WMBUS_FREQ_HZ, WMBUS_BITRATE)
+        .configure_for_wmbus(freq_hz, WMBUS_BITRATE)
         .context("selecting the GFSK modem")?;
     driver
         .apply_wmbus_profile(&profile)
         .context("applying the wM-Bus mode C profile")?;
     println!(
-        "sync {:02X?} · match {sync_bytes} byte(s) · preamble detector {preamble_detect_bits} bits",
+        "{:.3} MHz · sync {:02X?} · match {sync_bytes} byte(s) · preamble detector {preamble_detect_bits} bits",
+        freq_hz as f64 / 1e6,
         &profile.sync_word[..sync_bytes as usize]
     );
     // After the profile: applying it rewrites the DIO configuration, so claiming DIO2
@@ -230,6 +236,29 @@ pub fn run(
     let _ = &sync;
     let status = read_status(hal, OP_GET_STATUS)?;
     let errs = read_u16_after_status(hal, OP_GET_DEVICE_ERRORS)?;
+
+    // Identity and modem selection, read back from the chip. GFSK is packet type 0x00;
+    // if this reports LoRa then the demodulator is running the wrong modem and no
+    // amount of GFSK packet configuration can make it hear anything.
+    let mut version = [0u8; 16];
+    hal.read_register(REG_VERSION_STRING, &mut version).ok();
+    let chip: String = version
+        .iter()
+        .take_while(|b| b.is_ascii_graphic())
+        .map(|b| *b as char)
+        .collect();
+    let packet_type = read1_after_status(hal, OP_GET_PACKET_TYPE)?;
+    println!(
+        "chip {:?} · packet type 0x{packet_type:02X} ({})",
+        chip,
+        match packet_type {
+            0x00 => "GFSK",
+            0x01 => "LoRa",
+            0x02 => "BPSK",
+            0x03 => "LR-FHSS",
+            _ => "unknown",
+        }
+    );
     println!(
         "config readback: sync {:02X?} · status 0x{status:02X} · errors {:?}",
         sync,
@@ -272,9 +301,11 @@ pub fn run(
                 hal.read_command(OP_GET_RX_BUFFER_STATUS, &mut st)?;
                 let (len, offset) = (st[1], st[2]);
 
+                // GFSK reply: status, RxStatus, RssiSync, RssiAvg. RssiSync is
+                // latched when the sync word matched, i.e. during the actual frame.
                 let mut pkt = [0u8; 4];
                 hal.read_command(OP_GET_PACKET_STATUS, &mut pkt)?;
-                let rssi_dbm = -(pkt[1] as i16) / 2;
+                let rssi_dbm = -(pkt[2] as i16) / 2;
 
                 let mut buf = vec![0u8; len as usize];
                 hal.read_register_buffer(offset, &mut buf)

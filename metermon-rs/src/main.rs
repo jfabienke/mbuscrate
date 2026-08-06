@@ -241,6 +241,9 @@ enum Cmd {
         /// Override the sync word, as hex (e.g. 5555 to lock on the raw preamble).
         #[arg(long)]
         sync_hex: Option<String>,
+        /// Carrier frequency in Hz.
+        #[arg(long, default_value_t = 868_950_000)]
+        freq_hz: u32,
         #[arg(long, default_value_t = 120)]
         seconds: u64,
     },
@@ -338,6 +341,7 @@ fn main() -> Result<()> {
             sync_bytes,
             preamble_detect_bits,
             sync_hex,
+            freq_hz,
             seconds,
         } => run_sx1262_rx(
             &spidev,
@@ -351,6 +355,7 @@ fn main() -> Result<()> {
             sync_bytes,
             preamble_detect_bits,
             sync_hex,
+            freq_hz,
             seconds,
         ),
         Cmd::MockBackend {
@@ -1028,6 +1033,7 @@ fn run_sx1262_rx(
     sync_bytes: u8,
     preamble_detect_bits: u8,
     sync_hex: Option<String>,
+    freq_hz: u32,
     seconds: u64,
 ) -> Result<()> {
     use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
@@ -1046,6 +1052,7 @@ fn run_sx1262_rx(
         sync_bytes,
         preamble_detect_bits,
         sync_hex,
+        freq_hz,
         seconds,
     )
 }
@@ -1064,6 +1071,7 @@ fn run_sx1262_rx(
     _sync_bytes: u8,
     _preamble_detect_bits: u8,
     _sync_hex: Option<String>,
+    _freq_hz: u32,
     _seconds: u64,
 ) -> Result<()> {
     bail_no_radio("sx1262-rx")

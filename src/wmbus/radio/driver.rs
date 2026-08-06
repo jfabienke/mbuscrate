@@ -813,9 +813,15 @@ impl<H: Hal> Sx126xDriver<H> {
     }
 
     pub fn disable_whitening(&mut self) -> Result<(), DriverError> {
-        // Set whitening initial value to disable (specific config needed)
-        self.hal.write_register(0x06B8, &[0x00])?; // MSB to 0
-        self.hal.write_register(0x06B9, &[0x00])?; // LSB to 0
+        // Whitening on/off is decided by SetPacketParams; these registers hold only
+        // the 9-bit LFSR seed. Register 0x06B8 additionally carries seven bits of
+        // modem configuration that Semtech's driver warns "must not be modified" —
+        // the previous blind write of 0x00 here cleared them, which is the kind of
+        // damage that leaves RSSI working while the demodulator never emits a bit.
+        let mut msb = [0u8; 1];
+        self.hal.read_register(0x06B8, &mut msb)?;
+        self.hal.write_register(0x06B8, &[(msb[0] & 0xFE) | 0x01])?;
+        self.hal.write_register(0x06B9, &[0x00])?;
         Ok(())
     }
 
@@ -876,8 +882,36 @@ impl<H: Hal> Sx126xDriver<H> {
     }
 
     pub fn set_rx_continuous(&mut self) -> Result<(), DriverError> {
-        self.set_rx(0xFFFFFF)?; // Infinite timeout
-        Ok(())
+        self.start_receive(0xFFFFFF)
+    }
+
+    /// Select where the chip parks after a receive or transmit completes.
+    ///
+    /// `0x20` STDBY_RC, `0x30` STDBY_XOSC, `0x40` FS. The reset default is FS, which
+    /// keeps the PLL running; parking in standby is what the reference drivers do.
+    pub fn set_rx_tx_fallback_mode(&mut self, mode: u8) -> Result<(), DriverError> {
+        self.hal
+            .write_command(0x93, &[mode])
+            .map_err(DriverError::Hal)
+    }
+
+    /// Enter receive, restaging the settings the chip needs each time.
+    ///
+    /// Ordering follows RadioLib (MIT), which is the most complete open GFSK
+    /// implementation for this part: return to standby, park the fallback mode, reset
+    /// the buffer pointers, clear stale interrupts, re-apply the packet parameters and
+    /// only then issue SetRx. Re-applying the packet parameters is cheap insurance —
+    /// several commands rewrite them as a side effect, and a receiver configured with
+    /// a stale payload length fails in a way that looks like an empty band.
+    pub fn start_receive(&mut self, timeout: u32) -> Result<(), DriverError> {
+        self.set_standby(StandbyMode::RC)?;
+        self.set_rx_tx_fallback_mode(0x20)?;
+        self.set_buffer_base_addresses(self.tx_base_addr, self.rx_base_addr)?;
+        self.clear_irq_status(0xFFFF)?;
+        if let Some(params) = self.current_packet_params {
+            self.set_packet_params(params)?;
+        }
+        self.set_rx(timeout)
     }
 
     pub fn get_rx_buffer_status(&mut self, buf: &mut [u8; 3]) -> Result<(), DriverError> {
