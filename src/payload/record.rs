@@ -614,109 +614,135 @@ pub fn mbus_data_record_append(record: &mut MBusRecord) {
     // Additional logic can be added here as needed
 }
 
-/// Parse variable record with vendor extension support
-pub fn parse_variable_record_with_vendor(
+/// Parse one variable-data record under a [`DecodeContext`] — **the** decode path
+/// (vendor-layers P7): plain parsing is this with an empty context, and every vendor
+/// hook fires only through the context's binding, which exists only for frames whose
+/// identity header validated (P6).
+pub fn parse_variable_record_in_context(
     input: &[u8],
-    manufacturer_id: Option<&str>,
-    registry: Option<&vendors::VendorRegistry>,
-) -> Result<MBusRecord, MBusError> {
-    let mut record = parse_variable_record(input)?;
+    ctx: &vendors::DecodeContext,
+) -> Result<(MBusRecord, usize), MBusError> {
+    let (mut record, consumed) = parse_variable_record_consumed(input)?;
+    apply_vendor_hooks(&mut record, ctx)?;
+    Ok((record, consumed))
+}
 
-    // Check for vendor-specific DIF handling (0x0F or 0x1F)
-    if let (Some(mfr_id), Some(reg)) = (manufacturer_id, registry) {
-        if record.drh.dib.dif == 0x0F || record.drh.dib.dif == 0x1F {
-            if let Some(vendor_records) = vendors::dispatch_dif_hook(
-                reg,
-                mfr_id,
-                record.drh.dib.dif,
-                &record.data[..record.data_len],
-            )? {
-                // Convert first vendor record to MBusRecord (simplified)
-                if let Some(first) = vendor_records.first() {
-                    record.unit = first.unit.clone();
-                    record.quantity = first.quantity.clone();
-                    record.value = match &first.value {
-                        vendors::VendorVariable::Numeric(n) => MBusRecordValue::Numeric(*n),
-                        vendors::VendorVariable::String(s) => MBusRecordValue::String(s.clone()),
-                        _ => MBusRecordValue::String("Vendor specific".to_string()),
-                    };
-                }
-            }
+/// Write a vendor-produced (unit, exponent, quantity, value) into a record.
+fn apply_vendor_value(
+    record: &mut MBusRecord,
+    unit: String,
+    exp: i8,
+    qty: String,
+    var: vendors::VendorVariable,
+) {
+    record.unit = unit;
+    record.quantity = qty;
+    record.value = match var {
+        vendors::VendorVariable::Numeric(n) => {
+            MBusRecordValue::Numeric(n * 10_f64.powi(exp as i32))
         }
+        vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
+        _ => MBusRecordValue::String("Vendor specific".to_string()),
+    };
+}
 
-        // Check for vendor-specific VIF handling (0x7F or 0xFF)
-        if record.drh.vib.vif == 0x7F || record.drh.vib.vif == 0xFF {
-            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(
-                reg,
-                mfr_id,
-                record.drh.vib.vif,
-                &record.data[..record.data_len],
-            )? {
-                record.unit = unit;
-                record.quantity = qty;
-                record.value = match var {
-                    vendors::VendorVariable::Numeric(n) => {
-                        // Apply exponent
-                        let scaled = n * 10_f64.powi(exp as i32);
-                        MBusRecordValue::Numeric(scaled)
-                    }
+/// Offer a parsed record to the context's vendor binding at the extension points the
+/// standard reserves for manufacturers (DIF 0x0F/0x1F, VIF 0x7F/0xFF, status bits).
+///
+/// The QUNDIS VIF 0x04 branch below is a mis-filed Layer 2 quirk temporarily riding
+/// the extension hook — it moves to `VendorQuirks` in migration step 3, which is when
+/// the manufacturer-name comparison leaves this file.
+fn apply_vendor_hooks(
+    record: &mut MBusRecord,
+    ctx: &vendors::DecodeContext,
+) -> Result<(), MBusError> {
+    let Some(ext) = ctx.extension() else {
+        return Ok(());
+    };
+    let mfr_id = ctx.manufacturer();
+
+    // DIF 0x0F/0x1F: manufacturer data block.
+    if record.drh.dib.dif == 0x0F || record.drh.dib.dif == 0x1F {
+        if let Some(vendor_records) = ext.handle_dif_manufacturer_block(
+            mfr_id,
+            record.drh.dib.dif,
+            &record.data[..record.data_len],
+        )? {
+            if let Some(first) = vendor_records.into_iter().next() {
+                record.unit = first.unit;
+                record.quantity = first.quantity;
+                record.value = match first.value {
+                    vendors::VendorVariable::Numeric(n) => MBusRecordValue::Numeric(n),
                     vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
                     _ => MBusRecordValue::String("Vendor specific".to_string()),
                 };
             }
         }
+    }
 
-        // Check for QUNDIS-specific VIF 0x04 date handling
-        if mfr_id == "QDS" && record.drh.vib.vif == 0x04 {
-            if let Some((unit, exp, qty, var)) = vendors::dispatch_vif_hook(
-                reg,
-                mfr_id,
-                record.drh.vib.vif,
-                &record.data[..record.data_len],
-            )? {
-                record.unit = unit;
-                record.quantity = qty;
-                record.value = match var {
-                    vendors::VendorVariable::Numeric(n) => {
-                        // Apply exponent
-                        let scaled = n * 10_f64.powi(exp as i32);
-                        MBusRecordValue::Numeric(scaled)
-                    }
-                    vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
-                    _ => MBusRecordValue::String("Vendor specific".to_string()),
-                };
-            }
+    // VIF 0x7F/0xFF: manufacturer-specific value information.
+    if record.drh.vib.vif == 0x7F || record.drh.vib.vif == 0xFF {
+        if let Some((unit, exp, qty, var)) = ext.parse_vif_manufacturer_specific(
+            mfr_id,
+            record.drh.vib.vif,
+            &record.data[..record.data_len],
+        )? {
+            apply_vendor_value(record, unit, exp, qty, var);
         }
+    }
 
-        // Check for status bits in data (if present)
-        if record.data_len > 0 {
-            // Status byte is often at the end of fixed data structures
-            let status_byte = record.data[record.data_len - 1];
-            if (status_byte & 0xE0) != 0 {
-                // Check bits [7:5]
-                if let Some(status_vars) = vendors::dispatch_status_hook(reg, mfr_id, status_byte)?
-                {
-                    // Add status to quantity/unit for visibility
-                    let status_str = status_vars
-                        .iter()
-                        .filter_map(|v| match v {
-                            vendors::VendorVariable::Boolean(true) => Some("ALARM"),
-                            vendors::VendorVariable::ErrorFlags { flags } if *flags != 0 => {
-                                Some("ERROR")
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    if !status_str.is_empty() {
-                        record.quantity = format!("{} [{}]", record.quantity, status_str);
-                    }
+    // QUNDIS repurposes standard VIF 0x04 as a date (a quirk; see doc above).
+    if mfr_id == "QDS" && record.drh.vib.vif == 0x04 {
+        if let Some((unit, exp, qty, var)) = ext.parse_vif_manufacturer_specific(
+            mfr_id,
+            record.drh.vib.vif,
+            &record.data[..record.data_len],
+        )? {
+            apply_vendor_value(record, unit, exp, qty, var);
+        }
+    }
+
+    // Vendor-defined status bits [7:5] in the trailing data byte.
+    if record.data_len > 0 {
+        let status_byte = record.data[record.data_len - 1];
+        if (status_byte & 0xE0) != 0 {
+            if let Some(status_vars) = ext.decode_status_bits(mfr_id, status_byte)? {
+                let status_str = status_vars
+                    .iter()
+                    .filter_map(|v| match v {
+                        vendors::VendorVariable::Boolean(true) => Some("ALARM"),
+                        vendors::VendorVariable::ErrorFlags { flags } if *flags != 0 => {
+                            Some("ERROR")
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if !status_str.is_empty() {
+                    record.quantity = format!("{} [{}]", record.quantity, status_str);
                 }
             }
         }
     }
 
-    Ok(record)
+    Ok(())
+}
+
+/// Parse variable record with vendor extension support.
+#[deprecated(
+    note = "fork of the decode path (vendor-layers P7); use parse_variable_record_in_context             with a DecodeContext — retired in migration step 8"
+)]
+pub fn parse_variable_record_with_vendor(
+    input: &[u8],
+    manufacturer_id: Option<&str>,
+    registry: Option<&vendors::VendorRegistry>,
+) -> Result<MBusRecord, MBusError> {
+    // Legacy semantics: no integrity tracking existed, so a valid frame is assumed.
+    let ctx = match manufacturer_id {
+        Some(mfr) => vendors::DecodeContext::assume_valid(mfr, registry),
+        None => vendors::DecodeContext::empty(),
+    };
+    parse_variable_record_in_context(input, &ctx).map(|(record, _)| record)
 }
 
 fn parse_variable_data_length(input: u8) -> Result<usize, MBusError> {

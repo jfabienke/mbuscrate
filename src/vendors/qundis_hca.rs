@@ -561,11 +561,20 @@ mod tests {
 
     #[test]
     fn test_end_to_end_hca_parsing() {
-        // Test end-to-end integration: registry + record parsing + QUNDIS decoding
+        // End-to-end through THE decode path: a resolved context binds QUNDIS and the
+        // record parser dispatches through it (vendor-layers P7/P9).
+        use crate::vendors::{DecodeContext, DeviceIdentity, Integrity};
         let registry = crate::vendors::VendorRegistry::with_defaults().unwrap();
+        let ctx = DecodeContext::resolve(
+            Some(&registry),
+            DeviceIdentity {
+                manufacturer: "QDS".into(),
+                ..DeviceIdentity::default()
+            },
+            Integrity::valid(),
+        );
 
-        // Create a mock variable M-Bus record with QUNDIS VIF 0x04 date
-        // This simulates a real HCA device response
+        // A variable M-Bus record with QUNDIS VIF 0x04 date, as a real HCA sends it.
         let mock_record_data = vec![
             // DIF: 2 bytes of data
             0x02, // VIF: 0x04 (QUNDIS date field)
@@ -573,15 +582,11 @@ mod tests {
             0xF8, 0x10,
         ];
 
-        // Parse using the vendor-aware function
-        let result = crate::payload::record::parse_variable_record_with_vendor(
-            &mock_record_data,
-            Some("QDS"),
-            Some(&registry),
-        );
-
+        let result =
+            crate::payload::record::parse_variable_record_in_context(&mock_record_data, &ctx);
         assert!(result.is_ok());
-        let record = result.unwrap();
+        let (record, consumed) = result.unwrap();
+        assert_eq!(consumed, mock_record_data.len());
 
         // Verify the date was parsed correctly using QUNDIS algorithm
         if let crate::payload::record::MBusRecordValue::String(date_str) = &record.value {

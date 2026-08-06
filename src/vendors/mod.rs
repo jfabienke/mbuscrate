@@ -4,6 +4,7 @@
 //! to the M-Bus protocol, allowing external crates to override standard behavior
 //! at specific extension points defined in EN 13757.
 
+pub mod context;
 pub mod manufacturer;
 pub mod qundis_hca;
 
@@ -12,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::MBusError;
 use crate::mbus::secondary_addressing::SecondaryAddress;
+pub use context::{DecodeContext, DeviceIdentity, DeviceProfile, Integrity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
