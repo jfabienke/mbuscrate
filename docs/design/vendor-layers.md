@@ -467,9 +467,11 @@ Two consequences that scope the immediate work:
 
 ## 7. Migration
 
-**Status (2026-08-06, PR #8):** steps 1–3 and 6–7 are implemented. Remaining: step 4
-(Device Manager → gateway profile channel, needs the backend side), step 5 (KAM status
-interpretation, evidence-blocked per D2/D3), step 8 (delete the deprecated shims).
+**Status (2026-08-06, PR #8):** steps 1–4 and 6–7 are implemented; the step 4 channel
+is proven live against the mock backend (§7.2), including redb persistence across
+restarts. Remaining: step 5 (KAM status interpretation, evidence-blocked per D2/D3),
+step 8 (delete the deprecated shims), and replacing the mock with the real Device
+Manager when that repo exists.
 
 Each step is independently shippable and behaviour-preserving unless stated.
 
