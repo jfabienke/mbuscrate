@@ -10,16 +10,26 @@
 //! application-layer dispatch.
 
 use mbus_rs::id_to_manufacturer;
-use mbus_rs::payload::record::{parse_variable_record_consumed, MBusRecord, MBusRecordValue};
+use mbus_rs::payload::record::{parse_variable_record_in_context, MBusRecord, MBusRecordValue};
+use mbus_rs::vendors::{DecodeContext, DeviceIdentity, Integrity, VendorRegistry};
 use mbus_rs::wmbus::compact_frame::CompactLayoutCache;
 use mbus_rs::wmbus::ell;
 use mbus_rs::wmbus::frame_decode::FrameType;
 use mbus_rs::wmbus::mode_c::decode_mode_c;
 use mbus_rs::wmbus::AesKey;
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 
 use crate::config::Config;
 use crate::keystore::KeyStore;
+
+/// Process-wide vendor registry (QUNDIS today, KAM when its interpretation lands).
+/// Threading this through the decode context is what makes the crate's vendor layer
+/// reachable at runtime — before this, no live path ever constructed a registry.
+fn vendor_registry() -> &'static VendorRegistry {
+    static REGISTRY: OnceLock<VendorRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| VendorRegistry::with_defaults().expect("default vendor registry"))
+}
 
 /// Decode one normalized wM-Bus frame into a JSON object. Never panics; failures are
 /// reported as fields so the A/B diff stays aligned.
@@ -50,6 +60,24 @@ pub fn decode_frame_with_cache(
     };
 
     let meterid = frame.device_address;
+    // Vendor binding for this frame (vendor-layers P6/P9): resolved once, and only
+    // when the frame's CRCs validated — mode_c reports one aggregate flag today, so
+    // a failure in ANY block conservatively blocks vendor dispatch, which errs on
+    // exactly the safe side until per-region integrity is threaded out of mode_c.
+    let ctx = DecodeContext::resolve(
+        Some(vendor_registry()),
+        DeviceIdentity {
+            manufacturer: id_to_manufacturer(frame.manufacturer_id).to_string(),
+            version: frame.version,
+            device_type: frame.device_type,
+            address: meterid,
+            profile: None, // Device Manager → gateway profile channel: migration step 4
+        },
+        Integrity {
+            header_valid: frame.crc_ok,
+            payload_valid: frame.crc_ok,
+        },
+    );
     let frame_type = match frame.frame_type {
         FrameType::TypeA => "A",
         FrameType::TypeB => "B",
@@ -83,7 +111,7 @@ pub fn decode_frame_with_cache(
         // No TPL header — plaintext records follow directly.
         0x78 => {
             obj.insert("encrypted".into(), json!(false));
-            decode_transport(obj, ci, after_ci, cache, meterid, frame.crc_ok);
+            decode_transport(obj, ci, after_ci, cache, meterid, frame.crc_ok, &ctx);
         }
         // Short TPL header (OMS 7.2.4): ACC, STS, Configuration Word, then payload.
         0x7A => {
@@ -99,7 +127,7 @@ pub fn decode_frame_with_cache(
             let ciphertext = &after_ci[4..];
             if mode == 0 {
                 obj.insert("encrypted".into(), json!(false));
-                insert_records(obj, ciphertext);
+                insert_records(obj, ciphertext, &ctx);
             } else {
                 obj.insert("encrypted".into(), json!(true));
                 obj.insert("ciphertext_hex".into(), json!(hex::encode(ciphertext)));
@@ -116,7 +144,7 @@ pub fn decode_frame_with_cache(
         // Compact frame — records keyed by a format signature learned elsewhere.
         0x79 => {
             obj.insert("encrypted".into(), json!(false));
-            decode_transport(obj, ci, after_ci, cache, meterid, frame.crc_ok);
+            decode_transport(obj, ci, after_ci, cache, meterid, frame.crc_ok, &ctx);
         }
         // Extended Link Layer. Encrypted variants are decrypted in place when a key
         // is held, and the recovered transport payload is dispatched exactly like an
@@ -140,7 +168,7 @@ pub fn decode_frame_with_cache(
             if !header.is_encrypted() {
                 let inner = &frame.payload[header.header_len..];
                 if let Some((&tci, rest)) = inner.split_first() {
-                    decode_transport(obj, tci, rest, cache, meterid, frame.crc_ok);
+                    decode_transport(obj, tci, rest, cache, meterid, frame.crc_ok, &ctx);
                 }
                 return out;
             }
@@ -163,7 +191,7 @@ pub fn decode_frame_with_cache(
                         json!(hex::encode(dec.leading_field)),
                     );
                     if let Some((&tci, rest)) = dec.payload.split_first() {
-                        decode_transport(obj, tci, rest, cache, meterid, frame.crc_ok);
+                        decode_transport(obj, tci, rest, cache, meterid, frame.crc_ok, &ctx);
                     }
                 }
                 Err(e) => {
@@ -191,6 +219,7 @@ fn decode_transport(
     cache: &mut CompactLayoutCache,
     meter: u32,
     crc_ok: bool,
+    ctx: &DecodeContext,
 ) {
     obj.insert("tpl_ci".into(), json!(format!("0x{tpl_ci:02X}")));
     match tpl_ci {
@@ -210,7 +239,7 @@ fn decode_transport(
                     }
                 }
             }
-            insert_records(obj, body);
+            insert_records(obj, body, ctx);
         }
         // Compact frame: headers omitted; re-interleave them from the cached layout.
         0x79 => {
@@ -224,7 +253,7 @@ fn decode_transport(
             match cache.expand_compact(meter, body) {
                 Ok(expanded) => {
                     obj.insert("expanded".into(), json!(true));
-                    insert_records(obj, &expanded);
+                    insert_records(obj, &expanded, ctx);
                 }
                 Err(e) => {
                     // Typically "no full frame seen yet" — report it rather than guess.
@@ -233,7 +262,7 @@ fn decode_transport(
                 }
             }
         }
-        _ => insert_records(obj, body),
+        _ => insert_records(obj, body, ctx),
     }
 }
 
@@ -242,7 +271,7 @@ fn decode_transport(
 /// Uses `parse_variable_record_consumed`, which reports how many bytes each record
 /// occupied — without that the loop cannot advance, which is why this used to decode
 /// only the first record.
-fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8]) {
+fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &DecodeContext) {
     obj.insert("payload_hex".into(), json!(hex::encode(data)));
     let mut records = Vec::new();
     let mut offset = 0usize;
@@ -252,7 +281,7 @@ fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8]) {
             offset += 1;
             continue;
         }
-        match parse_variable_record_consumed(&data[offset..]) {
+        match parse_variable_record_in_context(&data[offset..], ctx) {
             Ok((rec, used)) if used > 0 => {
                 records.push(record_to_json(&rec));
                 offset += used;
@@ -290,6 +319,44 @@ fn record_to_json(rec: &MBusRecord) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The vendor layer is live: a QUNDIS frame decoded through the ordinary path
+    /// gets its repurposed VIF 0x04 interpreted as a date, because decode_frame now
+    /// resolves a DecodeContext (registry + identity + integrity) per frame. Before
+    /// migration step 2 no runtime path constructed a registry at all.
+    #[test]
+    fn qundis_date_decodes_through_the_live_path() {
+        // Synthetic mode-C type B: QDS (0x4493), id 12345678, HCA, CI 0x78,
+        // record DIF 02 VIF 04 data F8 10 (QUNDIS-encoded December 2015).
+        let raw = hex::decode("3d10449344785634120108780204f810a407").unwrap();
+        let v = decode_frame(&raw, &empty_cfg(), &KeyStore::new());
+        assert_eq!(v["manufacturer"], "QDS");
+        assert_eq!(v["crc_ok"], true);
+        let recs = v["records"].as_array().expect("records decoded");
+        let date = recs[0]["value"].as_str().expect("QUNDIS date is a string");
+        assert!(date.contains("2015") && date.contains("12"), "got {date}");
+        assert_eq!(recs[0]["unit"], "Date");
+    }
+
+    /// P6 end to end: the same QUNDIS frame with a corrupted CRC decodes with NO
+    /// vendor interpretation — a corrupt manufacturer code must never select vendor
+    /// code, so the record falls back to the standard (energy) reading.
+    #[test]
+    fn corrupt_qundis_frame_gets_no_vendor_interpretation() {
+        let mut raw = hex::decode("3d10449344785634120108780204f810a407").unwrap();
+        let last = raw.len() - 1;
+        raw[last] ^= 0xFF; // break the CRC
+        let v = decode_frame(&raw, &empty_cfg(), &KeyStore::new());
+        assert_eq!(v["crc_ok"], false);
+        let recs = v["records"]
+            .as_array()
+            .expect("records still parse (A/B diff)");
+        assert!(
+            recs[0]["value"].is_number(),
+            "vendor date interpretation must not fire on a corrupt frame: {:?}",
+            recs[0]
+        );
+    }
 
     /// End-to-end ELL decrypt on a **synthetic** frame (published test key, built with
     /// an independent AES implementation — see `mbus-rs/tests/wmbus_frames/README.md`).
