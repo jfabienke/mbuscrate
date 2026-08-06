@@ -110,6 +110,17 @@ impl Rfm69Source {
     /// restart if this does not restore reception.
     pub async fn recover(&mut self) -> Result<()> {
         use mbus_rs::wmbus::radio::radio_driver::RadioDriver;
+        // Re-arming alone cannot fix a chip whose oscillator is uncalibrated — the
+        // recurring wedge on this gateway — so try the analog rescue first. It is a
+        // no-op when the chip is healthy.
+        match self.driver.recover_analog().await {
+            Ok(true) => {}
+            Ok(false) => log::error!(
+                "radio needs a full power removal: RC calibration failed, which a reboot \
+                 will not clear"
+            ),
+            Err(e) => log::warn!("analog recovery attempt failed: {e}"),
+        }
         self.driver.start_receive().await?;
         Ok(())
     }
