@@ -274,6 +274,7 @@ fn decode_transport(
 fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &DecodeContext) {
     obj.insert("payload_hex".into(), json!(hex::encode(data)));
     let mut records = Vec::new();
+    let mut frame_quirks: Vec<&'static str> = Vec::new();
     let mut offset = 0usize;
     while offset < data.len() {
         // 0x2F is the idle filler used to pad to a block boundary.
@@ -283,6 +284,11 @@ fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &D
         }
         match parse_variable_record_in_context(&data[offset..], ctx) {
             Ok((rec, used)) if used > 0 => {
+                for q in &rec.applied_quirks {
+                    if !frame_quirks.contains(&q.quirk_id) {
+                        frame_quirks.push(q.quirk_id);
+                    }
+                }
                 records.push(record_to_json(&rec));
                 offset += used;
             }
@@ -299,6 +305,11 @@ fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &D
     }
     if !records.is_empty() {
         obj.insert("records".into(), json!(records));
+    }
+    // Frame-level union of fired quirks (P5): what the device store persists, and
+    // what a downstream consumer checks without walking every record.
+    if !frame_quirks.is_empty() {
+        obj.insert("applied_quirks".into(), json!(frame_quirks));
     }
 }
 
@@ -349,8 +360,9 @@ mod tests {
         let date = recs[0]["value"].as_str().expect("QUNDIS date is a string");
         assert!(date.contains("2015") && date.contains("12"), "got {date}");
         assert_eq!(recs[0]["unit"], "Date");
-        // P5: the overriding quirk is named in the output.
+        // P5: the overriding quirk is named per record and at frame level.
         assert_eq!(recs[0]["quirks"][0], "qds-vif04-date");
+        assert_eq!(v["applied_quirks"][0], "qds-vif04-date");
     }
 
     /// P6 end to end: the same QUNDIS frame with a corrupted CRC decodes with NO

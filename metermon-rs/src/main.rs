@@ -625,6 +625,14 @@ fn run_monitor(
                     reading: reading.clone(),
                     mode: radio.mode().to_string(),
                     freq_offset_hz: freq_offset,
+                    applied_quirks: v["applied_quirks"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|q| q.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 };
                 let attributed = match dm.record_frame(&obs) {
                     Ok(a) => a,
