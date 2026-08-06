@@ -939,6 +939,7 @@ impl WMBusHandleFactory {
         use crate::wmbus::radio::hal::raspberry_pi::{GpioPins, RaspberryPiHalBuilder};
 
         let gpio_pins = GpioPins {
+            nss: None,
             busy: busy_pin,
             dio1: dio1_pin,
             dio2: dio2_pin,

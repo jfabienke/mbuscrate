@@ -54,6 +54,7 @@
 //!
 //! // Define GPIO pin assignments
 //! let gpio_pins = GpioPins {
+//!     nss: None,
 //!     busy: 25,
 //!     dio1: 24,
 //!     dio2: Some(23),
@@ -99,6 +100,29 @@ pub enum RpiHalError {
     InvalidConfig(String),
 }
 
+/// Parse `/dev/spidevB.C` into rppal's (Bus, SlaveSelect).
+fn parse_spidev(path: &str) -> Option<(Bus, SlaveSelect)> {
+    let tail = path.rsplit_once("spidev")?.1;
+    let (b, c) = tail.split_once('.')?;
+    let bus = match b.trim().parse::<u8>().ok()? {
+        0 => Bus::Spi0,
+        1 => Bus::Spi1,
+        2 => Bus::Spi2,
+        3 => Bus::Spi3,
+        4 => Bus::Spi4,
+        5 => Bus::Spi5,
+        6 => Bus::Spi6,
+        _ => return None,
+    };
+    let ss = match c.trim().parse::<u8>().ok()? {
+        0 => SlaveSelect::Ss0,
+        1 => SlaveSelect::Ss1,
+        2 => SlaveSelect::Ss2,
+        _ => return None,
+    };
+    Some((bus, ss))
+}
+
 /// GPIO pin configuration for SX126x connections
 ///
 /// Specifies which Raspberry Pi GPIO pins are connected to the SX126x radio.
@@ -111,6 +135,7 @@ pub enum RpiHalError {
 ///
 /// // Minimal configuration (required pins only)
 /// let pins = GpioPins {
+///     nss: None,
 ///     busy: 25,           // GPIO 25 for BUSY signal
 ///     dio1: 24,           // GPIO 24 for primary interrupt
 ///     dio2: None,         // DIO2 not used
@@ -119,6 +144,7 @@ pub enum RpiHalError {
 ///
 /// // Full configuration with all optional pins
 /// let pins = GpioPins {
+///     nss: None,
 ///     busy: 25,
 ///     dio1: 24,
 ///     dio2: Some(23),     // GPIO 23 for secondary interrupt
@@ -127,6 +153,15 @@ pub enum RpiHalError {
 /// ```
 #[derive(Debug, Clone)]
 pub struct GpioPins {
+    ///     nss: None,
+    /// NSS / chip-select (output), when the board drives it from a plain GPIO rather
+    /// than a hardware SPI chip-select.
+    ///
+    /// Boards differ here and it is not cosmetic: with NSS left floating the SX126x
+    /// sees every byte on the bus as one unbroken transaction, so short commands
+    /// appear to work while longer ones silently desynchronise. `None` means the
+    /// hardware chip-select of the chosen spidev frames the transaction.
+    pub nss: Option<u8>,
     /// BUSY pin (input) - indicates radio is processing a command
     pub busy: u8,
     /// DIO1 pin (input) - primary interrupt from radio
@@ -138,9 +173,11 @@ pub struct GpioPins {
 }
 
 impl Default for GpioPins {
+    ///     nss: None,
     /// Default GPIO pin configuration for typical SX126x wiring
     fn default() -> Self {
         Self {
+            nss: None,       // hardware chip-select by default
             busy: 25,        // GPIO 25 (Pin 22)
             dio1: 24,        // GPIO 24 (Pin 18)
             dio2: Some(23),  // GPIO 23 (Pin 16)
@@ -174,6 +211,7 @@ pub struct RaspberryPiHal {
     /// GPIO controller for pin access
     gpio: Gpio,
     /// Input pins for radio status signals
+    nss_pin: Option<OutputPin>,
     busy_pin: InputPin,
     dio1_pin: InputPin,
     dio2_pin: Option<InputPin>,
@@ -211,6 +249,7 @@ impl RaspberryPiHal {
     ///
     /// // Custom pin configuration
     /// let pins = GpioPins {
+    ///     nss: None,
     ///     busy: 25,
     ///     dio1: 24,
     ///     dio2: None,        // Not using DIO2
@@ -238,22 +277,49 @@ impl RaspberryPiHal {
                 )))
             }
         };
+        Self::with_bus(bus, slave_select, format!("SPI{spi_bus}"), gpio_pins)
+    }
 
+    /// Open the HAL on an explicit `/dev/spidevB.C` path.
+    ///
+    /// [`new`](Self::new) can only reach chip-select 0, which is not enough on a Pi
+    /// that already has another radio: this gateway runs an RFM69 on `spidev0.1`, so
+    /// an SX126x board on the same bus must be addressed by its own chip-select.
+    pub fn from_spidev(path: &str, gpio_pins: &GpioPins) -> Result<Self, RpiHalError> {
+        let (bus, ss) = parse_spidev(path).ok_or_else(|| {
+            RpiHalError::InvalidConfig(format!(
+                "{path:?} is not a /dev/spidevB.C path (bus 0-6, chip-select 0-2)"
+            ))
+        })?;
+        Self::with_bus(bus, ss, path.to_string(), gpio_pins)
+    }
+
+    fn with_bus(
+        bus: Bus,
+        slave_select: SlaveSelect,
+        bus_label: String,
+        gpio_pins: &GpioPins,
+    ) -> Result<Self, RpiHalError> {
         // Initialize SPI with SX126x-compatible settings.
         // rppal 0.22: bit order is set on the constructed Spi, not via a builder method.
         let mut spi = Spi::new(bus, slave_select, 8_000_000, Mode::Mode0)?;
         spi.set_bit_order(BitOrder::MsbFirst)?;
 
-        let bus_info = format!(
-            "SPI{} ({})",
-            spi_bus,
-            if spi_bus == 0 { "primary" } else { "auxiliary" }
-        );
+        let bus_info = bus_label;
 
         // Initialize GPIO controller
         let gpio = Gpio::new()?;
 
         // Configure input pins
+        // Deselected (high) at rest: the chip must only listen while we assert NSS.
+        let nss_pin = match gpio_pins.nss {
+            Some(pin) => {
+                let mut p = gpio.get(pin)?.into_output();
+                p.set_high();
+                Some(p)
+            }
+            None => None,
+        };
         let busy_pin = gpio.get(gpio_pins.busy)?.into_input();
         let dio1_pin = gpio.get(gpio_pins.dio1)?.into_input();
 
@@ -286,6 +352,7 @@ impl RaspberryPiHal {
         Ok(Self {
             spi,
             gpio,
+            nss_pin,
             busy_pin,
             dio1_pin,
             dio2_pin,
@@ -318,6 +385,34 @@ impl RaspberryPiHal {
     ///
     /// // Radio is now in clean state and ready for commands
     /// ```
+    /// Assert NSS (active low) for boards using a GPIO chip-select. No-op otherwise.
+    fn select(&mut self) {
+        if let Some(ref mut nss) = self.nss_pin {
+            nss.set_low();
+        }
+    }
+
+    /// Release NSS, ending the transaction and letting the chip frame the next one.
+    fn deselect(&mut self) {
+        if let Some(ref mut nss) = self.nss_pin {
+            nss.set_high();
+        }
+    }
+
+    /// Current level of the BUSY line.
+    ///
+    /// BUSY gates every SX126x command, so a probe needs to observe it directly: a
+    /// line stuck high is the signature of an unpowered chip or a wrong pin, and is
+    /// otherwise indistinguishable from every command timing out.
+    pub fn busy(&self) -> bool {
+        self.busy_pin.read() == Level::High
+    }
+
+    /// Pulse NRST (active low) and let the chip restart. No-op without a reset pin.
+    pub fn reset(&mut self) -> Result<(), RpiHalError> {
+        self.reset_radio()
+    }
+
     pub fn reset_radio(&mut self) -> Result<(), RpiHalError> {
         if let Some(ref mut reset_pin) = self.reset_pin {
             log::debug!("Performing hardware reset of SX126x");
@@ -436,13 +531,17 @@ impl RaspberryPiHal {
 
 impl Hal for RaspberryPiHal {
     fn write_command(&mut self, opcode: u8, data: &[u8]) -> Result<(), HalError> {
+        self.wait_for_busy_low(100).map_err(|_| HalError::Spi)?;
         // Prepare command buffer: opcode followed by data
         let mut cmd_buf = Vec::with_capacity(1 + data.len());
         cmd_buf.push(opcode);
         cmd_buf.extend_from_slice(data);
 
         // Send command via SPI
-        match self.spi.write(&cmd_buf) {
+        self.select();
+        let result = self.spi.write(&cmd_buf);
+        self.deselect();
+        match result {
             Ok(_) => {
                 log::trace!("SPI write command 0x{:02X}, {} bytes", opcode, data.len());
 
@@ -460,23 +559,41 @@ impl Hal for RaspberryPiHal {
     }
 
     fn read_command(&mut self, opcode: u8, buf: &mut [u8]) -> Result<(), HalError> {
-        // Prepare command with NOP bytes for reading response
-        let mut cmd_buf = vec![opcode];
-        cmd_buf.resize(1 + buf.len(), 0x00); // Pad with NOP bytes
+        // BUSY must be low BEFORE a command is issued; the chip ignores SPI while it
+        // is high. Waiting only afterwards (as this HAL previously did) lets the very
+        // first command of a sequence be dropped.
+        self.wait_for_busy_low(100).map_err(|_| HalError::Spi)?;
 
-        match self.spi.transfer(&mut cmd_buf, buf) {
+        // Full duplex: the opcode goes out while the chip clocks the status byte in,
+        // so the caller's response starts one byte later. rppal's signature is
+        // transfer(read, write) — passing these the other way round transmits the
+        // caller's empty buffer and captures nothing, which reads as a dead chip.
+        let mut tx = vec![0u8; 1 + buf.len()];
+        tx[0] = opcode;
+        let mut rx = vec![0u8; tx.len()];
+        self.select();
+        let result = self.spi.transfer(&mut rx, &tx);
+        self.deselect();
+        match result {
             Ok(_) => {
-                log::trace!("SPI read command 0x{:02X}, {} bytes", opcode, buf.len());
+                buf.copy_from_slice(&rx[1..]);
+                log::trace!(
+                    "SPI read command 0x{opcode:02X} -> status 0x{:02X}, {} byte(s)",
+                    rx[0],
+                    buf.len()
+                );
                 Ok(())
             }
             Err(e) => {
-                log::error!("SPI read command failed: {}", e);
+                log::error!("SPI read command failed: {e}");
                 Err(HalError::Spi)
             }
         }
     }
 
     fn write_register(&mut self, addr: u16, data: &[u8]) -> Result<(), HalError> {
+        self.wait_for_busy_low(100)
+            .map_err(|_| HalError::Register)?;
         // WriteRegister command format: 0x0D, addr_msb, addr_lsb, data...
         let mut cmd_buf = Vec::with_capacity(3 + data.len());
         cmd_buf.push(0x0D); // WriteRegister command
@@ -484,7 +601,10 @@ impl Hal for RaspberryPiHal {
         cmd_buf.push(addr as u8); // Address LSB
         cmd_buf.extend_from_slice(data);
 
-        match self.spi.write(&cmd_buf) {
+        self.select();
+        let result = self.spi.write(&cmd_buf);
+        self.deselect();
+        match result {
             Ok(_) => {
                 log::trace!("Register write 0x{:04X}, {} bytes", addr, data.len());
 
@@ -501,13 +621,20 @@ impl Hal for RaspberryPiHal {
     }
 
     fn read_register(&mut self, addr: u16, buf: &mut [u8]) -> Result<(), HalError> {
-        // ReadRegister command format: 0x1D, addr_msb, addr_lsb, NOP, data...
-        let mut cmd_buf = vec![0x1D, (addr >> 8) as u8, addr as u8, 0x00];
-        cmd_buf.resize(4 + buf.len(), 0x00);
+        self.wait_for_busy_low(100)
+            .map_err(|_| HalError::Register)?;
 
-        let mut read_buf = vec![0u8; cmd_buf.len()];
+        // ReadRegister: 0x1D, addr_msb, addr_lsb, NOP, then data. Same argument-order
+        // hazard as read_command — rppal takes (read, write).
+        let mut tx = vec![0x1D, (addr >> 8) as u8, addr as u8, 0x00];
+        tx.resize(4 + buf.len(), 0x00);
 
-        match self.spi.transfer(&mut cmd_buf, &mut read_buf) {
+        let mut read_buf = vec![0u8; tx.len()];
+
+        self.select();
+        let result = self.spi.transfer(&mut read_buf, &tx);
+        self.deselect();
+        match result {
             Ok(_) => {
                 // Copy response data (skip command, address, and status bytes)
                 buf.copy_from_slice(&read_buf[4..]);
@@ -729,6 +856,7 @@ mod tests {
 /// RFM69-specific GPIO pin configuration
 #[derive(Debug, Clone)]
 pub struct Rfm69GpioPins {
+    ///     nss: None,
     /// Reset pin (output) - RFM69 reset control (active high for reset pulse)
     pub reset: Option<u8>,
     /// Interrupt pin (input) - DIO1 for FIFO level interrupt  

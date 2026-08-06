@@ -24,6 +24,8 @@ mod profiles;
 mod publish;
 mod source;
 mod sweep;
+#[cfg(feature = "radio")]
+mod sx1262_probe;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -177,6 +179,35 @@ enum Cmd {
         #[arg(long)]
         from_config: String,
     },
+    /// First-light probe for an SX1262 board: prove power, SPI, the BUSY handshake
+    /// and the oscillator answer before trusting anything above them. Read-mostly;
+    /// never transmits. Run with the monitor stopped if it shares the SPI bus.
+    Sx1262Probe {
+        /// SPI device the SX1262's chip-select is on (the RFM69 uses spidev0.1).
+        #[arg(long, default_value = "/dev/spidev0.0")]
+        spidev: String,
+        /// BCM GPIO driving NSS/chip-select, when the board uses a plain GPIO rather
+        /// than a hardware SPI chip-select. Omit for hardware CS.
+        #[arg(long)]
+        nss: Option<u8>,
+        /// BCM GPIO for BUSY.
+        #[arg(long, default_value_t = 25)]
+        busy: u8,
+        /// BCM GPIO for DIO1 (RxDone and friends).
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        /// BCM GPIO for DIO2, if broken out.
+        #[arg(long)]
+        dio2: Option<u8>,
+        /// BCM GPIO for NRST.
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        /// TCXO supply voltage in mV, if the board has one (1600/1700/1800/2200/
+        /// 2400/2700/3000/3300). The probe detects the need automatically; this only
+        /// sets the voltage used when it does.
+        #[arg(long)]
+        tcxo_mv: Option<u32>,
+    },
     /// Run the mock backend Device Manager: watch the gateway's data topic and answer
     /// op:startup / op:profile_request with op:profile messages from a catalog file.
     /// Stand-in for the real Device Manager (vendor-layers §7.2); serves model names
@@ -250,6 +281,15 @@ fn main() -> Result<()> {
         } => run_sweep(&config, &db, seconds),
         Cmd::Import { db, from } => run_import(&db, &from),
         Cmd::ImportKeys { db, from_config } => run_import_keys(&db, &from_config),
+        Cmd::Sx1262Probe {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            dio2,
+            reset,
+            tcxo_mv,
+        } => run_sx1262_probe(&spidev, nss, busy, dio1, dio2, reset, tcxo_mv),
         Cmd::MockBackend {
             config,
             catalog,
@@ -909,6 +949,43 @@ fn run_monitor(
         log::info!("metermon-rs monitor stopped cleanly");
         Ok(())
     })
+}
+
+#[cfg(feature = "radio")]
+fn run_sx1262_probe(
+    spidev: &str,
+    nss: Option<u8>,
+    busy: u8,
+    dio1: u8,
+    dio2: Option<u8>,
+    reset: u8,
+    tcxo_mv: Option<u32>,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    sx1262_probe::run(
+        spidev,
+        GpioPins {
+            nss,
+            busy,
+            dio1,
+            dio2,
+            reset: Some(reset),
+        },
+        tcxo_mv,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+fn run_sx1262_probe(
+    _spidev: &str,
+    _nss: Option<u8>,
+    _busy: u8,
+    _dio1: u8,
+    _dio2: Option<u8>,
+    _reset: u8,
+    _tcxo_mv: Option<u32>,
+) -> Result<()> {
+    bail_no_radio("sx1262-probe")
 }
 
 /// Condense a decoded frame's records into a short human-readable reading, e.g.
