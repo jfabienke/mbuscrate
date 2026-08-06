@@ -331,6 +331,17 @@ impl Rfm69Driver {
         // Verify chip communication
         self.verify_chip().await?;
 
+        // The chip must be calibrated before any mode transition can complete. Doing
+        // this at init turns the recurring wedge from a crash loop into either a
+        // clean recovery or an explicit, actionable "power must be removed".
+        if !self.ensure_rc_calibrated().await? {
+            return Err(Rfm69Error::InitFailed(
+                "RC oscillator calibration failed — analog section not running; \
+                 remove power (a reboot will not clear this)"
+                    .to_string(),
+            ));
+        }
+
         // Configure for wM-Bus operation
         self.configure_wmbus().await?;
 
@@ -356,48 +367,74 @@ impl Rfm69Driver {
     async fn reset(&mut self) -> Result<(), Rfm69Error> {
         #[cfg(feature = "rfm69")]
         {
-            if let Some(ref mut reset_pin) = self.reset_pin {
-                info!("Resetting RFM69 chip");
-
-                // Pulse reset pin: HIGH -> wait -> LOW -> wait
-                reset_pin.set_high();
-                sleep(Duration::from_millis(300)).await;
-                reset_pin.set_low();
-                sleep(Duration::from_millis(300)).await;
-
-                // Verify chip is responding
-                let start = Instant::now();
-                let timeout_duration = Duration::from_secs(5);
-
-                // Try to sync with chip by writing test patterns
-                let original = self.read_register(REG_SYNCVALUE1).await?;
-
-                while start.elapsed() < timeout_duration {
-                    self.write_register(REG_SYNCVALUE1, 0xAA).await?;
-                    if self.read_register(REG_SYNCVALUE1).await? == 0xAA {
-                        break;
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-
-                while start.elapsed() < timeout_duration {
-                    self.write_register(REG_SYNCVALUE1, 0x55).await?;
-                    if self.read_register(REG_SYNCVALUE1).await? == 0x55 {
-                        break;
-                    }
-                    sleep(Duration::from_millis(10)).await;
-                }
-
-                if start.elapsed() >= timeout_duration {
-                    return Err(Rfm69Error::InitFailed(
-                        "Failed to sync with radio chip".to_string(),
-                    ));
-                }
-
-                // Restore original value
-                self.write_register(REG_SYNCVALUE1, original).await?;
-                info!("RFM69 chip reset completed");
+            let Some(pin) = self.config.reset_pin else {
+                warn!("no reset pin configured — cannot hardware-reset the radio");
+                return Ok(());
+            };
+            if self.reset_pin.is_none() {
+                warn!("reset pin {pin} configured but not claimed — no hardware reset available");
+                return Ok(());
             }
+
+            // Prove the pulse actually reaches the chip. A reset line that is not
+            // wired, is the wrong polarity, or is held by something else fails
+            // silently: the driver "resets" forever while the chip never restarts,
+            // which would make a persistent fault look like an unfixable chip.
+            // Sentinel avoids needing the POR default: write a value, reset, and see
+            // whether it survived. Survival means the reset did nothing.
+            let scratch = self.read_register(REG_SYNCVALUE1).await?;
+            let sentinel = scratch ^ 0xFF;
+            self.write_register(REG_SYNCVALUE1, sentinel).await?;
+            let armed = self.read_register(REG_SYNCVALUE1).await? == sentinel;
+
+            info!("Resetting RFM69 chip (GPIO {pin})");
+            if let Some(ref mut reset_pin) = self.reset_pin {
+                // RFM69 reset is active high: assert, then release and let the chip
+                // restart before any SPI access.
+                reset_pin.set_high();
+                sleep(Duration::from_millis(10)).await;
+                reset_pin.set_low();
+                sleep(Duration::from_millis(20)).await;
+            }
+
+            if armed {
+                let after = self.read_register(REG_SYNCVALUE1).await?;
+                if after == sentinel {
+                    error!(
+                        "RFM69 hardware reset had NO EFFECT: register survived the pulse on \
+                         GPIO {pin} (wrote 0x{sentinel:02X}, still 0x{after:02X}). The reset \
+                         line is not reaching the chip — check wiring and polarity. Every \
+                         'reset' so far has been a no-op."
+                    );
+                } else {
+                    info!(
+                        "RFM69 hardware reset verified effective (register returned to \
+                         0x{after:02X})"
+                    );
+                }
+            } else {
+                warn!("could not arm the reset-effectiveness check; SPI writes not sticking");
+            }
+
+            // Verify the chip talks after reset.
+            let start = Instant::now();
+            let timeout_duration = Duration::from_secs(5);
+            let mut synced = false;
+            while start.elapsed() < timeout_duration {
+                self.write_register(REG_SYNCVALUE1, 0xAA).await?;
+                if self.read_register(REG_SYNCVALUE1).await? == 0xAA {
+                    synced = true;
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+            if !synced {
+                return Err(Rfm69Error::InitFailed(
+                    "Failed to sync with radio chip".to_string(),
+                ));
+            }
+            self.write_register(REG_SYNCVALUE1, scratch).await?;
+            info!("RFM69 chip reset completed");
         }
 
         Ok(())
@@ -564,6 +601,79 @@ impl Rfm69Driver {
     }
 
     /// Set radio operating mode
+    /// Ensure the RC oscillator is calibrated, triggering calibration if it is not.
+    ///
+    /// `RegOsc1.RcCalDone` clear means the chip's internal RC calibration never
+    /// completed, and no mode transition can finish until it does — the signature
+    /// found on this gateway's recurring wedge. Calibration normally runs at
+    /// power-on; triggering it explicitly is the one recovery available without
+    /// physically removing power.
+    ///
+    /// Returns whether the oscillator ended up calibrated. Per the datasheet
+    /// calibration is only valid in standby, so the caller must already be there.
+    async fn ensure_rc_calibrated(&self) -> Result<bool, Rfm69Error> {
+        let osc1 = self.read_register(REG_OSC1).await?;
+        if osc1 & RF_OSC1_RCCAL_DONE != 0 {
+            return Ok(true);
+        }
+
+        warn!("RFM69 RC oscillator not calibrated (RegOsc1 0x{osc1:02X}); triggering calibration");
+        self.write_register(REG_OSC1, RF_OSC1_RCCAL_START).await?;
+
+        // Datasheet puts calibration in the sub-millisecond range; allow far longer
+        // before concluding the analog section is genuinely dead.
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(200) {
+            if self.read_register(REG_OSC1).await? & RF_OSC1_RCCAL_DONE != 0 {
+                info!(
+                    "RFM69 RC calibration completed in {}ms",
+                    start.elapsed().as_millis()
+                );
+                return Ok(true);
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+
+        error!(
+            "RFM69 RC calibration did not complete in {}ms — the analog section is not \
+             running (crystal/supply); this cannot be cleared from software and needs a \
+             full power removal, not a reboot",
+            start.elapsed().as_millis()
+        );
+        Ok(false)
+    }
+
+    /// Attempt to bring a wedged radio back without physical access.
+    ///
+    /// Forces standby, then re-runs RC calibration. Returns whether the chip looks
+    /// usable afterwards. Reports honestly when it does not: a failure here is
+    /// positive evidence that power must be removed, which is more actionable than
+    /// an unexplained timeout.
+    pub async fn recover_analog(&mut self) -> Result<bool, Rfm69Error> {
+        info!("RFM69 analog recovery: forcing standby and recalibrating");
+        // Write standby directly rather than through set_mode: set_mode verifies and
+        // would fail on exactly the chip we are trying to rescue.
+        self.write_register_bits(REG_OPMODE, 0x1C, RF_OPMODE_STANDBY)
+            .await?;
+        sleep(Duration::from_millis(10)).await;
+
+        let calibrated = self.ensure_rc_calibrated().await?;
+        if !calibrated {
+            return Ok(false);
+        }
+        // Calibration alone is not success: the chip must now actually signal ready.
+        let flags = self.read_register(REG_IRQFLAGS1).await?;
+        let ready = flags & RF_IRQFLAGS1_MODEREADY != 0;
+        if ready {
+            self.current_mode = Rfm69Mode::Standby;
+            info!("RFM69 analog recovery succeeded — chip is ready in standby");
+        } else {
+            let diag = self.diagnostics(None).await;
+            error!("RFM69 recalibrated but still not ready\n{diag}");
+        }
+        Ok(ready)
+    }
+
     /// A decoded snapshot of the registers that explain a failed mode transition.
     ///
     /// Captured at the moment of failure, because "Timeout waiting for: Mode ready"
@@ -605,14 +715,26 @@ impl Rfm69Driver {
         // different failure (bus or chip not accepting writes) from one that lands
         // but never becomes ready (PLL/oscillator), and conflating them is why this
         // was previously undiagnosable.
-        let readback = self.read_register(REG_OPMODE).await?;
+        let mut readback = self.read_register(REG_OPMODE).await?;
         if readback & 0x1C != opmode {
             let diag = self.diagnostics(Some((mode, opmode))).await;
             error!("RFM69 mode write did not take effect: {from:?} -> {mode:?}\n{diag}");
-            return Err(Rfm69Error::InitFailed(format!(
-                "OPMODE write ignored: wrote 0x{opmode:02X}, read back 0x{:02X}",
-                readback & 0x1C
-            )));
+
+            // A chip that ignores mode writes is usually one whose RC oscillator is
+            // uncalibrated; try to rescue it once before giving up, so the fleet is
+            // not stranded on a fault that software can clear.
+            if self.recover_analog().await? {
+                self.write_register_bits(REG_OPMODE, 0x1C, opmode).await?;
+                readback = self.read_register(REG_OPMODE).await?;
+            }
+            if readback & 0x1C != opmode {
+                return Err(Rfm69Error::InitFailed(format!(
+                    "OPMODE write ignored: wrote 0x{opmode:02X}, read back 0x{:02X} ({})",
+                    readback & 0x1C,
+                    diag.verdict()
+                )));
+            }
+            info!("RFM69 recovered; {from:?} -> {mode:?} accepted after recalibration");
         }
 
         // Wait for ModeReady on EVERY transition, not only when leaving sleep. The
