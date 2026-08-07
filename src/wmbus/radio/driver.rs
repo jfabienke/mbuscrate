@@ -673,6 +673,21 @@ impl<H: Hal> Sx126xDriver<H> {
                 self.hal.write_command(0x8C, &buf)?; // SetPacketParams command
             }
             PacketParams::LoRa { params } => {
+                // Datasheet §15.4 (Known Limitations): bit 2 of register 0x0736 must
+                // track the IQ polarity — cleared for inverted, SET for standard.
+                // Both MIT references (RadioLib, lora-phy) apply this on every LoRa
+                // packet-params write; trusting the reset value across GFSK/LoRa
+                // profile churn is exactly the kind of assumption that has burned
+                // this driver before.
+                let mut iq = [0u8; 1];
+                self.hal.read_register(0x0736, &mut iq)?;
+                let fixed = if params.iq_inverted {
+                    iq[0] & 0xFB
+                } else {
+                    iq[0] | 0x04
+                };
+                self.hal.write_register(0x0736, &[fixed])?;
+
                 let mut buf = [0u8; 6];
 
                 // Preamble length in symbols (16-bit value)

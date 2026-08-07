@@ -40,3 +40,20 @@ of theirs. Differences within Poisson noise.
 
 Deliberately not aligned: RadioLib derives a 24-bit preamble detector from
 this configuration where we use 8 bits. That divergence is part of the test.
+
+## rl-lora — the LoRa twin
+
+Same arbiter role for the LoRa modem: sweeps the EU868 join channels across
+the SF ladder with the public LoRaWAN sync word and prints every decode.
+
+```sh
+g++ -O2 -std=c++17 -I RadioLib/src rl-lora.cpp     $(find RadioLib/src -name '*.cpp') -llgpio -o rl-lora
+./rl-lora <total-seconds> <dwell-seconds>
+```
+
+2026-08-07 baseline: 480 s over the full matrix — zero frames, matching our
+receiver's silence in the same environment. The reference being equally silent
+localises the absence to the air, not the driver: LoRaWAN join retries from a
+long-unjoined device are duty-cycle-capped to a handful of attempts per day,
+so short sweeps miss them by default. Catching one takes standing windows
+(the gateway's `lora-listen`) or a controlled transmitter.
