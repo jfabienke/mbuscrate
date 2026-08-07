@@ -85,6 +85,7 @@ pub struct SweepPoint {
     pub sf: u8,
     pub bw_khz: u32,
     pub sync: u16,
+    pub implicit: bool,
 }
 
 fn bw_from(khz: u32) -> Result<LoRaBandwidth> {
@@ -107,6 +108,7 @@ pub fn run(
     hunt_e22: bool,
     dwell_secs: u64,
     private_sync: bool,
+    rx_boost: bool,
     capture: Option<String>,
     seconds: u64,
 ) -> Result<()> {
@@ -120,16 +122,23 @@ pub fn run(
         // space at its (documented) channel frequency. A transmitter looping
         // every ~2s guarantees at least two frames land in each 5s dwell of
         // the matching point — one full pass is bounded and decisive.
+        // Ordered most-likely-first: the module reports a 2.4k air rate, which on
+        // an SX1262 is SF10/BW125, and Ebyte's default sync is the private 0x1424.
+        // Header mode is included because it must match exactly — an explicit-header
+        // receiver is deaf to an implicit-header sender with no error to say so.
         let mut v = Vec::new();
         for sy in [0x1424u16, LORAWAN_PUBLIC_SYNC] {
-            for bw in [125u32, 250, 500] {
-                for sf_n in [9u8, 8, 7, 10, 11, 12, 6, 5] {
-                    v.push(SweepPoint {
-                        freq_hz,
-                        sf: sf_n,
-                        bw_khz: bw,
-                        sync: sy,
-                    });
+            for implicit in [false, true] {
+                for bw in [125u32, 250, 500] {
+                    for sf_n in [10u8, 9, 11, 12, 8, 7, 6, 5] {
+                        v.push(SweepPoint {
+                            freq_hz,
+                            sf: sf_n,
+                            bw_khz: bw,
+                            sync: sy,
+                            implicit,
+                        });
+                    }
                 }
             }
         }
@@ -141,8 +150,9 @@ pub fn run(
                 v.push(SweepPoint {
                     freq_hz: f,
                     sf: sf_n,
-                    bw_khz: bw_khz,
+                    bw_khz,
                     sync,
+                    implicit: false,
                 });
             }
         }
@@ -153,6 +163,7 @@ pub fn run(
             sf,
             bw_khz,
             sync,
+            implicit: false,
         }]
     };
     println!(
@@ -186,7 +197,14 @@ pub fn run(
     let mut driver = Sx126xDriver::new(hal, 32_000_000);
     driver.calibrate(0x7F).context("calibrating")?;
     driver.set_dio2_as_rf_switch(true).context("DIO2 RF switch")?;
-    driver.set_rx_boosted_gain(true).context("RX boost")?;
+    // Boosted gain costs ~3 dB of headroom at the top of the range. Against a
+    // bench transmitter arriving at -24 dBm the front end is already compressed,
+    // and compression shows up as frames that demodulate into noise rather than
+    // as an absence of frames — so it must be switchable for close-range work.
+    driver.set_rx_boosted_gain(rx_boost).context("RX boost")?;
+    if !rx_boost {
+        println!("RX boosted gain OFF (close-range transmitter)");
+    }
 
     let mut capture_file = match capture.as_deref() {
         Some(path) => Some(std::io::BufWriter::new(
@@ -211,17 +229,19 @@ pub fn run(
             cr: CodingRate::CR4_5,
             power_dbm: 14,
             sync_word: Some(point.sync),
+            implicit_header: point.implicit,
         });
         driver.switch_profile(&profile).context("profile switch")?;
         driver.set_rx_continuous().context("entering RX")?;
         if sweep || hunt_e22 {
             println!(
-                "── {:>4}s · listening {:.3} MHz SF{} BW{} sync 0x{:04X}",
+                "── {:>4}s · listening {:.3} MHz SF{} BW{} sync 0x{:04X} {}",
                 start.elapsed().as_secs(),
                 point.freq_hz as f64 / 1e6,
                 point.sf,
                 point.bw_khz,
-                point.sync
+                point.sync,
+                if point.implicit { "implicit" } else { "explicit" }
             );
         }
 

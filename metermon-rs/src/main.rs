@@ -247,6 +247,10 @@ enum Cmd {
         /// Use the private-network sync word (0x1424) instead of public LoRaWAN.
         #[arg(long)]
         private_sync: bool,
+        /// Disable RX boosted gain — for a transmitter close enough to compress
+        /// the front end.
+        #[arg(long)]
+        no_rx_boost: bool,
         /// Write received frames as hex lines to this file.
         #[arg(long)]
         capture: Option<String>,
@@ -389,6 +393,7 @@ fn main() -> Result<()> {
             hunt_e22,
             dwell,
             private_sync,
+            no_rx_boost,
             capture,
             seconds,
         } => run_lora_rx(
@@ -404,6 +409,7 @@ fn main() -> Result<()> {
             hunt_e22,
             dwell,
             private_sync,
+            !no_rx_boost,
             capture,
             seconds,
         ),
@@ -1173,6 +1179,7 @@ fn run_lora_rx(
     hunt_e22: bool,
     dwell: u64,
     private_sync: bool,
+    rx_boost: bool,
     capture: Option<String>,
     seconds: u64,
 ) -> Result<()> {
@@ -1193,6 +1200,7 @@ fn run_lora_rx(
         hunt_e22,
         dwell,
         private_sync,
+        rx_boost,
         capture,
         seconds,
     )
@@ -1213,6 +1221,7 @@ fn run_lora_rx(
     _hunt_e22: bool,
     _dwell: u64,
     _private_sync: bool,
+    _rx_boost: bool,
     _capture: Option<String>,
     _seconds: u64,
 ) -> Result<()> {

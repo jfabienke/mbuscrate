@@ -386,6 +386,11 @@ pub struct LoRaProfile {
     pub power_dbm: i8,
     /// Optional LoRa sync word (network id). `None` leaves the chip default in place.
     pub sync_word: Option<u16>,
+    /// Implicit (fixed-length, no on-air header) rather than explicit header.
+    /// Header mode must match the transmitter exactly: an explicit-header receiver
+    /// is deaf to an implicit-header sender and vice versa, with no error to
+    /// distinguish it from an empty band.
+    pub implicit_header: bool,
 }
 
 /// A received packet tagged with the modem it was captured under, plus the radio metadata
@@ -1946,6 +1951,7 @@ impl<H: Hal> Sx126xDriver<H> {
             cr,
             power_dbm,
             sync_word: None,
+            implicit_header: false,
         })
     }
 
@@ -1963,6 +1969,7 @@ impl<H: Hal> Sx126xDriver<H> {
             cr,
             power_dbm,
             sync_word,
+            implicit_header,
         } = *profile;
 
         // Set RF frequency, then calibrate the image for that band — the factory
@@ -1998,11 +2005,11 @@ impl<H: Hal> Sx126xDriver<H> {
         // Configure LoRa packet parameters (explicit header, CRC on, standard preamble)
         let packet_params = PacketParams::LoRa {
             params: LoRaPacketParams {
-                preamble_len: 8,        // Standard 8-symbol preamble
-                implicit_header: false, // Explicit header for non-WAN
-                payload_len: 255,       // Max payload
-                crc_on: true,           // Enable CRC
-                iq_inverted: false,     // Standard IQ
+                preamble_len: 8, // Standard 8-symbol preamble
+                implicit_header,
+                payload_len: 255,   // Max payload
+                crc_on: true,       // Enable CRC
+                iq_inverted: false, // Standard IQ
             },
         };
         self.set_packet_params(packet_params)?;
@@ -2894,6 +2901,7 @@ mod tests {
             cr: CodingRate::CR4_5,
             power_dbm: 14,
             sync_word: None,
+            implicit_header: false,
         }
     }
 
