@@ -11,9 +11,18 @@ protocol in configuration mode and raw payload bytes in transparent mode; the
 mode is selected by the M0/M1 jumpers on the HAT, not software, so each
 subcommand states the jumper position it needs and verifies it by behaviour.
 
-Modes (E22 convention, pins have pull-ups; a jumper cap grounds the pin):
-  transparent  M0=0 M1=0   both caps fitted     - tx/rx of raw payloads
-  config       M0=0 M1=1   M0 cap on, M1 cap off - register access at 9600 8N1
+Modes (E22 T-series; both pins have pull-ups, so a jumper cap PULLS THE PIN LOW):
+  Mode 0 transparent  M0=0 M1=0  BOTH caps fitted   - tx/rx of raw payloads
+  Mode 3 config       M0=1 M1=1  BOTH caps REMOVED  - register access, 9600 8N1
+
+Config mode is Mode 3 (both pins high), NOT "M0 low / M1 high" — that is Mode 2
+(WOR receive), which ignores register commands exactly like transparent mode does
+and so looks identical to a dead module. Config mode's serial is fixed at 9600 8N1
+regardless of the configured data baud.
+
+The board also carries a UART routing block (silkscreen A/B/C, separate from
+MODE SELECT): A = USB-LoRa, B = Pi-LoRa, C = USB-PI. Both caps must be on A for
+this tool to reach the module.
 
 Frequency: 850.125 MHz + channel. Channel 18 = 868.125 MHz.
 
@@ -100,9 +109,10 @@ def cmd_info(args) -> None:
         regs = read_registers(ser, 0x00, 9)
         if regs is None:
             sys.exit(
-                f"no config-mode response on {port}. Check the jumpers: config "
-                "mode is M0 cap ON, M1 cap OFF, then power-cycle the module "
-                "(replug USB)."
+                f"no config-mode response on {port}. Config mode is Mode 3: "
+                "REMOVE both M0 and M1 caps, then replug USB (the module samples "
+                "the pins only at power-up). Also check the A/B/C routing block "
+                "is on A (USB-LoRa)."
             )
         pid = read_registers(ser, 0x80, 7)
     addh, addl, netid, reg0, reg1, ch, reg3, crypt_h, crypt_l = regs
@@ -125,8 +135,9 @@ def cmd_setup(args) -> None:
     with open_config(port) as ser:
         if read_registers(ser, 0x00, 9) is None:
             sys.exit(
-                f"no config-mode response on {port}. Jumpers: M0 cap ON, "
-                "M1 cap OFF, then replug USB."
+                f"no config-mode response on {port}. Config mode is Mode 3: "
+                "REMOVE both M0 and M1 caps, then replug USB. Also check the "
+                "A/B/C routing block is on A (USB-LoRa)."
             )
         # ADDH/ADDL/NETID zero (broadcast/transparent), 9600 8N1 + air rate,
         # 240B packets + power, channel, plain transparent mode, crypt off.
@@ -142,7 +153,7 @@ def cmd_setup(args) -> None:
         f"configured: channel {args.channel} ({850.125 + args.channel:.3f} MHz), "
         f"air rate {args.air_rate}, {args.power} dBm, transparent, crypt off"
     )
-    print("now move BOTH jumper caps on (M0=0 M1=0), replug USB, and run `tx`.")
+    print("now FIT both M0/M1 caps (Mode 0 transparent), replug USB, and run `tx`.")
 
 
 def cmd_tx(args) -> None:

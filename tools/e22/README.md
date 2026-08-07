@@ -9,11 +9,21 @@ prerequisite for the LoRaWAN join responder.
 
 1. Plug the HAT's USB into the Mac. `uv run e22ctl.py detect` lists ports
    (the Alveo FTDI and RPP probes are recognised and excluded).
-2. Mode is set by the M0/M1 jumper caps (cap fitted = pin grounded = 0):
-   - **config**: M0 cap ON, M1 cap OFF — for `info` / `setup`
-   - **transparent**: both caps ON — for `tx` / `rx`
-   Replug USB after moving caps; the module samples them at power-up.
-   `info` failing with "no config-mode response" means the caps are wrong.
+2. Two separate jumper blocks, and both matter:
+   - **MODE SELECT (M0/M1)** — caps pull the pins LOW:
+     - **Mode 3 config**: **both caps REMOVED** (M0=1 M1=1) — for `info` / `setup`
+     - **Mode 0 transparent**: **both caps FITTED** (M0=0 M1=0) — for `tx` / `rx`
+     Config mode is *not* "M0 low, M1 high" — that is Mode 2 (WOR receive), which
+     ignores register commands and is indistinguishable from a dead module.
+   - **UART routing (A/B/C)** — `A = USB-LoRa`, `B = Pi-LoRa`, `C = USB-PI`.
+     Both caps on **A** for this tool.
+   Replug USB after moving any cap; the module samples the pins only at power-up.
+
+3. **Read the channel before hunting.** Until `setup` succeeds the module sits on
+   its factory-default channel, which is not necessarily 868 MHz — E22-900T22S
+   units commonly ship on channel 23 (873.125 MHz). Hunting at an assumed
+   frequency while the module transmits elsewhere looks exactly like a broken
+   radio; `info` reports the real channel.
 
 ## Proving gateway LoRa RX
 
