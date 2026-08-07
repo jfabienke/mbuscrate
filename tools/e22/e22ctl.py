@@ -11,14 +11,23 @@ protocol in configuration mode and raw payload bytes in transparent mode; the
 mode is selected by the M0/M1 jumpers on the HAT, not software, so each
 subcommand states the jumper position it needs and verifies it by behaviour.
 
-Modes (E22 T-series; both pins have pull-ups, so a jumper cap PULLS THE PIN LOW):
-  Mode 0 transparent  M0=0 M1=0  BOTH caps fitted   - tx/rx of raw payloads
-  Mode 3 config       M0=1 M1=1  BOTH caps REMOVED  - register access, 9600 8N1
+Modes (a jumper cap grounds the pin; an empty header floats it high):
 
-Config mode is Mode 3 (both pins high), NOT "M0 low / M1 high" — that is Mode 2
-(WOR receive), which ignores register commands exactly like transparent mode does
-and so looks identical to a dead module. Config mode's serial is fixed at 9600 8N1
-regardless of the configured data baud.
+  M0    M1    Mode                       Caps
+  ---   ---   ------------------------   -------------------------
+  low   low   0 normal (transparent)     both fitted
+  high  low   1 WOR                      M0 off, M1 on
+  low   high  2 CONFIGURATION            M0 ON, M1 OFF   <- info/setup
+  high  high  3 deep sleep               both removed
+
+Verified against two independent sources, because getting this wrong is silent —
+the module simply ignores register commands and reads as dead hardware:
+  * Waveshare's HAT wiki mode table
+  * xreef/EByte_LoRa_E22 lora_e22.py set_mode(), MODE_2_CONFIGURATION
+
+Note deep sleep is BOTH caps removed. Configuration mode's serial is fixed at
+9600 8N1 regardless of the configured data baud, and the module needs ~40 ms
+after a mode change before it answers.
 
 The board also carries a UART routing block (silkscreen A/B/C, separate from
 MODE SELECT): A = USB-LoRa, B = Pi-LoRa, C = USB-PI. Both caps must be on A for
@@ -78,6 +87,56 @@ def find_port(explicit: str | None) -> str:
     return candidates[0]
 
 
+def cmd_probe(args) -> None:
+    """Sweep baud rates and both Ebyte command dialects, reporting any reply.
+
+    Written after the module stayed silent in every jumper position: rather than
+    guessing one more variable, this varies all of them and prints whatever comes
+    back. Total silence across the whole matrix means the bytes are not reaching a
+    powered module at all — a wiring or power fault, not a protocol mismatch.
+    """
+    port = find_port(args.port)
+    # E22/E220 read-register vs the older E32 "read all parameters" form.
+    commands = {
+        "C1 00 09 (E22 read regs)": bytes([0xC1, 0x00, 0x09]),
+        "C1 C1 C1 (E32 read all)": bytes([0xC1, 0xC1, 0xC1]),
+        "C1 80 07 (E22 product id)": bytes([0xC1, 0x80, 0x07]),
+    }
+    bauds = [9600, 115200, 57600, 38400, 19200, 4800, 2400]
+    print(f"probing {port}\n")
+    any_reply = False
+    for baud in bauds:
+        for label, cmd in commands.items():
+            try:
+                with serial.Serial(port, baud, timeout=0.4) as ser:
+                    # Some bridges hold the module in reset via DTR/RTS; release both.
+                    ser.dtr = False
+                    ser.rts = False
+                    time.sleep(0.05)
+                    ser.reset_input_buffer()
+                    ser.write(cmd)
+                    ser.flush()
+                    resp = ser.read(64)
+            except serial.SerialException as e:
+                print(f"  {baud:>6} {label:<26} port error: {e}")
+                continue
+            if resp:
+                any_reply = True
+                print(f"  {baud:>6} {label:<26} -> {resp.hex(' ')}")
+            else:
+                print(f"  {baud:>6} {label:<26} -> (silence)")
+    print()
+    if not any_reply:
+        print(
+            "No reply on any baud with any dialect. Check the jumpers FIRST: register\n"
+            "commands are answered only in Mode 2 (M0 cap ON, M1 cap OFF). Mode 0\n"
+            "(both fitted) and Mode 3 deep sleep (both removed) both ignore them and\n"
+            "are indistinguishable from dead hardware. If the jumpers are right and\n"
+            "the A/B/C block is on A, then suspect power: the CP2102 runs off USB but\n"
+            "the module may take its 3V3 from the host header."
+        )
+
+
 def cmd_detect(_args) -> None:
     seen = sorted(glob.glob("/dev/cu.*"))
     for p in seen:
@@ -91,7 +150,10 @@ def cmd_detect(_args) -> None:
 
 def open_config(port: str) -> serial.Serial:
     # Configuration mode is always 9600 8N1 regardless of the data baud.
-    return serial.Serial(port, 9600, timeout=1.0)
+    ser = serial.Serial(port, 9600, timeout=1.0)
+    # The reference library waits 40 ms after any mode change before talking.
+    time.sleep(0.05)
+    return ser
 
 
 def read_registers(ser: serial.Serial, addr: int, length: int) -> bytes | None:
@@ -109,9 +171,10 @@ def cmd_info(args) -> None:
         regs = read_registers(ser, 0x00, 9)
         if regs is None:
             sys.exit(
-                f"no config-mode response on {port}. Config mode is Mode 3: "
-                "REMOVE both M0 and M1 caps, then replug USB (the module samples "
-                "the pins only at power-up). Also check the A/B/C routing block "
+                f"no config-mode response on {port}. Config mode is Mode 2: "
+                "FIT the M0 cap, REMOVE the M1 cap, then replug USB (the module "
+                "samples the pins only at power-up). Both caps removed is deep "
+                "sleep, which answers nothing. Also check the A/B/C routing block "
                 "is on A (USB-LoRa)."
             )
         pid = read_registers(ser, 0x80, 7)
@@ -135,9 +198,10 @@ def cmd_setup(args) -> None:
     with open_config(port) as ser:
         if read_registers(ser, 0x00, 9) is None:
             sys.exit(
-                f"no config-mode response on {port}. Config mode is Mode 3: "
-                "REMOVE both M0 and M1 caps, then replug USB. Also check the "
-                "A/B/C routing block is on A (USB-LoRa)."
+                f"no config-mode response on {port}. Config mode is Mode 2: "
+                "FIT the M0 cap, REMOVE the M1 cap, then replug USB. Both caps "
+                "removed is deep sleep. Also check the A/B/C routing block is on "
+                "A (USB-LoRa)."
             )
         # ADDH/ADDL/NETID zero (broadcast/transparent), 9600 8N1 + air rate,
         # 240B packets + power, channel, plain transparent mode, crypt off.
@@ -186,6 +250,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("detect").set_defaults(fn=cmd_detect)
+    p = sub.add_parser("probe")
+    p.add_argument("--port")
+    p.set_defaults(fn=cmd_probe)
     p = sub.add_parser("info")
     p.add_argument("--port")
     p.set_defaults(fn=cmd_info)
