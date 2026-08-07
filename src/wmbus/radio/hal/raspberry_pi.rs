@@ -547,6 +547,10 @@ impl RaspberryPiHal {
 }
 
 impl Hal for RaspberryPiHal {
+    fn read_rx_buffer(&mut self, offset: u8, buf: &mut [u8]) -> Result<(), HalError> {
+        self.read_register_buffer(offset, buf)
+    }
+
     fn write_command(&mut self, opcode: u8, data: &[u8]) -> Result<(), HalError> {
         self.wait_for_busy_low(100).map_err(|_| HalError::Spi)?;
         // Prepare command buffer: opcode followed by data

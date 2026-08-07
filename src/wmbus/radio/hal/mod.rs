@@ -30,6 +30,16 @@ pub trait Hal {
     /// Write a command with optional data to the radio
     fn write_command(&mut self, opcode: u8, data: &[u8]) -> Result<(), HalError>;
 
+    /// Read `buf.len()` payload bytes from the radio's RX data buffer at `offset`.
+    ///
+    /// This cannot be composed from `read_command`: the ReadBuffer transaction is
+    /// `opcode, offset, NOP` and only then data, so the offset must be clocked out
+    /// inside the same NSS assertion. The default errs rather than guessing —
+    /// a HAL that silently mis-frames this returns plausible garbage as payload.
+    fn read_rx_buffer(&mut self, _offset: u8, _buf: &mut [u8]) -> Result<(), HalError> {
+        Err(HalError::Spi)
+    }
+
     /// Read a command response from the radio
     fn read_command(&mut self, opcode: u8, buf: &mut [u8]) -> Result<(), HalError>;
 
@@ -76,8 +86,19 @@ impl Hal for MockHal {
         Ok(())
     }
 
-    fn read_command(&mut self, _opcode: u8, buf: &mut [u8]) -> Result<(), HalError> {
+    fn read_rx_buffer(&mut self, _offset: u8, buf: &mut [u8]) -> Result<(), HalError> {
         buf.fill(0);
+        Ok(())
+    }
+
+    fn read_command(&mut self, opcode: u8, buf: &mut [u8]) -> Result<(), HalError> {
+        buf.fill(0);
+        // GetStatus: report STBY_RC (mode bits 6:4 = 0x2) so state waits complete —
+        // an all-zero status is a chip mode that does not exist, and driver code that
+        // (correctly) verifies transitions would spin against it until timeout.
+        if opcode == 0xC0 && !buf.is_empty() {
+            buf[0] = 0x22;
+        }
         Ok(())
     }
 
@@ -232,9 +253,19 @@ impl Hal for RecordingHal {
         Ok(())
     }
 
+    fn read_rx_buffer(&mut self, _offset: u8, buf: &mut [u8]) -> Result<(), HalError> {
+        // Deliver (and consume) the queued payload.
+        buf.fill(0);
+        if let Some(p) = self.inner.lock().unwrap().pending_rx.take() {
+            let n = buf.len().min(p.len());
+            buf[..n].copy_from_slice(&p[..n]);
+        }
+        Ok(())
+    }
+
     fn read_command(&mut self, opcode: u8, buf: &mut [u8]) -> Result<(), HalError> {
         buf.fill(0);
-        let mut g = self.inner.lock().unwrap();
+        let g = self.inner.lock().unwrap();
         match opcode {
             // GetStatus: chip mode in bits [6:4].
             0xC0 => {
@@ -242,29 +273,23 @@ impl Hal for RecordingHal {
                     buf[0] = g.mode_bits << 4;
                 }
             }
-            // GetIrqStatus (u16, big-endian): report RxDone (bit 1) when a packet is queued.
+            // Every Get* reply models the real chip: a status byte, then the values.
+            // GetIrqStatus: [status, IRQ_MSB, IRQ_LSB] — RxDone (bit 1) when queued.
             0x12 => {
-                if g.pending_rx.is_some() && buf.len() >= 2 {
-                    buf[1] = 0x02;
+                if g.pending_rx.is_some() && buf.len() >= 3 {
+                    buf[2] = 0x02;
                 }
             }
-            // GetRxBufferStatus: byte 0 is the payload length.
+            // GetRxBufferStatus: [status, PayloadLengthRx, RxStartBufferPointer].
             0x13 => {
-                if let (Some(p), false) = (g.pending_rx.as_ref(), buf.is_empty()) {
-                    buf[0] = p.len() as u8;
+                if let (Some(p), true) = (g.pending_rx.as_ref(), buf.len() >= 2) {
+                    buf[1] = p.len() as u8;
                 }
             }
-            // ReadBuffer: deliver (and consume) the queued payload.
-            0x1E => {
-                if let Some(p) = g.pending_rx.take() {
-                    let n = buf.len().min(p.len());
-                    buf[..n].copy_from_slice(&p[..n]);
-                }
-            }
-            // GetPacketStatus: [RssiPkt, SnrPkt, SignalRssiPkt].
+            // GetPacketStatus: [status, RssiPkt, SnrPkt, SignalRssiPkt].
             0x14 => {
-                let n = buf.len().min(3);
-                buf[..n].copy_from_slice(&g.packet_status[..n]);
+                let n = (buf.len().saturating_sub(1)).min(3);
+                buf[1..1 + n].copy_from_slice(&g.packet_status[..n]);
             }
             _ => {}
         }

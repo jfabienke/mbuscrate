@@ -607,6 +607,7 @@ impl<H: Hal> Sx126xDriver<H> {
     ///     crc_on: true,                        // Enable CRC
     ///     crc_type: CrcType::Byte2,           // 2-byte CRC
     ///     sync_word_len: 4,                    // 4-byte sync word
+    ///     preamble_detect_bits: 16,            // 16-bit preamble detector gate
     /// };
     /// driver.set_packet_params(gfsk_packet)?;
     ///
@@ -846,9 +847,10 @@ impl<H: Hal> Sx126xDriver<H> {
     }
 
     pub fn read_buffer(&mut self, offset: u8, len: u8, buf: &mut [u8]) -> Result<(), DriverError> {
-        let cmd_buf = [0x1E, offset, 0x00, len]; // ReadBuffer: offset, offset2 (0), len
-        self.hal.write_command(0x1E, &cmd_buf[1..])?;
-        self.hal.read_command(0x1E, buf)?;
+        // ReadBuffer must clock the offset and a NOP inside the same transaction as the
+        // data, which read_command cannot express — the HAL owns that framing.
+        let len = (len as usize).min(buf.len());
+        self.hal.read_rx_buffer(offset, &mut buf[..len])?;
         Ok(())
     }
 
@@ -914,8 +916,11 @@ impl<H: Hal> Sx126xDriver<H> {
         self.set_rx(timeout)
     }
 
+    /// GetRxBufferStatus. Reply: `[status, PayloadLengthRx, RxStartBufferPointer]` —
+    /// every SX126x Get* reply leads with the status byte, so the payload length is
+    /// `buf[1]`, not `buf[0]`.
     pub fn get_rx_buffer_status(&mut self, buf: &mut [u8; 3]) -> Result<(), DriverError> {
-        self.hal.read_command(0x13, buf)?; // GetRxBufferStatus: [size, start_addr, rx_current_addr]
+        self.hal.read_command(0x13, buf)?;
         Ok(())
     }
 
@@ -939,9 +944,11 @@ impl<H: Hal> Sx126xDriver<H> {
     }
 
     pub fn get_irq_status(&mut self) -> Result<IrqStatus, DriverError> {
-        let mut buf = [0u8; 2];
+        // Reply is [status, IRQ_MSB, IRQ_LSB]; composing from bytes 0..2 folds the
+        // status byte into the IRQ mask and reports interrupts that never happened.
+        let mut buf = [0u8; 3];
         self.hal.read_command(0x12, &mut buf)?; // GetIrqStatus
-        Ok(IrqStatus::from(((buf[0] as u16) << 8) | (buf[1] as u16)))
+        Ok(IrqStatus::from(((buf[1] as u16) << 8) | (buf[2] as u16)))
     }
 
     pub fn clear_irq_status(&mut self, irq: u16) -> Result<(), DriverError> {
@@ -1020,13 +1027,16 @@ impl<H: Hal> Sx126xDriver<H> {
             let mut status = [0u8; 3];
             self.get_rx_buffer_status(&mut status)?;
 
-            // Extract received packet length (status[0] contains length)
-            let rx_len = status[0] as usize;
+            // Reply layout is [status, PayloadLengthRx, RxStartBufferPointer]. Reading
+            // the length from byte 0 takes the chip status byte as a length — 0xD2 in
+            // RX, i.e. a phantom 210-byte packet — and ignores where the packet starts.
+            let rx_len = status[1] as usize;
+            let rx_offset = status[2];
 
             if rx_len > 0 {
                 // Read received payload from radio buffer
                 let mut payload = vec![0u8; rx_len];
-                self.read_buffer(self.rx_base_addr, rx_len as u8, &mut payload)?;
+                self.read_buffer(rx_offset, rx_len as u8, &mut payload)?;
                 log::info!("RX done, received {rx_len} bytes");
                 return Ok(Some(payload));
             }
@@ -1503,11 +1513,13 @@ impl<H: Hal> Sx126xDriver<H> {
     /// The radio should be in RX mode for at least a few hundred microseconds
     /// before taking RSSI measurements to allow the measurement to settle.
     pub fn get_rssi_instant(&mut self) -> Result<i16, DriverError> {
-        let mut rssi_raw = [0u8; 1];
+        // Reply is [status, RssiInst]. Reading one byte returns the status, which in
+        // RX mode is 0xD2 and decodes to a constant, believable −105 dBm.
+        let mut rssi_raw = [0u8; 2];
         self.hal.read_command(0x15, &mut rssi_raw)?; // GetRssiInst command
 
         // Convert to dBm: Signal power = -RssiInst / 2
-        let rssi_dbm = -(rssi_raw[0] as i16) / 2;
+        let rssi_dbm = -(rssi_raw[1] as i16) / 2;
 
         Ok(rssi_dbm)
     }
@@ -1527,15 +1539,15 @@ impl<H: Hal> Sx126xDriver<H> {
     /// RssiAvg). A previous version mislabeled the third byte as "FreqError"; the real
     /// per-packet frequency error comes from [`Self::get_lora_frequency_error`].
     pub fn get_packet_status(&mut self) -> Result<PacketStatus, DriverError> {
-        let mut status = [0u8; 3];
+        // Reply is [status, RssiPkt, SnrPkt, SignalRssiPkt] — LoRa layout, with SnrPkt
+        // signed in quarter-dB.
+        let mut status = [0u8; 4];
         self.hal.read_command(0x14, &mut status)?; // GetPacketStatus command
 
-        // LoRa: status[0] = RssiPkt, status[1] = SnrPkt (signed, quarter-dB),
-        //       status[2] = SignalRssiPkt.
         Ok(PacketStatus {
-            rssi_pkt_dbm: -(status[0] as i16) / 2,
-            snr_db: lora_snr_db(status[1]),
-            signal_rssi_dbm: -(status[2] as i16) / 2,
+            rssi_pkt_dbm: -(status[1] as i16) / 2,
+            snr_db: lora_snr_db(status[2]),
+            signal_rssi_dbm: -(status[3] as i16) / 2,
         })
     }
 
@@ -1938,8 +1950,10 @@ impl<H: Hal> Sx126xDriver<H> {
             sync_word,
         } = *profile;
 
-        // Set RF frequency
+        // Set RF frequency, then calibrate the image for that band — the factory
+        // calibration covers 902-928 MHz only.
         self.set_rf_frequency(frequency_hz)?;
+        self.calibrate_image(frequency_hz)?;
 
         // Configure LoRa modulation parameters
         // Per AN1200.22: Enable LDRO for SF11/SF12 when BW <= 125kHz
@@ -2020,9 +2034,12 @@ impl<H: Hal> Sx126xDriver<H> {
     /// * `Ok(())` - Sync word set successfully
     /// * `Err(DriverError)` - Register write failed
     pub fn set_lora_sync_word(&mut self, network_id: u16) -> Result<(), DriverError> {
-        // Private LoRa sync word register (0x0741)
-        let buf = [network_id as u8, (network_id >> 8) as u8];
-        self.hal.write_register(0x0741, &buf)?;
+        // The sync word spans 0x0740 (MSB) and 0x0741 (LSB); the chip's reset value
+        // reads back 0x1424 from 0x0740. Writing LSB-first at 0x0741 — the previous
+        // behaviour — programs 0x14,0x44 for the public LoRaWAN word 0x3444, i.e. a
+        // receiver that silently ignores all LoRaWAN traffic.
+        let buf = [(network_id >> 8) as u8, network_id as u8];
+        self.hal.write_register(0x0740, &buf)?;
         log::info!("LoRa sync word set to 0x{network_id:04X}");
         Ok(())
     }

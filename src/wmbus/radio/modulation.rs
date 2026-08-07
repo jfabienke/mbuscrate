@@ -51,6 +51,7 @@
 //!     crc_on: true,                        // Enable CRC
 //!     crc_type: CrcType::Byte2,            // 2-byte CRC
 //!     sync_word_len: 4,                    // 4-byte sync word
+//!     preamble_detect_bits: 16,            // 16-bit preamble detector gate
 //! };
 //! ```
 
