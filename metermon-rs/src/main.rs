@@ -232,9 +232,15 @@ enum Cmd {
         /// Spreading factor 5..=12 (ignored with --sweep).
         #[arg(long, default_value_t = 12)]
         sf: u8,
+        /// Bandwidth in kHz (125, 250 or 500).
+        #[arg(long, default_value_t = 125)]
+        bw: u32,
         /// Sweep the EU868 join channels (868.1/.3/.5) across SF12/9/7/10/8/11.
         #[arg(long)]
         sweep: bool,
+        /// Hunt an E22 test transmitter: sweep SF x BW x sync at --freq-hz.
+        #[arg(long)]
+        hunt_e22: bool,
         /// Seconds to dwell per sweep point.
         #[arg(long, default_value_t = 20)]
         dwell: u64,
@@ -378,7 +384,9 @@ fn main() -> Result<()> {
             reset,
             freq_hz,
             sf,
+            bw,
             sweep,
+            hunt_e22,
             dwell,
             private_sync,
             capture,
@@ -391,7 +399,9 @@ fn main() -> Result<()> {
             reset,
             freq_hz,
             sf,
+            bw,
             sweep,
+            hunt_e22,
             dwell,
             private_sync,
             capture,
@@ -1158,7 +1168,9 @@ fn run_lora_rx(
     reset: u8,
     freq_hz: u32,
     sf: u8,
+    bw: u32,
     sweep: bool,
+    hunt_e22: bool,
     dwell: u64,
     private_sync: bool,
     capture: Option<String>,
@@ -1176,7 +1188,9 @@ fn run_lora_rx(
         },
         freq_hz,
         sf,
+        bw,
         sweep,
+        hunt_e22,
         dwell,
         private_sync,
         capture,
@@ -1194,7 +1208,9 @@ fn run_lora_rx(
     _reset: u8,
     _freq_hz: u32,
     _sf: u8,
+    _bw: u32,
     _sweep: bool,
+    _hunt_e22: bool,
     _dwell: u64,
     _private_sync: bool,
     _capture: Option<String>,

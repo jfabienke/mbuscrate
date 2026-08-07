@@ -83,6 +83,17 @@ fn describe_lorawan(payload: &[u8]) -> String {
 pub struct SweepPoint {
     pub freq_hz: u32,
     pub sf: u8,
+    pub bw_khz: u32,
+    pub sync: u16,
+}
+
+fn bw_from(khz: u32) -> Result<LoRaBandwidth> {
+    Ok(match khz {
+        125 => LoRaBandwidth::BW125,
+        250 => LoRaBandwidth::BW250,
+        500 => LoRaBandwidth::BW500,
+        _ => anyhow::bail!("bandwidth must be 125, 250 or 500 kHz, got {khz}"),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -91,7 +102,9 @@ pub fn run(
     pins: GpioPins,
     freq_hz: u32,
     sf: u8,
+    bw_khz: u32,
     sweep: bool,
+    hunt_e22: bool,
     dwell_secs: u64,
     private_sync: bool,
     capture: Option<String>,
@@ -100,27 +113,64 @@ pub fn run(
     // The EU868 join channels every LoRaWAN device must use, crossed with the SF
     // ladder devices climb as joins go unanswered. Slow SFs get proportionally
     // more dwell because their airtime is longer and their duty cycle sparser.
-    let schedule: Vec<SweepPoint> = if sweep {
+    let sync = if private_sync { 0x1424 } else { LORAWAN_PUBLIC_SYNC };
+    let schedule: Vec<SweepPoint> = if hunt_e22 {
+        // E22 discovery: the module's air-rate presets map to undocumented
+        // (SF, BW) pairs and its sync word is unverified, so cover the whole
+        // space at its (documented) channel frequency. A transmitter looping
+        // every ~2s guarantees at least two frames land in each 5s dwell of
+        // the matching point — one full pass is bounded and decisive.
+        let mut v = Vec::new();
+        for sy in [0x1424u16, LORAWAN_PUBLIC_SYNC] {
+            for bw in [125u32, 250, 500] {
+                for sf_n in [9u8, 8, 7, 10, 11, 12, 6, 5] {
+                    v.push(SweepPoint {
+                        freq_hz,
+                        sf: sf_n,
+                        bw_khz: bw,
+                        sync: sy,
+                    });
+                }
+            }
+        }
+        v
+    } else if sweep {
         let mut v = Vec::new();
         for sf_n in [12u8, 9, 7, 10, 8, 11] {
             for f in [868_100_000u32, 868_300_000, 868_500_000] {
-                v.push(SweepPoint { freq_hz: f, sf: sf_n });
+                v.push(SweepPoint {
+                    freq_hz: f,
+                    sf: sf_n,
+                    bw_khz: bw_khz,
+                    sync,
+                });
             }
         }
         v
     } else {
-        vec![SweepPoint { freq_hz, sf }]
+        vec![SweepPoint {
+            freq_hz,
+            sf,
+            bw_khz,
+            sync,
+        }]
     };
-
-    let sync = if private_sync { 0x1424 } else { LORAWAN_PUBLIC_SYNC };
     println!(
-        "SX1262 LoRa receive — {} · sync 0x{sync:04X} ({})",
-        if sweep {
-            format!("sweep {} points, {dwell_secs}s dwell", schedule.len())
+        "SX1262 LoRa receive — {}",
+        if hunt_e22 {
+            format!(
+                "E22 hunt at {:.3} MHz: {} (SF x BW x sync) points, {dwell_secs}s dwell",
+                freq_hz as f64 / 1e6,
+                schedule.len()
+            )
+        } else if sweep {
+            format!(
+                "sweep {} points, {dwell_secs}s dwell · sync 0x{sync:04X}",
+                schedule.len()
+            )
         } else {
-            format!("{:.3} MHz SF{sf}", freq_hz as f64 / 1e6)
+            format!("{:.3} MHz SF{sf} BW{bw_khz} · sync 0x{sync:04X}", freq_hz as f64 / 1e6)
         },
-        if private_sync { "private" } else { "public LoRaWAN" },
     );
 
     let mut hal = RaspberryPiHal::from_spidev(spidev, &pins).context("opening SPI/GPIO")?;
@@ -157,19 +207,21 @@ pub fn run(
         let profile = RadioProfile::LoRa(LoRaProfile {
             frequency_hz: point.freq_hz,
             sf: sf_from(point.sf)?,
-            bw: LoRaBandwidth::BW125,
+            bw: bw_from(point.bw_khz)?,
             cr: CodingRate::CR4_5,
             power_dbm: 14,
-            sync_word: Some(sync),
+            sync_word: Some(point.sync),
         });
         driver.switch_profile(&profile).context("profile switch")?;
         driver.set_rx_continuous().context("entering RX")?;
-        if sweep {
+        if sweep || hunt_e22 {
             println!(
-                "── {:>4}s · listening {:.3} MHz SF{}",
+                "── {:>4}s · listening {:.3} MHz SF{} BW{} sync 0x{:04X}",
                 start.elapsed().as_secs(),
                 point.freq_hz as f64 / 1e6,
-                point.sf
+                point.sf,
+                point.bw_khz,
+                point.sync
             );
         }
 
@@ -183,14 +235,23 @@ pub fn run(
                     frames += 1;
                     let lora = pkt.lora.as_ref();
                     println!(
-                        "RX {:>3}B rssi {:>4} dBm snr {:>5.1} dB ferr {:>6} Hz  {:.3} MHz SF{}  {}",
+                        "RX {:>3}B rssi {:>4} dBm snr {:>5.1} dB ferr {:>6} Hz  {:.3} MHz SF{} BW{} sync 0x{:04X}  {}",
                         pkt.payload.len(),
                         pkt.rssi_dbm,
                         lora.map(|l| l.snr_db).unwrap_or(f32::NAN),
                         lora.and_then(|l| l.freq_error_hz).unwrap_or(0),
                         point.freq_hz as f64 / 1e6,
                         point.sf,
-                        describe_lorawan(&pkt.payload)
+                        point.bw_khz,
+                        point.sync,
+                        if hunt_e22 {
+                            format!(
+                                "payload {:?}",
+                                String::from_utf8_lossy(&pkt.payload)
+                            )
+                        } else {
+                            describe_lorawan(&pkt.payload)
+                        }
                     );
                     if let Some(f) = capture_file.as_mut() {
                         use std::io::Write;
