@@ -10,6 +10,26 @@ use anyhow::Result;
 #[cfg(feature = "radio")]
 use mbus_rs::wmbus::radio::hal::Hal;
 
+/// A frame from a live radio, tagged with the modem that captured it. wM-Bus
+/// frames feed the decode pipeline; LoRa frames carry their demodulator metadata
+/// and are routed to LoRa handling — feeding one to the other's decoder produces
+/// garbage that looks like data.
+#[derive(Debug, Clone)]
+pub enum SourceFrame {
+    Wmbus {
+        bytes: Vec<u8>,
+        rssi_dbm: i16,
+        freq_off_hz: i32,
+    },
+    Lora {
+        bytes: Vec<u8>,
+        rssi_dbm: i16,
+        snr_db: f32,
+        freq_hz: u32,
+        sf: u8,
+    },
+}
+
 /// A source of raw wM-Bus frames (each item is one frame: L-field..CRC inclusive).
 pub trait FrameSource {
     /// Return the next frame, or `Ok(None)` when the source is exhausted.
@@ -87,13 +107,17 @@ impl Rfm69Source {
     /// Non-blocking poll for one received frame `(bytes, rssi_dbm, freq_offset_hz)`,
     /// if available. `freq_offset_hz` is the AFC-measured carrier offset from the
     /// 868.95 MHz center for that frame (0 if the driver did not report one).
-    pub async fn poll(&mut self) -> Result<Option<(Vec<u8>, i16, i32)>> {
+    pub async fn poll(&mut self) -> Result<Option<SourceFrame>> {
         use mbus_rs::wmbus::radio::radio_driver::RadioDriver;
         Ok(self
             .driver
             .get_received_packet()
             .await?
-            .map(|p| (p.data, p.rssi_dbm, p.freq_error_hz.unwrap_or(0))))
+            .map(|p| SourceFrame::Wmbus {
+                bytes: p.data,
+                rssi_dbm: p.rssi_dbm,
+                freq_off_hz: p.freq_error_hz.unwrap_or(0),
+            }))
     }
 
     /// wM-Bus radio mode this source receives on. The RFM69 is a single-channel
@@ -148,6 +172,16 @@ pub struct Sx1262Source {
     driver: mbus_rs::wmbus::radio::driver::Sx126xDriver<
         mbus_rs::wmbus::radio::hal::RaspberryPiHal,
     >,
+    /// LoRa listen cadence; `None` = wM-Bus continuously.
+    lora: Option<crate::config::LoraListenConfig>,
+    /// Whether the radio currently runs the LoRa profile.
+    in_lora_window: bool,
+    /// When the current window closes / the next opens.
+    window_boundary: std::time::Instant,
+    /// Rotation position across the (frequency, SF) matrix.
+    rotation: usize,
+    /// The (frequency, SF) the current window listens on.
+    current_point: (u32, u8),
 }
 
 #[cfg(feature = "radio")]
@@ -174,7 +208,17 @@ impl Sx1262Source {
         hal.reset()?;
         Ok(Self {
             driver: Sx126xDriver::new(hal, 32_000_000),
+            lora: None,
+            in_lora_window: false,
+            window_boundary: std::time::Instant::now(),
+            rotation: 0,
+            current_point: (0, 0),
         })
+    }
+
+    /// Enable periodic LoRa listen windows. Call before [`Sx1262Source::start`].
+    pub fn set_lora_listen(&mut self, cfg: Option<crate::config::LoraListenConfig>) {
+        self.lora = cfg;
     }
 
     /// Configure for wM-Bus mode C and enter continuous receive.
@@ -193,12 +237,113 @@ impl Sx1262Source {
         self.driver.set_dio2_as_rf_switch(true)?;
         self.driver.set_rx_boosted_gain(true)?;
         self.driver.set_rx_continuous()?;
+        self.in_lora_window = false;
+        if let Some(l) = &self.lora {
+            self.window_boundary =
+                std::time::Instant::now() + std::time::Duration::from_secs(l.period_secs);
+        }
         Ok(())
     }
 
-    /// Non-blocking poll for one received frame `(bytes, rssi_dbm, freq_offset_hz)`.
-    /// The SX126x does not report a per-frame AFC offset, so the third field is 0.
-    pub async fn poll(&mut self) -> Result<Option<(Vec<u8>, i16, i32)>> {
+    /// The next (frequency, SF) in the rotation. Frequencies advance fastest so one
+    /// SF pass covers all channels before the ladder moves.
+    fn next_point(&mut self) -> (u32, u8) {
+        let l = self.lora.as_ref().expect("rotation only runs with LoRa enabled");
+        let freqs = &l.freqs_hz;
+        let sfs = &l.sfs;
+        let f = freqs[self.rotation % freqs.len().max(1)];
+        let sf = sfs[(self.rotation / freqs.len().max(1)) % sfs.len().max(1)];
+        self.rotation += 1;
+        (f, sf)
+    }
+
+    /// Drive the window schedule: switch profiles when a boundary passes. Kept
+    /// separate from frame handling so a poll that returns a frame still observes
+    /// boundaries on its next call.
+    fn tick_windows(&mut self) -> Result<()> {
+        let Some(l) = self.lora.clone() else {
+            return Ok(());
+        };
+        use mbus_rs::wmbus::radio::driver::{LoRaProfile, RadioProfile, WmbusProfile};
+        use mbus_rs::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, SpreadingFactor};
+        let now = std::time::Instant::now();
+        if now < self.window_boundary {
+            return Ok(());
+        }
+        if self.in_lora_window {
+            // Window over: back to base wM-Bus.
+            self.driver.switch_profile(&RadioProfile::Wmbus(WmbusProfile::mode_c(
+                Self::FREQ_HZ,
+                Self::BITRATE,
+            )))?;
+            self.driver.set_rx_boosted_gain(true)?;
+            self.driver.set_rx_continuous()?;
+            self.in_lora_window = false;
+            // Anchor the next opening to this window's start, not its end, so the
+            // cadence is the configured period rather than period + window.
+            self.window_boundary = now
+                + std::time::Duration::from_secs(l.period_secs.saturating_sub(l.window_secs));
+            log::info!("lora window closed; wM-Bus RX resumed");
+        } else {
+            let (freq, sf_n) = self.next_point();
+            let sf = match sf_n {
+                5 => SpreadingFactor::SF5,
+                6 => SpreadingFactor::SF6,
+                7 => SpreadingFactor::SF7,
+                8 => SpreadingFactor::SF8,
+                9 => SpreadingFactor::SF9,
+                10 => SpreadingFactor::SF10,
+                11 => SpreadingFactor::SF11,
+                _ => SpreadingFactor::SF12,
+            };
+            self.driver.switch_profile(&RadioProfile::LoRa(LoRaProfile {
+                frequency_hz: freq,
+                sf,
+                bw: LoRaBandwidth::BW125,
+                cr: CodingRate::CR4_5,
+                power_dbm: 14,
+                sync_word: Some(0x3444), // public LoRaWAN
+            }))?;
+            self.driver.set_rx_boosted_gain(true)?;
+            self.driver.set_rx_continuous()?;
+            self.in_lora_window = true;
+            self.current_point = (freq, sf_n);
+            self.window_boundary = now + std::time::Duration::from_secs(l.window_secs);
+            log::info!("lora window open: {:.3} MHz SF{}", freq as f64 / 1e6, sf_n);
+        }
+        Ok(())
+    }
+
+    /// Non-blocking poll for one received frame. With LoRa windows enabled this
+    /// also advances the window schedule; the returned frame is tagged with the
+    /// modem that captured it.
+    pub async fn poll(&mut self) -> Result<Option<SourceFrame>> {
+        self.tick_windows()?;
+        if self.in_lora_window {
+            match self.driver.process_irqs_with_mode() {
+                Ok(Some(pkt)) => {
+                    let lora = pkt.lora.as_ref();
+                    return Ok(Some(SourceFrame::Lora {
+                        bytes: pkt.payload,
+                        rssi_dbm: pkt.rssi_dbm,
+                        snr_db: lora.map(|l| l.snr_db).unwrap_or(f32::NAN),
+                        freq_hz: self.current_point.0,
+                        sf: self.current_point.1,
+                    }));
+                }
+                Ok(None) => return Ok(None),
+                Err(e) => {
+                    log::debug!("lora irq processing: {e:?}");
+                    return Ok(None);
+                }
+            }
+        }
+        self.poll_wmbus().await
+    }
+
+    /// The proven raw-read wM-Bus poll (RssiSync from the correct GetPacketStatus
+    /// offset for GFSK, whose reply layout differs from LoRa's).
+    async fn poll_wmbus(&mut self) -> Result<Option<SourceFrame>> {
         let hal = self.driver.hal_mut();
 
         let mut irq_buf = [0u8; 3];
@@ -222,7 +367,11 @@ impl Sx1262Source {
 
             let mut buf = vec![0u8; len as usize];
             hal.read_register_buffer(offset, &mut buf)?;
-            frame = Some((buf, rssi_dbm, 0));
+            frame = Some(SourceFrame::Wmbus {
+                bytes: buf,
+                rssi_dbm,
+                freq_off_hz: 0,
+            });
         }
         // Clear everything seen (preamble/sync events included) so DIO1 releases
         // and the next frame produces a fresh edge.
@@ -288,10 +437,23 @@ impl RadioSource {
         }
     }
 
-    pub async fn poll(&mut self) -> Result<Option<(Vec<u8>, i16, i32)>> {
+    pub async fn poll(&mut self) -> Result<Option<SourceFrame>> {
         match self {
             Self::Rfm69(r) => r.poll().await,
             Self::Sx1262(r) => r.poll().await,
+        }
+    }
+
+    /// Enable periodic LoRa listen windows (SX1262 only; ignored with a warning on
+    /// radios that cannot switch modems).
+    pub fn set_lora_listen(&mut self, cfg: Option<crate::config::LoraListenConfig>) {
+        match self {
+            Self::Sx1262(r) => r.set_lora_listen(cfg),
+            Self::Rfm69(_) => {
+                if cfg.is_some() {
+                    log::warn!("lora-listen configured but the RFM69 has no LoRa modem; ignoring");
+                }
+            }
         }
     }
 
