@@ -314,6 +314,7 @@ mod tests {
             power_dbm: 14,
             sync_word: None,
             implicit_header: false,
+            iq_inverted: false,
         })
     }
 

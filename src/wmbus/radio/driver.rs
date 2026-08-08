@@ -386,6 +386,11 @@ pub struct LoRaProfile {
     pub power_dbm: i8,
     /// Optional LoRa sync word (network id). `None` leaves the chip default in place.
     pub sync_word: Option<u16>,
+    /// Invert the IQ polarity. **LoRaWAN downlinks require this** so end-devices do
+    /// not hear each other's uplinks; a JoinAccept sent with standard IQ is simply
+    /// invisible to the joining device, with no error anywhere. Uplinks use standard
+    /// IQ, so a network-server role needs both.
+    pub iq_inverted: bool,
     /// Implicit (fixed-length, no on-air header) rather than explicit header.
     /// Header mode must match the transmitter exactly: an explicit-header receiver
     /// is deaf to an implicit-header sender and vice versa, with no error to
@@ -1983,6 +1988,7 @@ impl<H: Hal> Sx126xDriver<H> {
             power_dbm,
             sync_word: None,
             implicit_header: false,
+            iq_inverted: false,
         })
     }
 
@@ -2001,6 +2007,7 @@ impl<H: Hal> Sx126xDriver<H> {
             power_dbm,
             sync_word,
             implicit_header,
+            iq_inverted,
         } = *profile;
 
         // Set RF frequency, then calibrate the image for that band — the factory
@@ -2038,9 +2045,9 @@ impl<H: Hal> Sx126xDriver<H> {
             params: LoRaPacketParams {
                 preamble_len: 8, // Standard 8-symbol preamble
                 implicit_header,
-                payload_len: 255,   // Max payload
-                crc_on: true,       // Enable CRC
-                iq_inverted: false, // Standard IQ
+                payload_len: 255, // Max payload
+                crc_on: true,     // Enable CRC
+                iq_inverted,
             },
         };
         self.set_packet_params(packet_params)?;
@@ -2977,6 +2984,7 @@ mod tests {
             power_dbm: 14,
             sync_word: None,
             implicit_header: false,
+            iq_inverted: false,
         }
     }
 

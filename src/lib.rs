@@ -36,6 +36,7 @@ pub mod constants;
 pub mod error;
 pub mod instrumentation;
 pub mod logging;
+pub mod lorawan;
 pub mod mbus;
 pub mod mbus_device_manager;
 pub mod payload;

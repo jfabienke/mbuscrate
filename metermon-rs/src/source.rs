@@ -304,6 +304,8 @@ impl Sx1262Source {
                 power_dbm: 14,
                 sync_word: Some(0x3444), // public LoRaWAN
                 implicit_header: false,
+            iq_inverted: false,
+                iq_inverted: false,
             }))?;
             self.driver.set_rx_boosted_gain(true)?;
             self.driver.set_rx_continuous()?;

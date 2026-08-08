@@ -128,6 +128,7 @@ pub fn transmit(
             power_dbm,
             sync_word: Some(sync),
             implicit_header: false,
+            iq_inverted: false,
         }))
         .context("applying the LoRa profile")?;
     driver
@@ -306,6 +307,7 @@ pub fn run(
             power_dbm: 14,
             sync_word: Some(point.sync),
             implicit_header: point.implicit,
+            iq_inverted: false,
         });
         driver.switch_profile(&profile).context("profile switch")?;
         driver.set_rx_continuous().context("entering RX")?;
