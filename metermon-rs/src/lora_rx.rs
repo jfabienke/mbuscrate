@@ -48,6 +48,17 @@ fn describe_lorawan(payload: &[u8]) -> String {
     if payload.is_empty() {
         return "empty".into();
     }
+    // Printable ASCII is a bench beacon, not LoRaWAN. Worth checking first: a
+    // LoRaWAN reading of "PICO-BEACON-00001" yields a confident and entirely
+    // fictitious UnconfirmedDataUp from DevAddr 2D4F4349 — which is just "ICO-"
+    // little-endian. A decoder that always finds structure hides its own errors.
+    if payload.len() >= 4
+        && payload
+            .iter()
+            .all(|b| (0x20..0x7F).contains(b) || *b == b'\n' || *b == b'\r')
+    {
+        return format!("text {:?}", String::from_utf8_lossy(payload).trim_end());
+    }
     let mhdr = payload[0];
     let mtype = mhdr >> 5;
     match mtype {
