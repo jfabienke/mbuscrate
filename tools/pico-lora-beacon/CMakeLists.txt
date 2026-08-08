@@ -36,3 +36,26 @@ target_link_libraries(pico-lora-rx
 pico_enable_stdio_usb(pico-lora-rx 1)
 pico_enable_stdio_uart(pico-lora-rx 0)
 pico_add_extra_outputs(pico-lora-rx)
+
+# LoRaWAN meter emulator. Credentials come from the cmake command line so no key
+# is ever committed:
+#   cmake -DMETER_DEV_EUI=0x... -DMETER_APP_KEY="0x2B,0x7E,..." ..
+add_executable(pico-lora-meter
+    meter.cpp
+    "${RADIOLIB_DIR}/src/hal/RPiPico/PicoHal.cpp"
+)
+target_compile_definitions(pico-lora-meter PUBLIC RADIOLIB_BUILD_RPI_PICO)
+if(METER_DEV_EUI)
+    target_compile_definitions(pico-lora-meter PUBLIC METER_DEV_EUI=${METER_DEV_EUI})
+endif()
+if(METER_JOIN_EUI)
+    target_compile_definitions(pico-lora-meter PUBLIC METER_JOIN_EUI=${METER_JOIN_EUI})
+endif()
+if(METER_APP_KEY)
+    target_compile_definitions(pico-lora-meter PUBLIC METER_APP_KEY=${METER_APP_KEY})
+endif()
+target_link_libraries(pico-lora-meter
+    pico_stdlib hardware_spi hardware_gpio hardware_timer hardware_adc pico_multicore hardware_pwm RadioLib)
+pico_enable_stdio_usb(pico-lora-meter 1)
+pico_enable_stdio_uart(pico-lora-meter 0)
+pico_add_extra_outputs(pico-lora-meter)

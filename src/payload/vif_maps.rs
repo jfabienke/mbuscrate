@@ -270,6 +270,13 @@ pub fn lookup_primary_vif(code: u8) -> Option<VifInfo> {
 
 /// Looks up VIFE FD extension code.
 pub fn lookup_vife_fd(code: u8) -> Option<VifInfo> {
+    // Algorithmic ranges first: the table above only lists the discrete codes and
+    // marks these "handled separately", which previously meant not handled at all —
+    // a voltage record decoded to the right number with no quantity and no unit.
+    // EN 13757-3 defines them as exponent ranges, not table entries.
+    if let Some(info) = vife_fd_algorithmic(code) {
+        return Some(info);
+    }
     VIFE_FD_CODES
         .iter()
         .find(|(c, _, _, _)| *c == code)
@@ -279,6 +286,23 @@ pub fn lookup_vife_fd(code: u8) -> Option<VifInfo> {
             exponent: *exponent,
             quantity,
         })
+}
+
+/// The exponent-bearing FD ranges: voltage `0x40-0x4F` as 10^(nnnn-9) V and
+/// current `0x50-0x5F` as 10^(nnnn-12) A.
+fn vife_fd_algorithmic(code: u8) -> Option<VifInfo> {
+    let nnnn = (code & 0x0F) as i32;
+    let (unit, exponent, quantity) = match code {
+        0x40..=0x4F => ("V", 10f64.powi(nnnn - 9), "Voltage"),
+        0x50..=0x5F => ("A", 10f64.powi(nnnn - 12), "Current"),
+        _ => return None,
+    };
+    Some(VifInfo {
+        vif: 0x100u16 + code as u16,
+        unit,
+        exponent,
+        quantity,
+    })
 }
 
 /// Looks up VIFE FB extension code.
@@ -292,4 +316,30 @@ pub fn lookup_vife_fb(code: u8) -> Option<VifInfo> {
             exponent: *exponent,
             quantity,
         })
+}
+
+#[cfg(test)]
+mod vife_fd_range_tests {
+    use super::*;
+
+    #[test]
+    fn fd_voltage_and_current_ranges_carry_unit_and_exponent() {
+        // 0xFD 0x46: nnnn = 6, so 10^(6-9) V = millivolts. A meter's battery record.
+        let v = lookup_vife_fd(0x46).expect("voltage range must resolve");
+        assert_eq!(v.unit, "V");
+        assert_eq!(v.quantity, "Voltage");
+        assert!((v.exponent - 1e-3).abs() < 1e-15);
+
+        // 0xFD 0x59: nnnn = 9, so 10^(9-12) A = milliamps.
+        let i = lookup_vife_fd(0x59).expect("current range must resolve");
+        assert_eq!(i.unit, "A");
+        assert_eq!(i.quantity, "Current");
+        assert!((i.exponent - 1e-3).abs() < 1e-15);
+
+        // The discrete entries outside those ranges must still resolve.
+        assert_eq!(
+            lookup_vife_fd(0x61).map(|x| x.quantity),
+            Some("Cumulation Counter")
+        );
+    }
 }

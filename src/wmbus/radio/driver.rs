@@ -2087,6 +2087,47 @@ impl<H: Hal> Sx126xDriver<H> {
     /// the profile's 255 sends 255 bytes of buffer regardless of what was loaded.
     /// The caller owns the antenna switch — on boards with a separate TX/RX
     /// control line it must be moved before this is called.
+    /// Stage a transmission without starting it.
+    ///
+    /// Split from the firing so a timed downlink can pay the SPI cost *before* its
+    /// deadline: a LoRaWAN RX window is opened for a handful of symbols, and at SF9
+    /// an 8-symbol preamble lasts only ~33 ms, so even a few milliseconds of setup
+    /// inside the window is the difference between a join and silence.
+    pub fn lora_prepare_tx(&mut self, data: &[u8]) -> Result<(), DriverError> {
+        if data.len() > 255 {
+            return Err(DriverError::InvalidParams);
+        }
+        self.set_standby(StandbyMode::RC)?;
+        if let Some(PacketParams::LoRa { mut params }) = self.current_packet_params {
+            params.payload_len = data.len() as u8;
+            self.set_packet_params(PacketParams::LoRa { params })?;
+        }
+        self.set_buffer_base_addresses(self.tx_base_addr, self.rx_base_addr)?;
+        self.write_buffer(self.tx_base_addr, data)?;
+        self.clear_irq_status(0xFFFF)?;
+        self.set_dio_irq_params(
+            IrqMaskBit::TxDone as u16 | IrqMaskBit::Timeout as u16,
+            IrqMaskBit::TxDone as u16,
+            0,
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Start a staged transmission and block until TxDone.
+    pub fn lora_fire_tx(&mut self) -> Result<(), DriverError> {
+        self.set_tx(0)?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            if self.get_irq_status()?.tx_done() {
+                self.clear_irq_status(0xFFFF)?;
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Err(DriverError::Timeout)
+    }
+
     pub fn lora_transmit(&mut self, data: &[u8]) -> Result<(), DriverError> {
         if data.len() > 255 {
             return Err(DriverError::InvalidParams);

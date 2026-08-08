@@ -27,6 +27,8 @@ mod sweep;
 #[cfg(feature = "radio")]
 mod sx1262_probe;
 #[cfg(feature = "radio")]
+mod join_responder;
+#[cfg(feature = "radio")]
 mod lora_rx;
 #[cfg(feature = "radio")]
 mod sx1262_rx;
@@ -258,6 +260,32 @@ enum Cmd {
         #[arg(long, default_value_t = 300)]
         seconds: u64,
     },
+    /// Answer LoRaWAN OTAA joins and decode the uplinks that follow (requires
+    /// `radio` feature). A join responder, not a network server.
+    LorawanJoin {
+        #[arg(long, default_value = "/dev/spidev0.1")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        #[arg(long, default_value_t = 868_100_000)]
+        freq_hz: u32,
+        /// Spreading factor. EU868 joins at DR3 = SF9 on each join channel, so that
+        /// is the default; a listener on the wrong SF hears nothing at all.
+        #[arg(long, default_value_t = 9)]
+        sf: u8,
+        /// JSON file of provisioned devices: {"<DevEUI big-endian hex>": "<32-hex AppKey>"}.
+        /// Keep it out of the repo; it holds real credentials.
+        #[arg(long)]
+        creds: String,
+        #[arg(long, default_value_t = 300)]
+        seconds: u64,
+    },
     /// Transmit LoRa frames from the SX1262 (requires `radio` feature) — proves the
     /// gateway's transmit path against an independent receiver.
     LoraTx {
@@ -410,6 +438,17 @@ fn main() -> Result<()> {
             reset,
             tcxo_mv,
         } => run_sx1262_probe(&spidev, nss, busy, dio1, dio2, reset, tcxo_mv),
+        Cmd::LorawanJoin {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            creds,
+            seconds,
+        } => run_lorawan_join(&spidev, nss, busy, dio1, reset, freq_hz, sf, &creds, seconds),
         Cmd::LoraTx {
             spidev,
             nss,
@@ -1209,6 +1248,124 @@ fn run_monitor(
         log::info!("metermon-rs monitor stopped cleanly");
         Ok(())
     })
+}
+
+/// Load provisioned join credentials: DevEUI (display order) -> AppKey hex.
+#[cfg(feature = "radio")]
+fn load_join_creds(path: &str) -> Result<Vec<join_responder::JoinCredential>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&text)?;
+    let mut out = Vec::new();
+    for (eui, key) in map {
+        // DevEUIs are written the way people read them (big-endian) and transmitted
+        // reversed, so convert once here rather than at every comparison.
+        let eui_bytes = hex::decode(eui.replace([':', '-'], ""))
+            .map_err(|e| anyhow::anyhow!("DevEUI {eui}: {e}"))?;
+        let key_bytes =
+            hex::decode(&key).map_err(|e| anyhow::anyhow!("AppKey for {eui}: {e}"))?;
+        if eui_bytes.len() != 8 || key_bytes.len() != 16 {
+            anyhow::bail!("{eui}: DevEUI must be 8 bytes and AppKey 16");
+        }
+        let mut dev_eui_le = [0u8; 8];
+        for (i, b) in eui_bytes.iter().rev().enumerate() {
+            dev_eui_le[i] = *b;
+        }
+        let mut app_key = [0u8; 16];
+        app_key.copy_from_slice(&key_bytes);
+        out.push(join_responder::JoinCredential {
+            dev_eui_le,
+            app_key,
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_lorawan_join(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    freq_hz: u32,
+    sf: u8,
+    creds_path: &str,
+    seconds: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    let creds = load_join_creds(creds_path)?;
+    let mut responder = join_responder::JoinResponder::new(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        freq_hz,
+        sf,
+        creds,
+    )?;
+    responder.run(
+        seconds,
+        |j| {
+            println!(
+                "  provisioning chain: {} joined as {:08X}",
+                j.dev_eui, j.dev_addr
+            );
+        },
+        |dev_addr, fcnt, payload, rssi, snr| {
+            println!(
+                "uplink {dev_addr:08X} fcnt {fcnt} rssi {rssi} dBm snr {snr:.1} dB: {}",
+                hex::encode(payload)
+            );
+            // The payload is OMS/wM-Bus records, so it goes through the same record
+            // parser as wired and wireless M-Bus — the transport changes, the decode
+            // path does not.
+            let mut rest = payload;
+            while !rest.is_empty() {
+                match mbus_rs::payload::record::parse_variable_record_consumed(rest) {
+                    Ok((rec, used)) if used > 0 => {
+                        println!(
+                            "    {} = {} {}",
+                            rec.quantity,
+                            match &rec.value {
+                                mbus_rs::payload::record::MBusRecordValue::Numeric(n) =>
+                                    format!("{n}"),
+                                mbus_rs::payload::record::MBusRecordValue::String(s) => s.clone(),
+                            },
+                            rec.unit
+                        );
+                        rest = &rest[used..];
+                    }
+                    Ok(_) => break,
+                    Err(e) => {
+                        println!("    record parse stopped: {e}");
+                        break;
+                    }
+                }
+            }
+        },
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_lorawan_join(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _freq_hz: u32,
+    _sf: u8,
+    _creds_path: &str,
+    _seconds: u64,
+) -> Result<()> {
+    bail_no_radio("lorawan-join")
 }
 
 #[cfg(feature = "radio")]
