@@ -22,6 +22,7 @@ pub mod network;
 #[cfg(feature = "crypto")]
 pub mod oms;
 pub mod radio;
+pub mod status;
 
 pub use radio::{
     driver::Sx126xDriver,

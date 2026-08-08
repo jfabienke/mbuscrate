@@ -17,6 +17,7 @@ use mbus_rs::wmbus::ell;
 use mbus_rs::wmbus::frame_decode::FrameType;
 use mbus_rs::wmbus::mode_c::decode_mode_c;
 use mbus_rs::wmbus::oms;
+use mbus_rs::wmbus::status::decode_status_byte;
 use mbus_rs::wmbus::AesKey;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
@@ -238,6 +239,19 @@ fn decode_tpl(
     let cw = u16::from_le_bytes([after_ci[addr_prefix + 2], after_ci[addr_prefix + 3]]);
     let mode = (cw >> 8) & 0x1F; // mode is in the config word, never the CI byte
     obj.insert("status".into(), json!(sts));
+    // Bit-decode the cleartext status byte. The standard flags (bits 4:0) are named
+    // per EN 13757-3; the manufacturer bits (7:5) are reported raw, not guessed,
+    // since their meaning is vendor-defined (see wmbus::status).
+    let st = decode_status_byte(sts);
+    if !st.flags.is_empty() {
+        obj.insert("status_flags".into(), json!(st.flags));
+    }
+    if st.manufacturer_bits != 0 {
+        obj.insert(
+            "status_mfr_bits".into(),
+            json!(format!("0b{:03b}", st.manufacturer_bits)),
+        );
+    }
     obj.insert("mode".into(), json!(mode));
     let body = &after_ci[addr_prefix + 4..];
 
