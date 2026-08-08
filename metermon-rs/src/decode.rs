@@ -406,7 +406,7 @@ fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &D
                         frame_quirks.push(q.quirk_id);
                     }
                 }
-                records.push(record_to_json(&rec));
+                records.push(record_to_json(&rec, &ctx.device.manufacturer, ctx.device.device_type));
                 offset += used;
             }
             Ok(_) => break, // no progress: stop rather than spin
@@ -430,7 +430,7 @@ fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &D
     }
 }
 
-fn record_to_json(rec: &MBusRecord) -> Value {
+fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Value {
     let raw_hex = hex::encode(&rec.data[..rec.data_len]);
     let mut obj = json!({
         "dif": format!("0x{:02X}", rec.drh.dib.dif),
@@ -476,6 +476,28 @@ fn record_to_json(rec: &MBusRecord) -> Value {
     }
     obj["unit"] = json!(rec.unit);
     obj["quantity"] = json!(rec.quantity);
+
+    // Zenner error-flags bit-decode. The field is a standard VIF 0xFD 0x17 record,
+    // but its bit meanings are vendor- and device-class-specific — so this is gated
+    // on both manufacturer and a confident class match, and a class we cannot pin
+    // leaves the raw value untouched rather than reading it off the wrong map.
+    if manufacturer == "ZRI"
+        && rec.drh.vib.vif == 0xFD
+        && rec.drh.vib.nvife >= 1
+        && rec.drh.vib.vife[0] == 0x17
+        && rec.data_len >= 2
+    {
+        if let Some(class) = mbus_rs::vendors::zenner::classify(device_type) {
+            let raw = u16::from_le_bytes([rec.data[0], rec.data[1]]);
+            if let Some(ef) = mbus_rs::vendors::zenner::decode_error_flags(class, None, raw) {
+                obj["error_flags"] = json!(ef.flags);
+                if !ef.undefined_bits.is_empty() {
+                    obj["error_flags_undefined_bits"] = json!(ef.undefined_bits);
+                }
+            }
+        }
+    }
+
     // A quirk-overridden reading is not the same fact as a standard one (P5): name
     // the quirk so two gateways that disagree can be audited.
     if !rec.applied_quirks.is_empty() {
@@ -656,7 +678,7 @@ mod tests {
         let (rec, _) =
             parse_variable_record_consumed(&[0x05, 0xE7, 0xC6, 0x40, 0x11, 0x22, 0x33, 0x44])
                 .unwrap();
-        let j = record_to_json(&rec);
+        let j = record_to_json(&rec, "", 0);
         assert_eq!(j["unknown_vif"], json!(true));
         assert_eq!(j["raw_hex"], json!("11223344"));
         assert!(
@@ -667,7 +689,7 @@ mod tests {
         // A known VIF (volume, 8-digit BCD) still decodes to a real reading.
         let (vol, _) =
             parse_variable_record_consumed(&[0x0C, 0x13, 0x34, 0x12, 0x00, 0x00]).unwrap();
-        let jv = record_to_json(&vol);
+        let jv = record_to_json(&vol, "", 0);
         assert_eq!(jv["quantity"], json!("Volume"));
         assert!(jv.get("value").is_some());
         assert!(jv.get("unknown_vif").is_none());

@@ -8,6 +8,7 @@ pub mod context;
 pub mod manufacturer;
 pub mod quirks;
 pub mod qundis_hca;
+pub mod zenner;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
