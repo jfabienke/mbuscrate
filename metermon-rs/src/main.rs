@@ -258,6 +258,36 @@ enum Cmd {
         #[arg(long, default_value_t = 300)]
         seconds: u64,
     },
+    /// Transmit LoRa frames from the SX1262 (requires `radio` feature) — proves the
+    /// gateway's transmit path against an independent receiver.
+    LoraTx {
+        #[arg(long, default_value = "/dev/spidev0.1")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        #[arg(long, default_value_t = 868_100_000)]
+        freq_hz: u32,
+        #[arg(long, default_value_t = 7)]
+        sf: u8,
+        #[arg(long, default_value_t = 125)]
+        bw: u32,
+        /// Use the private-network sync word (0x1424) instead of public LoRaWAN.
+        #[arg(long)]
+        private_sync: bool,
+        /// Output power in dBm.
+        #[arg(long, default_value_t = 2)]
+        power: i8,
+        #[arg(long, default_value_t = 10)]
+        count: u32,
+        #[arg(long, default_value_t = 2000)]
+        interval_ms: u64,
+    },
     /// Receive wM-Bus mode C on an SX1262, with the full receive chain instrumented
     /// (preamble/sync/RxDone counters, decoded device errors, noise-floor heartbeat).
     Sx1262Rx {
@@ -380,6 +410,23 @@ fn main() -> Result<()> {
             reset,
             tcxo_mv,
         } => run_sx1262_probe(&spidev, nss, busy, dio1, dio2, reset, tcxo_mv),
+        Cmd::LoraTx {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            bw,
+            private_sync,
+            power,
+            count,
+            interval_ms,
+        } => run_lora_tx(
+            &spidev, nss, busy, dio1, reset, freq_hz, sf, bw, private_sync, power, count,
+            interval_ms,
+        ),
         Cmd::LoraRx {
             spidev,
             nss,
@@ -1162,6 +1209,61 @@ fn run_monitor(
         log::info!("metermon-rs monitor stopped cleanly");
         Ok(())
     })
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_lora_tx(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    freq_hz: u32,
+    sf: u8,
+    bw: u32,
+    private_sync: bool,
+    power: i8,
+    count: u32,
+    interval_ms: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    lora_rx::transmit(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        freq_hz,
+        sf,
+        bw,
+        private_sync,
+        power,
+        count,
+        interval_ms,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_lora_tx(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _freq_hz: u32,
+    _sf: u8,
+    _bw: u32,
+    _private_sync: bool,
+    _power: i8,
+    _count: u32,
+    _interval_ms: u64,
+) -> Result<()> {
+    bail_no_radio("lora-tx")
 }
 
 #[cfg(feature = "radio")]

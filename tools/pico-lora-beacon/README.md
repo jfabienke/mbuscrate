@@ -82,5 +82,41 @@ RX 17B rssi -110 dBm snr -3.5 dB ferr 14950 Hz  868.100 MHz SF7 BW125
 Frequency error is a consistent ~+15 kHz — the offset between the Pico's TCXO and
 the gateway's crystal, comfortably inside BW125's tolerance.
 
-Next: reverse the roles (gateway transmits, this board receives) to prove the
-gateway's transmit path, which the LoRaWAN join responder depends on.
+## Reverse direction — gateway transmit
+
+`pico-lora-rx.uf2` is the receiver variant, built from the same source so both
+ends cannot drift apart in their air parameters. Flash it, then transmit from
+the gateway:
+
+```sh
+picotool load -f -x pico-lora-rx.uf2
+metermon-rs lora-tx --freq-hz 868100000 --sf 7 --bw 125 --private-sync --power 14 --count 5
+```
+
+2026-08-08: proven, payloads intact.
+
+```
+[rx] 17  16B  rssi -37 dBm  snr 12.5 dB  "GATEWAY-TX-00001"
+```
+
+This is what exposed a transmit path that had never worked: **SetPaConfig takes
+four bytes — paDutyCycle, hpMax, deviceSel, paLut** (datasheet Table 13-20) — and
+the driver wrote three, in reverse order, omitting paLut. The chip accepted it,
+TxDone fired every time, and nothing radiated, because the bytes it did receive
+set the PA to minimum size and conduction angle with an invalid deviceSel of
+0x04. Table 13-21 gives the only sanctioned combinations; deviceSel is 0x00 for
+the SX1262.
+
+The antenna switch is the other load-bearing detail: this HAT's TXEN (GPIO6) is
+inverted, so it must be driven **LOW** for transmit and restored to HIGH
+afterwards. Leave it HIGH and the PA drives the receive path — again with no
+error and no radiated signal.
+
+## A note on reading the console
+
+Capture the console in the **foreground**. Backgrounding the reader across a
+`picotool load` race gives empty output, which reads exactly like a dead
+receiver — during this bring-up it briefly disguised a working link as a failure
+twice. The `[rx] alive · packets N` heartbeat exists for the same reason: a
+receiver that only prints on success is indistinguishable from one that is not
+running.

@@ -97,6 +97,40 @@ int main() {
   radio.explicitHeader();
   radio.setCRC(2);
 
+#ifdef PICO_LORA_ROLE_RX
+  // Receiver role: proves the *gateway's* transmit path. Built as a separate
+  // target from the same source so both ends of the link are configured from one
+  // set of constants and cannot drift apart.
+  printf("[rx] listening\n");
+  radio.startReceive();
+  uint32_t got = 0;
+  absolute_time_t next_beat = make_timeout_time_ms(2000);
+  while (true) {
+    // Heartbeat with instantaneous RSSI. Decoding depends on every air parameter
+    // matching; raw energy does not, so this separates "the transmitter is
+    // silent" from "it transmits but we cannot demodulate it".
+    if (time_reached(next_beat)) {
+      printf("[rx] alive · packets %lu · rssi %.0f dBm\n", got, radio.getRSSI(false));
+      next_beat = make_timeout_time_ms(2000);
+    }
+    // Gate on the RxDone interrupt rather than polling the length register:
+    // reading before the modem signals completion returns whatever the buffer
+    // last held, so a receiver written that way is silent even on a good link.
+    uint32_t irq = radio.getIrqFlags();
+    if (!(irq & RADIOLIB_SX126X_IRQ_RX_DONE)) { sleep_ms(2); continue; }
+    uint8_t buf[256] = {0};
+    size_t len = radio.getPacketLength();
+    int st = radio.readData(buf, len);
+    if (st == RADIOLIB_ERR_NONE || st == RADIOLIB_ERR_CRC_MISMATCH) {
+      buf[len < sizeof(buf) ? len : sizeof(buf) - 1] = 0;
+      printf("[rx] %lu  %uB  rssi %.0f dBm  snr %.1f dB%s  \"%s\"\n", ++got,
+             (unsigned)len, radio.getRSSI(), radio.getSNR(),
+             st == RADIOLIB_ERR_CRC_MISMATCH ? "  CRC-ERR" : "", (char*)buf);
+      radio.startReceive();
+    }
+    sleep_ms(5);
+  }
+#else
   printf("[beacon] radio ready, transmitting every %lu ms\n", PERIOD_MS);
 
   uint32_t n = 0;
@@ -108,4 +142,5 @@ int main() {
            st == RADIOLIB_ERR_NONE ? "ok" : "FAILED");
     sleep_ms(PERIOD_MS);
   }
+#endif
 }

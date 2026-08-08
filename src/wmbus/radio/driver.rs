@@ -944,14 +944,45 @@ impl<H: Hal> Sx126xDriver<H> {
         Ok(())
     }
 
+    /// SetPaConfig. Datasheet Table 13-20: four bytes, in this order.
+    ///
+    /// `paLut` is always 0x01. `device_sel` is 0x00 for the SX1262 and 0x01 for the
+    /// SX1261 — 0x04 is not a valid value. Getting this wrong does not fail: the
+    /// chip accepts it, TxDone still fires, and nothing radiates, because
+    /// `pa_duty_cycle` and `hp_max` between them set the PA's conduction angle and
+    /// size. Table 13-21 gives the sanctioned combinations; see
+    /// [`Sx126xDriver::set_pa_config_sx1262`] for the SX1262 ones.
     pub fn set_pa_config(
         &mut self,
         pa_duty_cycle: u8,
         hp_max: u8,
         device_sel: u8,
+        pa_lut: u8,
     ) -> Result<(), DriverError> {
-        let buf = [device_sel, hp_max, pa_duty_cycle];
+        let buf = [pa_duty_cycle, hp_max, device_sel, pa_lut];
         self.hal.write_command(0x95, &buf)?; // SetPaConfig
+        Ok(())
+    }
+
+    /// Apply the datasheet's optimal SX1262 PA settings for a target output power
+    /// (Table 13-21), and the §15.2 TX-clamp workaround that accompanies them.
+    ///
+    /// Only the tabulated combinations are safe: the datasheet warns that raising
+    /// `hp_max` past 0x07 can age the device early, so this maps a requested dBm
+    /// onto the nearest sanctioned row rather than interpolating.
+    pub fn set_pa_config_sx1262(&mut self, target_dbm: i8) -> Result<(), DriverError> {
+        let (duty, hp_max) = match target_dbm {
+            i8::MIN..=14 => (0x02, 0x02), // +14 dBm
+            15..=17 => (0x02, 0x03),      // +17 dBm
+            18..=20 => (0x03, 0x05),      // +20 dBm
+            _ => (0x04, 0x07),            // +22 dBm
+        };
+        self.set_pa_config(duty, hp_max, 0x00, 0x01)?;
+        // Known Limitations §15.2: the PA clamp backs power off over-eagerly
+        // unless bits 4:1 of TxClampConfig are set.
+        let mut clamp = [0u8; 1];
+        self.hal.read_register(0x08D8, &mut clamp)?;
+        self.hal.write_register(0x08D8, &[clamp[0] | 0x1E])?;
         Ok(())
     }
 
@@ -1249,7 +1280,7 @@ impl<H: Hal> Sx126xDriver<H> {
         self.set_sync_word(profile.sync_word)?;
 
         // Configure power amplifier for +14 dBm output
-        self.set_pa_config(0x04, 0x00, 0x00)?;
+        self.set_pa_config_sx1262(14)?;
         self.set_tx_params(14, 0x07)?; // +14 dBm with ramp time
 
         // Set buffer base addresses
@@ -2020,7 +2051,7 @@ impl<H: Hal> Sx126xDriver<H> {
         }
 
         // Configure power amplifier
-        self.set_pa_config(0x04, 0x00, 0x00)?; // Standard PA config
+        self.set_pa_config_sx1262(power_dbm)?;
         self.set_tx_params(power_dbm, 0x07)?; // Power and ramp time
 
         // Set buffer base addresses
@@ -2040,6 +2071,50 @@ impl<H: Hal> Sx126xDriver<H> {
 
         log::info!("LoRa configured: SF{sf:?}, BW{bw:?}, CR{cr:?}, Power {power_dbm} dBm");
         Ok(())
+    }
+
+    /// Transmit `data` on the current LoRa profile, blocking until TxDone.
+    ///
+    /// Sets the packet-params payload length to the actual frame length first: in
+    /// explicit-header LoRa that field *is* the transmit length, so leaving it at
+    /// the profile's 255 sends 255 bytes of buffer regardless of what was loaded.
+    /// The caller owns the antenna switch — on boards with a separate TX/RX
+    /// control line it must be moved before this is called.
+    pub fn lora_transmit(&mut self, data: &[u8]) -> Result<(), DriverError> {
+        if data.len() > 255 {
+            return Err(DriverError::InvalidParams);
+        }
+        self.set_standby(StandbyMode::RC)?;
+
+        if let Some(PacketParams::LoRa { mut params }) = self.current_packet_params {
+            params.payload_len = data.len() as u8;
+            self.set_packet_params(PacketParams::LoRa { params })?;
+        }
+        self.set_buffer_base_addresses(self.tx_base_addr, self.rx_base_addr)?;
+        self.write_buffer(self.tx_base_addr, data)?;
+        self.clear_irq_status(0xFFFF)?;
+        // Route TxDone to DIO1 so completion is observable on the same line the
+        // receive path uses.
+        self.set_dio_irq_params(
+            IrqMaskBit::TxDone as u16 | IrqMaskBit::Timeout as u16,
+            IrqMaskBit::TxDone as u16,
+            0,
+            0,
+        )?;
+        // Timeout is in 15.625 us steps; 0 disables it and TxDone alone ends the
+        // transmission.
+        self.set_tx(0)?;
+
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            let irq = self.get_irq_status()?;
+            if irq.tx_done() {
+                self.clear_irq_status(0xFFFF)?;
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Err(DriverError::Timeout)
     }
 
     /// Set LoRa sync word for network identification

@@ -91,6 +91,71 @@ fn describe_lorawan(payload: &[u8]) -> String {
     }
 }
 
+/// Transmit `count` frames on the LoRa profile, for proving the gateway's TX path.
+///
+/// The antenna switch is the load-bearing detail: this HAT's TXEN (GPIO6) is
+/// inverted — HIGH selects receive — so it must be driven LOW around a
+/// transmission and restored afterwards. Leave it HIGH and the PA drives the
+/// receive path instead of the antenna: no error, no radiated signal.
+#[allow(clippy::too_many_arguments)]
+pub fn transmit(
+    spidev: &str,
+    pins: GpioPins,
+    freq_hz: u32,
+    sf: u8,
+    bw_khz: u32,
+    private_sync: bool,
+    power_dbm: i8,
+    count: u32,
+    interval_ms: u64,
+) -> Result<()> {
+    let sync = if private_sync { 0x1424 } else { LORAWAN_PUBLIC_SYNC };
+    println!(
+        "SX1262 LoRa transmit — {:.3} MHz SF{sf} BW{bw_khz} sync 0x{sync:04X} {power_dbm} dBm",
+        freq_hz as f64 / 1e6
+    );
+
+    let mut hal = RaspberryPiHal::from_spidev(spidev, &pins).context("opening SPI/GPIO")?;
+    hal.reset().context("reset")?;
+    let mut driver = Sx126xDriver::new(hal, 32_000_000);
+    driver.calibrate(0x7F).context("calibrating")?;
+    driver
+        .switch_profile(&RadioProfile::LoRa(LoRaProfile {
+            frequency_hz: freq_hz,
+            sf: sf_from(sf)?,
+            bw: bw_from(bw_khz)?,
+            cr: CodingRate::CR4_5,
+            power_dbm,
+            sync_word: Some(sync),
+            implicit_header: false,
+        }))
+        .context("applying the LoRa profile")?;
+    driver
+        .set_dio2_as_rf_switch(true)
+        .context("DIO2 as RF switch")?;
+
+    for n in 1..=count {
+        let msg = format!("GATEWAY-TX-{n:05}");
+        set_rf_switch(false); // TXEN low = transmit path
+        let res = driver.lora_transmit(msg.as_bytes());
+        set_rf_switch(true); // back to receive so the board is never left in TX
+        match res {
+            Ok(()) => println!("tx {n}: {msg:?}"),
+            Err(e) => println!("tx {n}: FAILED {e:?}"),
+        }
+        std::thread::sleep(Duration::from_millis(interval_ms));
+    }
+    Ok(())
+}
+
+/// Hold the HAT's antenna switch for receive (`true`) or transmit (`false`).
+fn set_rf_switch(receive: bool) {
+    std::process::Command::new("pinctrl")
+        .args(["set", "6", "op", if receive { "dh" } else { "dl" }])
+        .status()
+        .ok();
+}
+
 pub struct SweepPoint {
     pub freq_hz: u32,
     pub sf: u8,

@@ -23,3 +23,16 @@ target_link_libraries(${PROJECT_NAME}
 pico_enable_stdio_usb(${PROJECT_NAME} 1)
 pico_enable_stdio_uart(${PROJECT_NAME} 0)
 pico_add_extra_outputs(${PROJECT_NAME})
+
+# Receiver variant, for proving the gateway's transmit path. Same source, so the
+# two ends cannot drift apart in their air parameters.
+add_executable(pico-lora-rx
+    main.cpp
+    "${RADIOLIB_DIR}/src/hal/RPiPico/PicoHal.cpp"
+)
+target_compile_definitions(pico-lora-rx PUBLIC RADIOLIB_BUILD_RPI_PICO PICO_LORA_ROLE_RX)
+target_link_libraries(pico-lora-rx
+    pico_stdlib hardware_spi hardware_gpio hardware_timer pico_multicore hardware_pwm RadioLib)
+pico_enable_stdio_usb(pico-lora-rx 1)
+pico_enable_stdio_uart(pico-lora-rx 0)
+pico_add_extra_outputs(pico-lora-rx)
