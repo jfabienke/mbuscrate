@@ -13,6 +13,38 @@
 
 use std::collections::HashMap;
 
+/// Where a decryption key came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    /// Provisioned for this specific meter.
+    Device,
+    /// A published manufacturer default, identical across every unit.
+    FactoryDefault,
+}
+
+impl KeySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::FactoryDefault => "factory-default",
+        }
+    }
+}
+
+/// Published manufacturer default keys.
+///
+/// These are **not secrets** — they are the same on every unit of a product line
+/// and are documented by the vendor, which is exactly why they are safe to commit
+/// and exactly why a device still using one is not protected by it. Kept here
+/// rather than in a key file so the distinction is visible in code review.
+fn factory_default_for(manufacturer: &str) -> Option<&'static str> {
+    match manufacturer {
+        // Zenner const_default_key, read from firmware at 0x0800A26C.
+        "ZRI" => Some("5A8470C4806F4A87CEF4D5F2D985AB18"),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct KeyStore {
     /// meterid (decimal device address) -> 32-hex AES-128 key.
@@ -40,6 +72,19 @@ impl KeyStore {
 
     pub fn get(&self, meterid: u32) -> Option<&str> {
         self.keys.get(&meterid).map(String::as_str)
+    }
+
+    /// Resolve a key for `meterid`, falling back to a manufacturer default.
+    ///
+    /// Returns the key and where it came from, because those are not equivalent: a
+    /// frame that only decrypts under a factory default is evidence the device was
+    /// never provisioned with a unique key. That is worth surfacing to an operator,
+    /// not silently succeeding.
+    pub fn resolve(&self, meterid: u32, manufacturer: &str) -> Option<(&str, KeySource)> {
+        if let Some(k) = self.get(meterid) {
+            return Some((k, KeySource::Device));
+        }
+        factory_default_for(manufacturer).map(|k| (k, KeySource::FactoryDefault))
     }
 
     /// Iterate (meterid, hexkey) pairs.

@@ -16,6 +16,7 @@ use mbus_rs::wmbus::compact_frame::CompactLayoutCache;
 use mbus_rs::wmbus::ell;
 use mbus_rs::wmbus::frame_decode::FrameType;
 use mbus_rs::wmbus::mode_c::decode_mode_c;
+use mbus_rs::wmbus::oms;
 use mbus_rs::wmbus::AesKey;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
@@ -133,33 +134,10 @@ pub fn decode_frame_with_cache(
             decode_transport(obj, ci, after_ci, cache, meterid, frame.crc_ok, &ctx);
         }
         // Short TPL header (OMS 7.2.4): ACC, STS, Configuration Word, then payload.
-        0x7A => {
-            if after_ci.len() < 4 {
-                obj.insert("error".into(), json!("short header truncated"));
-                return out;
-            }
-            let sts = after_ci[1];
-            let cw = u16::from_le_bytes([after_ci[2], after_ci[3]]);
-            let mode = (cw >> 8) & 0x1F; // mode from CW, not CI (matches epulse)
-            obj.insert("status".into(), json!(sts));
-            obj.insert("mode".into(), json!(mode));
-            let ciphertext = &after_ci[4..];
-            if mode == 0 {
-                obj.insert("encrypted".into(), json!(false));
-                insert_records(obj, ciphertext, &ctx);
-            } else {
-                obj.insert("encrypted".into(), json!(true));
-                obj.insert("ciphertext_hex".into(), json!(hex::encode(ciphertext)));
-                obj.insert(
-                    "decrypt".into(),
-                    json!(if keys.get(meterid).is_some() {
-                        format!("mode {mode} decrypt pending Phase 1.4")
-                    } else {
-                        "no key for meter".into()
-                    }),
-                );
-            }
-        }
+        0x7A => decode_tpl(obj, after_ci, 0, &frame, keys, meterid, cache, &ctx),
+        // Long TPL header: an 8-byte address repeat precedes ACC/STS/CW. Same body,
+        // four bytes further in — the offset the crate's find_ci_offset never handled.
+        0x72 => decode_tpl(obj, after_ci, 8, &frame, keys, meterid, cache, &ctx),
         // Compact frame — records keyed by a format signature learned elsewhere.
         0x79 => {
             obj.insert("encrypted".into(), json!(false));
@@ -191,11 +169,16 @@ pub fn decode_frame_with_cache(
                 }
                 return out;
             }
-            let Some(hexkey) = keys.get(meterid) else {
+            let mfr = id_to_manufacturer(frame.manufacturer_id);
+            let Some((hexkey, key_source)) = keys.resolve(meterid, &mfr) else {
                 obj.insert("ciphertext_hex".into(), json!(hex::encode(after_ci)));
                 obj.insert("decrypt".into(), json!("no key for meter"));
                 return out;
             };
+            // Record which key opened it: a reading that only decrypts under a
+            // published factory default says the device was never given a unique
+            // one, which an operator should be able to see rather than infer.
+            obj.insert("key_source".into(), json!(key_source.as_str()));
             match AesKey::from_hex(hexkey)
                 .map_err(|e| e.to_string())
                 .and_then(|k| {
@@ -227,6 +210,102 @@ pub fn decode_frame_with_cache(
     }
 
     out
+}
+
+/// Decode an OMS TPL-header payload (short CI 0x7A or long CI 0x72), decrypting a
+/// mode-5 body when a key is held.
+///
+/// `addr_prefix` is the length of the address repeat before ACC — 0 for the short
+/// header, 8 for the long. The IV always uses the *link-layer* address
+/// (`frame.link_header`), not the TPL repeat, matching the epulse reference.
+#[allow(clippy::too_many_arguments)]
+fn decode_tpl(
+    obj: &mut serde_json::Map<String, Value>,
+    after_ci: &[u8],
+    addr_prefix: usize,
+    frame: &mbus_rs::wmbus::mode_c::WMBusLinkFrame,
+    keys: &KeyStore,
+    meterid: u32,
+    cache: &mut CompactLayoutCache,
+    ctx: &DecodeContext,
+) {
+    // ACC, STS, CW(2) follow the optional address prefix.
+    if after_ci.len() < addr_prefix + 4 {
+        obj.insert("error".into(), json!("TPL header truncated"));
+        return;
+    }
+    let acc = after_ci[addr_prefix];
+    let sts = after_ci[addr_prefix + 1];
+    let cw = u16::from_le_bytes([after_ci[addr_prefix + 2], after_ci[addr_prefix + 3]]);
+    let mode = (cw >> 8) & 0x1F; // mode is in the config word, never the CI byte
+    obj.insert("status".into(), json!(sts));
+    obj.insert("mode".into(), json!(mode));
+    let body = &after_ci[addr_prefix + 4..];
+
+    if mode == 0 {
+        obj.insert("encrypted".into(), json!(false));
+        insert_records(obj, body, ctx);
+        return;
+    }
+    obj.insert("encrypted".into(), json!(true));
+    if mode != 5 {
+        // Only Security Profile A (mode 5) is implemented; 7/9/13 would go here.
+        obj.insert("ciphertext_hex".into(), json!(hex::encode(body)));
+        obj.insert("decrypt".into(), json!(format!("unsupported mode {mode}")));
+        return;
+    }
+
+    // The config word's block count bounds the ciphertext; trailing bytes, if any,
+    // are unencrypted. Fall back to the whole body rounded to a block boundary.
+    let num_blocks = ((cw >> 4) & 0x0F) as usize;
+    let enc_len = if num_blocks > 0 {
+        (num_blocks * 16).min(body.len())
+    } else {
+        body.len() - (body.len() % 16)
+    };
+    let ciphertext = &body[..enc_len];
+
+    let mfr = id_to_manufacturer(frame.manufacturer_id);
+    let Some((hexkey, key_source)) = keys.resolve(meterid, &mfr) else {
+        obj.insert("ciphertext_hex".into(), json!(hex::encode(ciphertext)));
+        obj.insert("decrypt".into(), json!("no key for meter"));
+        return;
+    };
+    let key = match AesKey::from_hex(hexkey) {
+        Ok(k) => k,
+        Err(e) => {
+            obj.insert("decrypt".into(), json!(format!("bad key: {e}")));
+            return;
+        }
+    };
+    match oms::decrypt_mode5_cbc(ciphertext, &frame.link_header, acc, &key) {
+        Ok(plain) if oms::decrypted_ok(&plain) => {
+            obj.insert("decrypted".into(), json!(true));
+            obj.insert("key_source".into(), json!(key_source.as_str()));
+            // A frame that only opens under a published factory default is a device
+            // that was deployed but never personalised — worth flagging plainly, not
+            // burying, so an operator can find exposed meters.
+            if key_source == crate::keystore::KeySource::FactoryDefault {
+                obj.insert("provisioning".into(), json!("UNPROVISIONED: factory-default key"));
+            }
+            insert_records(obj, &plain, ctx);
+        }
+        Ok(_) => {
+            // Decrypted cleanly but no idle-fill marker: the key was wrong. Never
+            // surfaced as records — a wrong-key plaintext is plausible garbage.
+            obj.insert("decrypted".into(), json!(false));
+            obj.insert("ciphertext_hex".into(), json!(hex::encode(ciphertext)));
+            obj.insert(
+                "decrypt".into(),
+                json!(format!("wrong key ({}): no 2F 2F marker", key_source.as_str())),
+            );
+        }
+        Err(e) => {
+            obj.insert("decrypted".into(), json!(false));
+            obj.insert("ciphertext_hex".into(), json!(hex::encode(ciphertext)));
+            obj.insert("decrypt_error".into(), json!(e.to_string()));
+        }
+    }
 }
 
 /// Dispatch a transport-layer payload by its CI byte, learning record layouts from

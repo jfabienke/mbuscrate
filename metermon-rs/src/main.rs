@@ -79,9 +79,14 @@ enum Cmd {
         /// Stop after this many seconds.
         #[arg(long, default_value_t = 120)]
         seconds: u64,
-        /// Stop after this many frames (whichever limit is hit first).
+        /// Stop after this many *matching* frames (whichever limit is hit first).
         #[arg(long, default_value_t = 50)]
         count: usize,
+        /// Only capture frames from this meter id. Without it a frame budget is a
+        /// race against whichever neighbours are chattiest: fifty frames can pass in
+        /// seconds while a three-minute meter has not spoken once.
+        #[arg(long)]
+        device: Option<u32>,
     },
     /// Read-only RFM69 register dump (requires `radio` feature).
     ///
@@ -404,7 +409,8 @@ fn main() -> Result<()> {
             config,
             seconds,
             count,
-        } => run_capture(&config, &out, seconds, count),
+            device,
+        } => run_capture(&config, &out, seconds, count, device),
         Cmd::DumpRegs { config } => run_dumpregs(&config),
         Cmd::ProbeRaw {
             out,
@@ -1951,7 +1957,13 @@ fn run_live(_config_path: &str, _shadow: bool) -> Result<()> {
 
 /// Capture raw frames from the radio to a hex file (no decode, no MQTT).
 #[cfg(feature = "radio")]
-fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Result<()> {
+fn run_capture(
+    config_path: &str,
+    out: &str,
+    seconds: u64,
+    count: usize,
+    device: Option<u32>,
+) -> Result<()> {
     use std::io::Write;
 
     let cfg = Config::load(config_path)?;
@@ -1991,11 +2003,22 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
                     rssi_dbm: rssi,
                     freq_off_hz: off,
                 }))) => {
+                    // Filter before counting, so --count bounds the frames actually
+                    // wanted rather than whatever the band happened to be doing.
+                    let addr = mbus_rs::wmbus::mode_c::decode_mode_c(&frame)
+                        .ok()
+                        .map(|f| f.device_address);
+                    if let Some(want) = device {
+                        if addr != Some(want) {
+                            continue;
+                        }
+                    }
                     writeln!(file, "{}", hex::encode(&frame))?;
                     file.flush()?;
                     n += 1;
                     log::info!(
-                        "frame {n}: {} bytes rssi={rssi}dBm off={off}Hz  {}",
+                        "frame {n}: meter={} {} bytes rssi={rssi}dBm off={off}Hz  {}",
+                        addr.map(|a| a.to_string()).unwrap_or("?".into()),
                         frame.len(),
                         hex::encode(&frame)
                     );
@@ -2013,7 +2036,13 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
 }
 
 #[cfg(not(feature = "radio"))]
-fn run_capture(_config_path: &str, _out: &str, _seconds: u64, _count: usize) -> Result<()> {
+fn run_capture(
+    _config_path: &str,
+    _out: &str,
+    _seconds: u64,
+    _count: usize,
+    _device: Option<u32>,
+) -> Result<()> {
     bail_no_radio("capture")
 }
 
