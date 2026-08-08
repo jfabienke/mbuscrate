@@ -69,6 +69,34 @@ picotool reboot -f                            # reset (to re-read the boot banne
   different board wiring — which is why Waveshare's module and HAT schematics
   disagree. Do not carry either board's answer across to the other.
 
+## Payload format — a testing choice, NOT a claim about real meters
+
+The emulator sends OMS/wM-Bus data records because that exercises the crate's
+record parser over a new transport, and it earned its keep immediately by
+exposing two real VIF-extension defects. **It is not evidence that meters do
+this.**
+
+Zenner's own codebase says they do not. Their config tree has zero OMS
+references, defines a proprietary LoRa packet family (`SP0..SP9, SP12, AP1, IK,
+TEMPERATURE, CMD, START_JOINING, ASYNC_TELEGRAM, ...` in
+`HandlerLib/LoRaPackets.cs`), selects payload layout per device class
+(`CommonLibrary/LoRa_ProtocolType.cs`: WaterMeter, HeatMeter, HeatCostAllocator,
+...), carries no DIF/VIF encoding in the LoRa path at all, and caps uplinks at
+50 bytes — about the EU868 SF12 budget, and less than a full OMS telegram needs.
+That cap is likely *why* LoRa meters use compact proprietary payloads.
+
+The lesson generalises: **format follows transport.** The same Zenner devices do
+use M-Bus/OMS-style framing over wM-Bus — that is what the gateway decodes at
+868.95 MHz today — and switch to the SP family over LoRa. Do not carry the
+wM-Bus assumption across.
+
+What this means for real hardware: the **LoRaWAN layer is standard 1.0.2**, so
+the join, MIC and session-key work here applies unchanged. The **application
+payload needs a per-vendor decoder**, which belongs in the L1 extension layer of
+docs/design/vendor-layers.md and — per those principles — needs an evidence
+record. A layout inferred from a config tool is `Evidence::Inferred`; it only
+becomes `Captured` once real uplinks confirm it.
+
 ## Result
 
 2026-08-08: gateway decodes the beacon end to end, consecutive sequence numbers,
