@@ -150,6 +150,14 @@ impl Publisher {
         Ok(())
     }
 
+    /// Publish a raw LoRa reception to `<data-topic>-lora`. Kept apart from the
+    /// wM-Bus data topic so downstream consumers never have to distinguish the two
+    /// by inspecting payloads.
+    pub fn publish_lora(&mut self, value: &serde_json::Value) -> Result<()> {
+        let topic = format!("{}-lora", self.topic);
+        self.publish_to(&topic, value)
+    }
+
     /// Publish JSON to an arbitrary topic (e.g. the gateway health heartbeat).
     pub fn publish_to(&mut self, topic: &str, value: &serde_json::Value) -> Result<()> {
         let payload = serde_json::to_vec(value)?;

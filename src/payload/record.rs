@@ -336,8 +336,26 @@ fn decode_record_value(record: &mut MBusRecord) {
     let vib = {
         let v = &record.drh.vib;
         let mut infos = Vec::with_capacity(1 + v.nvife);
-        if let Some(primary) = crate::payload::vif_maps::lookup_primary_vif(v.vif) {
-            infos.push(primary);
+        // 0xFD and 0xFB are not units: they are escapes saying "the meaning is in
+        // the next byte". Looking only at the primary VIF leaves every extended
+        // quantity — voltage, current, and the rest — decoded to the right number
+        // with no unit and no name.
+        match v.vif {
+            0xFD if v.nvife > 0 => {
+                if let Some(ext) = crate::payload::vif_maps::lookup_vife_fd(v.vife[0]) {
+                    infos.push(ext);
+                }
+            }
+            0xFB if v.nvife > 0 => {
+                if let Some(ext) = crate::payload::vif_maps::lookup_vife_fb(v.vife[0]) {
+                    infos.push(ext);
+                }
+            }
+            _ => {
+                if let Some(primary) = crate::payload::vif_maps::lookup_primary_vif(v.vif) {
+                    infos.push(primary);
+                }
+            }
         }
         infos
     };
@@ -593,17 +611,17 @@ pub fn mbus_dif_datalength_lookup(dif: u8) -> usize {
         0x2 => 2,
         0x3 => 3,
         0x4 => 4,
-        0x5 => 6,
-        0x6 => 8,
-        0x7 => 0, // Special case
-        0x8 => 0, // Special case
+        0x5 => 4, // 32-bit real (IEEE-754 single) — 4 bytes, not 6
+        0x6 => 6, // 48-bit integer
+        0x7 => 8, // 64-bit integer — reading this as 0 desynced every later record
+        0x8 => 0, // selection for readout
         0x9 => 1,
         0xA => 2,
         0xB => 3,
         0xC => 4,
-        0xD => 0, // Variable length
+        0xD => 0, // variable length (LVAR): length byte handled separately
         0xE => 6,
-        0xF => 8,
+        0xF => 0, // special functions carry no fixed-length data
         _ => 0,
     }
 }
@@ -829,17 +847,17 @@ mod tests {
             (0x02, 2),
             (0x03, 3),
             (0x04, 4),
-            (0x05, 6),
-            (0x06, 8),
-            (0x07, 0), // Special case
-            (0x08, 0), // Special case
+            (0x05, 4), // 32-bit real
+            (0x06, 6), // 48-bit int
+            (0x07, 8), // 64-bit int
+            (0x08, 0), // selection for readout
             (0x09, 1),
             (0x0A, 2),
             (0x0B, 3),
             (0x0C, 4),
-            (0x0D, 0), // Variable length
+            (0x0D, 0), // variable length
             (0x0E, 6),
-            (0x0F, 8),
+            (0x0F, 0), // special functions
             (0x10, 0), // Out of range, defaults to 0
         ];
         for (dif, expected) in test_cases {
@@ -1015,5 +1033,28 @@ mod tests {
             "data must be 0x42, not the VIF length byte"
         );
         assert_eq!(&data[consumed..], &[0xEE], "next record stays aligned");
+    }
+}
+
+#[cfg(test)]
+mod vif_extension_tests {
+    use super::*;
+
+    /// A battery-voltage record as a real meter sends it: DIF 0x02 (16-bit int),
+    /// VIF 0xFD (escape), VIFE 0x46 (voltage, 10^-3 V), value 4137 mV.
+    #[test]
+    fn extended_vif_voltage_gets_unit_and_quantity() {
+        let raw = [0x02u8, 0xFD, 0x46, 0x29, 0x10];
+        let (rec, used) = parse_variable_record_consumed(&raw).expect("record parses");
+        assert_eq!(used, raw.len());
+        assert_eq!(rec.quantity, "Voltage");
+        assert_eq!(rec.unit, "V");
+        match rec.value {
+            MBusRecordValue::Numeric(v) => {
+                // 4137 raw x 10^-3 V
+                assert!((v - 4.137).abs() < 1e-9, "got {v}");
+            }
+            other => panic!("expected a numeric voltage, got {other:?}"),
+        }
     }
 }

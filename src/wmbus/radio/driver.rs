@@ -345,6 +345,16 @@ pub struct WmbusProfile {
     pub frequency_hz: u32,
     /// On-air bitrate in bits/s (e.g. `100_000` for mode C).
     pub bitrate: u32,
+    /// Sync word bytes to match, from the value written to the sync registers.
+    /// Mode C normally matches all three of `54 3D 54`, leaving the frame marker
+    /// (`0xCD`/`0x3D`) as the first payload byte. Matching only `54 3D` is more
+    /// permissive and also catches mode T.
+    pub sync_word_len: u8,
+    /// Preamble bits required before the sync word is looked for; 0 disables the gate.
+    pub preamble_detect_bits: u8,
+    /// Bytes written to the sync word registers, zero-padded. Only the first
+    /// `sync_word_len` of them are matched.
+    pub sync_word: [u8; 8],
 }
 
 impl WmbusProfile {
@@ -354,6 +364,9 @@ impl WmbusProfile {
         Self {
             frequency_hz,
             bitrate,
+            sync_word_len: 3,
+            preamble_detect_bits: 8,
+            sync_word: [0x54, 0x3D, 0x54, 0, 0, 0, 0, 0],
         }
     }
 }
@@ -373,6 +386,16 @@ pub struct LoRaProfile {
     pub power_dbm: i8,
     /// Optional LoRa sync word (network id). `None` leaves the chip default in place.
     pub sync_word: Option<u16>,
+    /// Invert the IQ polarity. **LoRaWAN downlinks require this** so end-devices do
+    /// not hear each other's uplinks; a JoinAccept sent with standard IQ is simply
+    /// invisible to the joining device, with no error anywhere. Uplinks use standard
+    /// IQ, so a network-server role needs both.
+    pub iq_inverted: bool,
+    /// Implicit (fixed-length, no on-air header) rather than explicit header.
+    /// Header mode must match the transmitter exactly: an explicit-header receiver
+    /// is deaf to an implicit-header sender and vice versa, with no error to
+    /// distinguish it from an empty band.
+    pub implicit_header: bool,
 }
 
 /// A received packet tagged with the modem it was captured under, plus the radio metadata
@@ -594,6 +617,7 @@ impl<H: Hal> Sx126xDriver<H> {
     ///     crc_on: true,                        // Enable CRC
     ///     crc_type: CrcType::Byte2,           // 2-byte CRC
     ///     sync_word_len: 4,                    // 4-byte sync word
+    ///     preamble_detect_bits: 16,            // 16-bit preamble detector gate
     /// };
     /// driver.set_packet_params(gfsk_packet)?;
     ///
@@ -620,43 +644,60 @@ impl<H: Hal> Sx126xDriver<H> {
                 crc_on,
                 crc_type,
                 sync_word_len,
+                preamble_detect_bits,
             } => {
-                let mut buf = [0u8; 9];
-
-                // Packet type (GFSK = 0x00)
-                buf[0] = 0x00;
-
-                // Preamble length in bits (16-bit value)
-                buf[1] = (preamble_len >> 8) as u8; // MSB
-                buf[2] = preamble_len as u8; // LSB
-
-                // Header type (Variable=0x01, Fixed=0x00)
-                buf[3] = match header_type {
-                    HeaderType::Variable => 0x01,
-                    HeaderType::Fixed => 0x00,
-                };
-
-                // Maximum payload length
-                buf[4] = payload_len;
-
-                // CRC enable/disable
-                buf[5] = if crc_on { 0x01 } else { 0x00 };
-
-                // CRC type (1-byte=0x01, 2-byte=0x00)
-                buf[6] = match crc_type {
-                    CrcType::Byte1 => 0x01,
-                    CrcType::Byte2 => 0x00,
-                };
-
-                // Sync word length in bytes
-                buf[7] = sync_word_len;
-
-                // DC-free encoding (disabled for wM-Bus)
-                buf[8] = 0x00;
+                // Datasheet order for SetPacketParams in GFSK. There is no packet-type
+                // byte here — the type is selected separately by SetPacketType (0x8A) —
+                // and every field is positional, so an extra leading byte shifts the
+                // whole frame and silently programs a receiver that detects nothing.
+                let buf = [
+                    (preamble_len >> 8) as u8,
+                    preamble_len as u8,
+                    match preamble_detect_bits {
+                        0 => 0x00,
+                        1..=8 => 0x04,
+                        9..=16 => 0x05,
+                        17..=24 => 0x06,
+                        _ => 0x07,
+                    },
+                    // Sync word length is expressed in BITS, while callers describe it
+                    // in bytes.
+                    sync_word_len.saturating_mul(8),
+                    0x00, // address filtering off
+                    match header_type {
+                        HeaderType::Variable => 0x01,
+                        HeaderType::Fixed => 0x00,
+                    },
+                    payload_len,
+                    // Note the encoding is not a flag: 0x01 disables the CRC while
+                    // 0x00 selects a one-byte CRC, so the intuitive "0 means off" is
+                    // precisely backwards and silently makes the radio drop every frame.
+                    match (crc_on, crc_type) {
+                        (false, _) => 0x01,
+                        (true, CrcType::Byte1) => 0x00,
+                        (true, CrcType::Byte2) => 0x02,
+                    },
+                    0x00, // whitening off
+                ];
 
                 self.hal.write_command(0x8C, &buf)?; // SetPacketParams command
             }
             PacketParams::LoRa { params } => {
+                // Datasheet §15.4 (Known Limitations): bit 2 of register 0x0736 must
+                // track the IQ polarity — cleared for inverted, SET for standard.
+                // Both MIT references (RadioLib, lora-phy) apply this on every LoRa
+                // packet-params write; trusting the reset value across GFSK/LoRa
+                // profile churn is exactly the kind of assumption that has burned
+                // this driver before.
+                let mut iq = [0u8; 1];
+                self.hal.read_register(0x0736, &mut iq)?;
+                let fixed = if params.iq_inverted {
+                    iq[0] & 0xFB
+                } else {
+                    iq[0] | 0x04
+                };
+                self.hal.write_register(0x0736, &[fixed])?;
+
                 let mut buf = [0u8; 6];
 
                 // Preamble length in symbols (16-bit value)
@@ -711,8 +752,10 @@ impl<H: Hal> Sx126xDriver<H> {
                 // Modulation shaping
                 buf[3] = params.modulation_shaping;
 
-                // RX bandwidth
-                buf[4] = params.bandwidth;
+                // RX bandwidth. The chip takes an index into a fixed set of filter
+                // settings, not a frequency, so a bandwidth in kHz written straight to
+                // this byte is simply an invalid setting.
+                buf[4] = Self::gfsk_rx_bandwidth_reg(params.bandwidth);
 
                 // Frequency deviation
                 let fdev_reg = (params.fdev as u64 * (1 << 25)) / self.xtal_freq as u64;
@@ -748,6 +791,39 @@ impl<H: Hal> Sx126xDriver<H> {
         Ok(())
     }
 
+    /// Map a double-sideband bandwidth in kHz to its SX126x filter setting,
+    /// choosing the narrowest filter that is still at least as wide as requested.
+    fn gfsk_rx_bandwidth_reg(khz: u16) -> u8 {
+        const TABLE: &[(u16, u8)] = &[
+            (5, 0x1F),
+            (6, 0x17),
+            (7, 0x0F),
+            (10, 0x1E),
+            (12, 0x16),
+            (15, 0x0E),
+            (20, 0x1D),
+            (23, 0x15),
+            (29, 0x0D),
+            (39, 0x1C),
+            (47, 0x14),
+            (59, 0x0C),
+            (78, 0x1B),
+            (94, 0x13),
+            (117, 0x0B),
+            (156, 0x1A),
+            (187, 0x12),
+            (234, 0x0A),
+            (312, 0x19),
+            (374, 0x11),
+            (467, 0x09),
+        ];
+        TABLE
+            .iter()
+            .find(|(w, _)| *w >= khz)
+            .map(|(_, reg)| *reg)
+            .unwrap_or(0x09)
+    }
+
     pub fn set_sync_word(&mut self, sync_word: [u8; 8]) -> Result<(), DriverError> {
         // Write to registers 0x06C0 - 0x06C7
         self.hal.write_register(0x06C0, &sync_word)?;
@@ -763,9 +839,15 @@ impl<H: Hal> Sx126xDriver<H> {
     }
 
     pub fn disable_whitening(&mut self) -> Result<(), DriverError> {
-        // Set whitening initial value to disable (specific config needed)
-        self.hal.write_register(0x06B8, &[0x00])?; // MSB to 0
-        self.hal.write_register(0x06B9, &[0x00])?; // LSB to 0
+        // Whitening on/off is decided by SetPacketParams; these registers hold only
+        // the 9-bit LFSR seed. Register 0x06B8 additionally carries seven bits of
+        // modem configuration that Semtech's driver warns "must not be modified" —
+        // the previous blind write of 0x00 here cleared them, which is the kind of
+        // damage that leaves RSSI working while the demodulator never emits a bit.
+        let mut msb = [0u8; 1];
+        self.hal.read_register(0x06B8, &mut msb)?;
+        self.hal.write_register(0x06B8, &[(msb[0] & 0xFE) | 0x01])?;
+        self.hal.write_register(0x06B9, &[0x00])?;
         Ok(())
     }
 
@@ -790,9 +872,10 @@ impl<H: Hal> Sx126xDriver<H> {
     }
 
     pub fn read_buffer(&mut self, offset: u8, len: u8, buf: &mut [u8]) -> Result<(), DriverError> {
-        let cmd_buf = [0x1E, offset, 0x00, len]; // ReadBuffer: offset, offset2 (0), len
-        self.hal.write_command(0x1E, &cmd_buf[1..])?;
-        self.hal.read_command(0x1E, buf)?;
+        // ReadBuffer must clock the offset and a NOP inside the same transaction as the
+        // data, which read_command cannot express — the HAL owns that framing.
+        let len = (len as usize).min(buf.len());
+        self.hal.read_rx_buffer(offset, &mut buf[..len])?;
         Ok(())
     }
 
@@ -819,24 +902,92 @@ impl<H: Hal> Sx126xDriver<H> {
         Ok(())
     }
 
+    /// Direct access to the HAL, for diagnostics that need the chip's raw status,
+    /// IRQ and buffer registers rather than the driver's interpretation of them.
+    pub fn hal_mut(&mut self) -> &mut H {
+        &mut self.hal
+    }
+
     pub fn set_rx_continuous(&mut self) -> Result<(), DriverError> {
-        self.set_rx(0xFFFFFF)?; // Infinite timeout
-        Ok(())
+        self.start_receive(0xFFFFFF)
     }
 
+    /// Select where the chip parks after a receive or transmit completes.
+    ///
+    /// `0x20` STDBY_RC, `0x30` STDBY_XOSC, `0x40` FS. The reset default is FS, which
+    /// keeps the PLL running; parking in standby is what the reference drivers do.
+    pub fn set_rx_tx_fallback_mode(&mut self, mode: u8) -> Result<(), DriverError> {
+        self.hal
+            .write_command(0x93, &[mode])
+            .map_err(DriverError::Hal)
+    }
+
+    /// Enter receive, restaging the settings the chip needs each time.
+    ///
+    /// Ordering follows RadioLib (MIT), which is the most complete open GFSK
+    /// implementation for this part: return to standby, park the fallback mode, reset
+    /// the buffer pointers, clear stale interrupts, re-apply the packet parameters and
+    /// only then issue SetRx. Re-applying the packet parameters is cheap insurance —
+    /// several commands rewrite them as a side effect, and a receiver configured with
+    /// a stale payload length fails in a way that looks like an empty band.
+    pub fn start_receive(&mut self, timeout: u32) -> Result<(), DriverError> {
+        self.set_standby(StandbyMode::RC)?;
+        self.set_rx_tx_fallback_mode(0x20)?;
+        self.set_buffer_base_addresses(self.tx_base_addr, self.rx_base_addr)?;
+        self.clear_irq_status(0xFFFF)?;
+        if let Some(params) = self.current_packet_params {
+            self.set_packet_params(params)?;
+        }
+        self.set_rx(timeout)
+    }
+
+    /// GetRxBufferStatus. Reply: `[status, PayloadLengthRx, RxStartBufferPointer]` —
+    /// every SX126x Get* reply leads with the status byte, so the payload length is
+    /// `buf[1]`, not `buf[0]`.
     pub fn get_rx_buffer_status(&mut self, buf: &mut [u8; 3]) -> Result<(), DriverError> {
-        self.hal.read_command(0x13, buf)?; // GetRxBufferStatus: [size, start_addr, rx_current_addr]
+        self.hal.read_command(0x13, buf)?;
         Ok(())
     }
 
+    /// SetPaConfig. Datasheet Table 13-20: four bytes, in this order.
+    ///
+    /// `paLut` is always 0x01. `device_sel` is 0x00 for the SX1262 and 0x01 for the
+    /// SX1261 — 0x04 is not a valid value. Getting this wrong does not fail: the
+    /// chip accepts it, TxDone still fires, and nothing radiates, because
+    /// `pa_duty_cycle` and `hp_max` between them set the PA's conduction angle and
+    /// size. Table 13-21 gives the sanctioned combinations; see
+    /// [`Sx126xDriver::set_pa_config_sx1262`] for the SX1262 ones.
     pub fn set_pa_config(
         &mut self,
         pa_duty_cycle: u8,
         hp_max: u8,
         device_sel: u8,
+        pa_lut: u8,
     ) -> Result<(), DriverError> {
-        let buf = [device_sel, hp_max, pa_duty_cycle];
+        let buf = [pa_duty_cycle, hp_max, device_sel, pa_lut];
         self.hal.write_command(0x95, &buf)?; // SetPaConfig
+        Ok(())
+    }
+
+    /// Apply the datasheet's optimal SX1262 PA settings for a target output power
+    /// (Table 13-21), and the §15.2 TX-clamp workaround that accompanies them.
+    ///
+    /// Only the tabulated combinations are safe: the datasheet warns that raising
+    /// `hp_max` past 0x07 can age the device early, so this maps a requested dBm
+    /// onto the nearest sanctioned row rather than interpolating.
+    pub fn set_pa_config_sx1262(&mut self, target_dbm: i8) -> Result<(), DriverError> {
+        let (duty, hp_max) = match target_dbm {
+            i8::MIN..=14 => (0x02, 0x02), // +14 dBm
+            15..=17 => (0x02, 0x03),      // +17 dBm
+            18..=20 => (0x03, 0x05),      // +20 dBm
+            _ => (0x04, 0x07),            // +22 dBm
+        };
+        self.set_pa_config(duty, hp_max, 0x00, 0x01)?;
+        // Known Limitations §15.2: the PA clamp backs power off over-eagerly
+        // unless bits 4:1 of TxClampConfig are set.
+        let mut clamp = [0u8; 1];
+        self.hal.read_register(0x08D8, &mut clamp)?;
+        self.hal.write_register(0x08D8, &[clamp[0] | 0x1E])?;
         Ok(())
     }
 
@@ -849,9 +1000,11 @@ impl<H: Hal> Sx126xDriver<H> {
     }
 
     pub fn get_irq_status(&mut self) -> Result<IrqStatus, DriverError> {
-        let mut buf = [0u8; 2];
+        // Reply is [status, IRQ_MSB, IRQ_LSB]; composing from bytes 0..2 folds the
+        // status byte into the IRQ mask and reports interrupts that never happened.
+        let mut buf = [0u8; 3];
         self.hal.read_command(0x12, &mut buf)?; // GetIrqStatus
-        Ok(IrqStatus::from(((buf[0] as u16) << 8) | (buf[1] as u16)))
+        Ok(IrqStatus::from(((buf[1] as u16) << 8) | (buf[2] as u16)))
     }
 
     pub fn clear_irq_status(&mut self, irq: u16) -> Result<(), DriverError> {
@@ -930,13 +1083,16 @@ impl<H: Hal> Sx126xDriver<H> {
             let mut status = [0u8; 3];
             self.get_rx_buffer_status(&mut status)?;
 
-            // Extract received packet length (status[0] contains length)
-            let rx_len = status[0] as usize;
+            // Reply layout is [status, PayloadLengthRx, RxStartBufferPointer]. Reading
+            // the length from byte 0 takes the chip status byte as a length — 0xD2 in
+            // RX, i.e. a phantom 210-byte packet — and ignores where the packet starts.
+            let rx_len = status[1] as usize;
+            let rx_offset = status[2];
 
             if rx_len > 0 {
                 // Read received payload from radio buffer
                 let mut payload = vec![0u8; rx_len];
-                self.read_buffer(self.rx_base_addr, rx_len as u8, &mut payload)?;
+                self.read_buffer(rx_offset, rx_len as u8, &mut payload)?;
                 log::info!("RX done, received {rx_len} bytes");
                 return Ok(Some(payload));
             }
@@ -1031,14 +1187,12 @@ impl<H: Hal> Sx126xDriver<H> {
     /// # wM-Bus Configuration Details
     ///
     /// This method configures:
-    /// - GFSK modulation with Gaussian 0.5 shaping
-    /// - 156 kHz receiver bandwidth
+    /// - 2-FSK with no shaping, as mode C is plain NRZ
+    /// - 234 kHz double-sideband receiver bandwidth
     /// - Frequency deviation = bitrate / 2
-    /// - 48-bit preamble
-    /// - Variable length packets with 2-byte CRC
-    /// - CCITT CRC polynomial (0x1021)
-    /// - wM-Bus S-mode sync word (0xB4B65A5A)
-    /// - +14 dBm output power
+    /// - Mode-C sync word `54 3D 54`, leaving the frame marker as the first payload byte
+    /// - Fixed-length reception: the byte after the sync word is that marker, not a length
+    /// - Hardware CRC off, because wM-Bus carries its own per-block CRC-16/EN-13757
     /// - Whitening disabled (wM-Bus requirement)
     ///
     /// # Examples
@@ -1076,56 +1230,87 @@ impl<H: Hal> Sx126xDriver<H> {
     /// [`Sx126xDriver::switch_profile`] funnel through here, so there is a single
     /// GFSK-apply path.
     pub fn apply_wmbus_profile(&mut self, profile: &WmbusProfile) -> Result<(), DriverError> {
-        // Set RF frequency
+        // Set RF frequency, then calibrate the image for that band — skipping this
+        // leaves the chip calibrated for its default band and quietly costs
+        // sensitivity, which presents as a receiver that hears only strong signals.
         self.set_rf_frequency(profile.frequency_hz)?;
+        self.calibrate_image(profile.frequency_hz)?;
 
         // Configure GFSK modulation parameters
         let mod_params = ModulationParams::Gfsk {
             params: GfskModParams {
                 bitrate: profile.bitrate,
-                modulation_shaping: 1,     // Gaussian 0.5 (typical for wM-Bus)
-                bandwidth: 156,            // 156 kHz receiver bandwidth
+                // No shaping on receive: mode C is plain NRZ 2-FSK with no encoding,
+                // and this field takes a datasheet code (0x00 none, 0x08-0x0B Gaussian)
+                // rather than a free-form number.
+                modulation_shaping: 0x00,
+                // Double-sideband, so ~2x the deviation plus the bitrate.
+                bandwidth: 234,
                 fdev: profile.bitrate / 2, // Frequency deviation = bitrate/2 (typical FSK)
             },
         };
         self.set_modulation_params(mod_params)?;
 
-        // Configure packet parameters for wM-Bus
+        // Packet handling mirrors the RFM69 configuration that receives this fleet
+        // today. Two settings are load-bearing and were previously wrong here:
+        //
+        // * `crc_on: false` — wM-Bus carries its own per-block CRC-16/EN-13757 *inside*
+        //   the payload, which this crate verifies in software. Letting the radio also
+        //   apply a CRC makes it discard every frame as corrupt.
+        // * fixed-length reception — the byte after the sync word is the mode-C frame
+        //   marker (0x3D type B / 0xCD type A), not a length field, so the variable-
+        //   length engine would mis-size every packet. The link decoder derives the
+        //   true length from the L-field.
         let packet_params = PacketParams::Gfsk {
-            preamble_len: 48,                  // 48-bit preamble (wM-Bus standard)
-            header_type: HeaderType::Variable, // Variable length packets
-            payload_len: 255,                  // Maximum payload size
-            crc_on: true,                      // Enable CRC
-            crc_type: CrcType::Byte2,          // 2-byte CRC
-            sync_word_len: 4,                  // 4-byte sync word
+            preamble_len: 32, // 4 bytes, as the working RFM69 config uses
+            header_type: HeaderType::Fixed,
+            payload_len: 255, // read the whole buffer; the L-field bounds the frame
+            crc_on: false,
+            crc_type: CrcType::Byte2,
+            // 54 3D 54. The mode-C air format is preamble 55 55 55 55, then 54 3D,
+            // then the signalling byte 54, then the frame marker (0xCD type A / 0x3D
+            // type B). Matching all three leaves that marker as the first payload byte,
+            // which is what the link decoder expects.
+            sync_word_len: profile.sync_word_len,
+            preamble_detect_bits: profile.preamble_detect_bits,
         };
         self.set_packet_params(packet_params)?;
 
-        // Configure CRC with CCITT polynomial
-        self.configure_crc(0x1021)?;
-
-        // Disable whitening (required for wM-Bus)
+        // No whitening on wM-Bus.
         self.disable_whitening()?;
 
-        // Set wM-Bus S-mode sync word pattern
-        self.set_sync_word([0xB4, 0xB6, 0x5A, 0x5A, 0, 0, 0, 0])?;
+        // Mode-C sync word: 54 3D 54. This is what triggers reception — the previous
+        // value here was the S-mode pattern (B4 B6 5A 5A), which never matches mode-C
+        // traffic and is why the label said mode_c while the radio listened for S.
+        self.set_sync_word(profile.sync_word)?;
 
         // Configure power amplifier for +14 dBm output
-        self.set_pa_config(0x04, 0x00, 0x00)?;
+        self.set_pa_config_sx1262(14)?;
         self.set_tx_params(14, 0x07)?; // +14 dBm with ramp time
 
         // Set buffer base addresses
         self.set_buffer_base_addresses(0, 0)?;
 
-        // Configure interrupt routing
+        // Interrupt routing.
+        //
+        // The general mask decides which events may set a bit in GetIrqStatus at all,
+        // so PreambleDetected and SyncwordValid must be enabled even though nothing
+        // waits on them: without that a diagnostic reading GetIrqStatus can never
+        // observe them, and "no preamble detected" becomes indistinguishable from
+        // "preamble detection not reported".
+        //
+        // DIO2 is deliberately given no IRQ. On boards that use SetDIO2AsRfSwitchCtrl
+        // the pin drives the antenna switch and cannot also be an interrupt output —
+        // assigning one here silently disables the RF switch.
         self.set_dio_irq_params(
-            // IRQ mask: RX done, TX done, CRC error, timeout
             IrqMaskBit::RxDone as u16
                 | IrqMaskBit::TxDone as u16
+                | IrqMaskBit::PreambleDetected as u16
+                | IrqMaskBit::SyncwordValid as u16
                 | IrqMaskBit::CrcErr as u16
                 | IrqMaskBit::Timeout as u16,
-            IrqMaskBit::RxDone as u16, // DIO1: RX done
-            IrqMaskBit::TxDone as u16, // DIO2: TX done
+            IrqMaskBit::RxDone as u16, // DIO1: the only line we wait on
+            0,                         // DIO2: reserved for the RF switch
             0,                         // DIO3: unused
         )?;
 
@@ -1384,11 +1569,13 @@ impl<H: Hal> Sx126xDriver<H> {
     /// The radio should be in RX mode for at least a few hundred microseconds
     /// before taking RSSI measurements to allow the measurement to settle.
     pub fn get_rssi_instant(&mut self) -> Result<i16, DriverError> {
-        let mut rssi_raw = [0u8; 1];
+        // Reply is [status, RssiInst]. Reading one byte returns the status, which in
+        // RX mode is 0xD2 and decodes to a constant, believable −105 dBm.
+        let mut rssi_raw = [0u8; 2];
         self.hal.read_command(0x15, &mut rssi_raw)?; // GetRssiInst command
 
         // Convert to dBm: Signal power = -RssiInst / 2
-        let rssi_dbm = -(rssi_raw[0] as i16) / 2;
+        let rssi_dbm = -(rssi_raw[1] as i16) / 2;
 
         Ok(rssi_dbm)
     }
@@ -1408,15 +1595,15 @@ impl<H: Hal> Sx126xDriver<H> {
     /// RssiAvg). A previous version mislabeled the third byte as "FreqError"; the real
     /// per-packet frequency error comes from [`Self::get_lora_frequency_error`].
     pub fn get_packet_status(&mut self) -> Result<PacketStatus, DriverError> {
-        let mut status = [0u8; 3];
+        // Reply is [status, RssiPkt, SnrPkt, SignalRssiPkt] — LoRa layout, with SnrPkt
+        // signed in quarter-dB.
+        let mut status = [0u8; 4];
         self.hal.read_command(0x14, &mut status)?; // GetPacketStatus command
 
-        // LoRa: status[0] = RssiPkt, status[1] = SnrPkt (signed, quarter-dB),
-        //       status[2] = SignalRssiPkt.
         Ok(PacketStatus {
-            rssi_pkt_dbm: -(status[0] as i16) / 2,
-            snr_db: lora_snr_db(status[1]),
-            signal_rssi_dbm: -(status[2] as i16) / 2,
+            rssi_pkt_dbm: -(status[1] as i16) / 2,
+            snr_db: lora_snr_db(status[2]),
+            signal_rssi_dbm: -(status[3] as i16) / 2,
         })
     }
 
@@ -1800,6 +1987,8 @@ impl<H: Hal> Sx126xDriver<H> {
             cr,
             power_dbm,
             sync_word: None,
+            implicit_header: false,
+            iq_inverted: false,
         })
     }
 
@@ -1817,10 +2006,14 @@ impl<H: Hal> Sx126xDriver<H> {
             cr,
             power_dbm,
             sync_word,
+            implicit_header,
+            iq_inverted,
         } = *profile;
 
-        // Set RF frequency
+        // Set RF frequency, then calibrate the image for that band — the factory
+        // calibration covers 902-928 MHz only.
         self.set_rf_frequency(frequency_hz)?;
+        self.calibrate_image(frequency_hz)?;
 
         // Configure LoRa modulation parameters
         // Per AN1200.22: Enable LDRO for SF11/SF12 when BW <= 125kHz
@@ -1850,11 +2043,11 @@ impl<H: Hal> Sx126xDriver<H> {
         // Configure LoRa packet parameters (explicit header, CRC on, standard preamble)
         let packet_params = PacketParams::LoRa {
             params: LoRaPacketParams {
-                preamble_len: 8,        // Standard 8-symbol preamble
-                implicit_header: false, // Explicit header for non-WAN
-                payload_len: 255,       // Max payload
-                crc_on: true,           // Enable CRC
-                iq_inverted: false,     // Standard IQ
+                preamble_len: 8, // Standard 8-symbol preamble
+                implicit_header,
+                payload_len: 255, // Max payload
+                crc_on: true,     // Enable CRC
+                iq_inverted,
             },
         };
         self.set_packet_params(packet_params)?;
@@ -1865,7 +2058,7 @@ impl<H: Hal> Sx126xDriver<H> {
         }
 
         // Configure power amplifier
-        self.set_pa_config(0x04, 0x00, 0x00)?; // Standard PA config
+        self.set_pa_config_sx1262(power_dbm)?;
         self.set_tx_params(power_dbm, 0x07)?; // Power and ramp time
 
         // Set buffer base addresses
@@ -1887,6 +2080,91 @@ impl<H: Hal> Sx126xDriver<H> {
         Ok(())
     }
 
+    /// Transmit `data` on the current LoRa profile, blocking until TxDone.
+    ///
+    /// Sets the packet-params payload length to the actual frame length first: in
+    /// explicit-header LoRa that field *is* the transmit length, so leaving it at
+    /// the profile's 255 sends 255 bytes of buffer regardless of what was loaded.
+    /// The caller owns the antenna switch — on boards with a separate TX/RX
+    /// control line it must be moved before this is called.
+    /// Stage a transmission without starting it.
+    ///
+    /// Split from the firing so a timed downlink can pay the SPI cost *before* its
+    /// deadline: a LoRaWAN RX window is opened for a handful of symbols, and at SF9
+    /// an 8-symbol preamble lasts only ~33 ms, so even a few milliseconds of setup
+    /// inside the window is the difference between a join and silence.
+    pub fn lora_prepare_tx(&mut self, data: &[u8]) -> Result<(), DriverError> {
+        if data.len() > 255 {
+            return Err(DriverError::InvalidParams);
+        }
+        self.set_standby(StandbyMode::RC)?;
+        if let Some(PacketParams::LoRa { mut params }) = self.current_packet_params {
+            params.payload_len = data.len() as u8;
+            self.set_packet_params(PacketParams::LoRa { params })?;
+        }
+        self.set_buffer_base_addresses(self.tx_base_addr, self.rx_base_addr)?;
+        self.write_buffer(self.tx_base_addr, data)?;
+        self.clear_irq_status(0xFFFF)?;
+        self.set_dio_irq_params(
+            IrqMaskBit::TxDone as u16 | IrqMaskBit::Timeout as u16,
+            IrqMaskBit::TxDone as u16,
+            0,
+            0,
+        )?;
+        Ok(())
+    }
+
+    /// Start a staged transmission and block until TxDone.
+    pub fn lora_fire_tx(&mut self) -> Result<(), DriverError> {
+        self.set_tx(0)?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            if self.get_irq_status()?.tx_done() {
+                self.clear_irq_status(0xFFFF)?;
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Err(DriverError::Timeout)
+    }
+
+    pub fn lora_transmit(&mut self, data: &[u8]) -> Result<(), DriverError> {
+        if data.len() > 255 {
+            return Err(DriverError::InvalidParams);
+        }
+        self.set_standby(StandbyMode::RC)?;
+
+        if let Some(PacketParams::LoRa { mut params }) = self.current_packet_params {
+            params.payload_len = data.len() as u8;
+            self.set_packet_params(PacketParams::LoRa { params })?;
+        }
+        self.set_buffer_base_addresses(self.tx_base_addr, self.rx_base_addr)?;
+        self.write_buffer(self.tx_base_addr, data)?;
+        self.clear_irq_status(0xFFFF)?;
+        // Route TxDone to DIO1 so completion is observable on the same line the
+        // receive path uses.
+        self.set_dio_irq_params(
+            IrqMaskBit::TxDone as u16 | IrqMaskBit::Timeout as u16,
+            IrqMaskBit::TxDone as u16,
+            0,
+            0,
+        )?;
+        // Timeout is in 15.625 us steps; 0 disables it and TxDone alone ends the
+        // transmission.
+        self.set_tx(0)?;
+
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            let irq = self.get_irq_status()?;
+            if irq.tx_done() {
+                self.clear_irq_status(0xFFFF)?;
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Err(DriverError::Timeout)
+    }
+
     /// Set LoRa sync word for network identification
     ///
     /// Configures the LoRa sync word (network ID) for filtering packets.
@@ -1901,9 +2179,12 @@ impl<H: Hal> Sx126xDriver<H> {
     /// * `Ok(())` - Sync word set successfully
     /// * `Err(DriverError)` - Register write failed
     pub fn set_lora_sync_word(&mut self, network_id: u16) -> Result<(), DriverError> {
-        // Private LoRa sync word register (0x0741)
-        let buf = [network_id as u8, (network_id >> 8) as u8];
-        self.hal.write_register(0x0741, &buf)?;
+        // The sync word spans 0x0740 (MSB) and 0x0741 (LSB); the chip's reset value
+        // reads back 0x1424 from 0x0740. Writing LSB-first at 0x0741 — the previous
+        // behaviour — programs 0x14,0x44 for the public LoRaWAN word 0x3444, i.e. a
+        // receiver that silently ignores all LoRaWAN traffic.
+        let buf = [(network_id >> 8) as u8, network_id as u8];
+        self.hal.write_register(0x0740, &buf)?;
         log::info!("LoRa sync word set to 0x{network_id:04X}");
         Ok(())
     }
@@ -1989,6 +2270,54 @@ impl<H: Hal> Sx126xDriver<H> {
             if enabled { "25" } else { "4.6" }
         );
         Ok(())
+    }
+
+    /// Run the chip's self-calibration.
+    ///
+    /// `0x7F` calibrates every block (RC64k, RC13M, PLL, ADC bulk/pulse/tuning, image).
+    /// The power-on calibration happens before the chip knows its final configuration,
+    /// and an uncalibrated ADC or PLL leaves the receiver reporting a healthy RSSI while
+    /// the demodulator never recovers a single bit.
+    pub fn calibrate(&mut self, blocks: u8) -> Result<(), DriverError> {
+        self.set_standby(StandbyMode::RC)?;
+        self.hal
+            .write_command(0x89, &[blocks])
+            .map_err(DriverError::Hal)?;
+        // Calibration drives BUSY high for a few ms. No sleep here: the HAL waits for
+        // BUSY to fall before issuing the next command, which is the authoritative
+        // signal and does not stall callers that are driving a mock.
+        Ok(())
+    }
+
+    /// Calibrate the image rejection for the band containing `frequency_hz`.
+    ///
+    /// Required by the datasheet whenever the operating band changes: the
+    /// calibration performed at reset is for the default band, and running outside
+    /// it costs receive sensitivity. Band edges are the datasheet's (Table 9-3).
+    pub fn calibrate_image(&mut self, frequency_hz: u32) -> Result<(), DriverError> {
+        let mhz = frequency_hz / 1_000_000;
+        let (f1, f2) = match mhz {
+            430..=440 => (0x6B, 0x6F),
+            470..=510 => (0x75, 0x81),
+            779..=787 => (0xC1, 0xC5),
+            863..=870 => (0xD7, 0xDB),
+            902..=928 => (0xE1, 0xE9),
+            _ => return Ok(()), // outside the documented bands: leave calibration alone
+        };
+        self.hal
+            .write_command(0x98, &[f1, f2])
+            .map_err(DriverError::Hal)
+    }
+
+    /// Let the chip drive DIO2 as the antenna-switch control.
+    ///
+    /// Boards with an external RF switch (e.g. a PE4259) route DIO2 to it, so without
+    /// this the antenna is never connected to the receiver and the radio hears
+    /// nothing while looking perfectly healthy.
+    pub fn set_dio2_as_rf_switch(&mut self, enabled: bool) -> Result<(), DriverError> {
+        self.hal
+            .write_command(0x9D, &[u8::from(enabled)])
+            .map_err(DriverError::Hal)
     }
 
     /// Sets regulator mode for optimal power efficiency
@@ -2695,6 +3024,8 @@ mod tests {
             cr: CodingRate::CR4_5,
             power_dbm: 14,
             sync_word: None,
+            implicit_header: false,
+            iq_inverted: false,
         }
     }
 

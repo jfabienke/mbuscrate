@@ -18,12 +18,20 @@ mod config;
 mod decode;
 mod devices;
 mod health;
+#[cfg(feature = "radio")]
+mod join_responder;
 mod keystore;
+#[cfg(feature = "radio")]
+mod lora_rx;
 mod mock_backend;
 mod profiles;
 mod publish;
 mod source;
 mod sweep;
+#[cfg(feature = "radio")]
+mod sx1262_probe;
+#[cfg(feature = "radio")]
+mod sx1262_rx;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -71,9 +79,14 @@ enum Cmd {
         /// Stop after this many seconds.
         #[arg(long, default_value_t = 120)]
         seconds: u64,
-        /// Stop after this many frames (whichever limit is hit first).
+        /// Stop after this many *matching* frames (whichever limit is hit first).
         #[arg(long, default_value_t = 50)]
         count: usize,
+        /// Only capture frames from this meter id. Without it a frame budget is a
+        /// race against whichever neighbours are chattiest: fifty frames can pass in
+        /// seconds while a three-minute meter has not spoken once.
+        #[arg(long)]
+        device: Option<u32>,
     },
     /// Read-only RFM69 register dump (requires `radio` feature).
     ///
@@ -177,6 +190,181 @@ enum Cmd {
         #[arg(long)]
         from_config: String,
     },
+    /// First-light probe for an SX1262 board: prove power, SPI, the BUSY handshake
+    /// and the oscillator answer before trusting anything above them. Read-mostly;
+    /// never transmits. Run with the monitor stopped if it shares the SPI bus.
+    Sx1262Probe {
+        /// SPI device the SX1262's chip-select is on (the RFM69 uses spidev0.1).
+        #[arg(long, default_value = "/dev/spidev0.0")]
+        spidev: String,
+        /// BCM GPIO driving NSS/chip-select, when the board uses a plain GPIO rather
+        /// than a hardware SPI chip-select. Omit for hardware CS.
+        #[arg(long)]
+        nss: Option<u8>,
+        /// BCM GPIO for BUSY.
+        #[arg(long, default_value_t = 25)]
+        busy: u8,
+        /// BCM GPIO for DIO1 (RxDone and friends).
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        /// BCM GPIO for DIO2, if broken out.
+        #[arg(long)]
+        dio2: Option<u8>,
+        /// BCM GPIO for NRST.
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        /// TCXO supply voltage in mV, if the board has one (1600/1700/1800/2200/
+        /// 2400/2700/3000/3300). The probe detects the need automatically; this only
+        /// sets the voltage used when it does.
+        #[arg(long)]
+        tcxo_mv: Option<u32>,
+    },
+    /// Receive LoRa on an SX1262 (requires `radio` feature). Parks on one
+    /// (frequency, SF) or sweeps the EU868 join channels across the SF ladder,
+    /// decoding LoRaWAN headers for identification.
+    LoraRx {
+        #[arg(long, default_value = "/dev/spidev0.1")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        /// Carrier frequency in Hz (ignored with --sweep).
+        #[arg(long, default_value_t = 868_100_000)]
+        freq_hz: u32,
+        /// Spreading factor 5..=12 (ignored with --sweep).
+        #[arg(long, default_value_t = 12)]
+        sf: u8,
+        /// Bandwidth in kHz (125, 250 or 500).
+        #[arg(long, default_value_t = 125)]
+        bw: u32,
+        /// Sweep the EU868 join channels (868.1/.3/.5) across SF12/9/7/10/8/11.
+        #[arg(long)]
+        sweep: bool,
+        /// Hunt an E22 test transmitter: sweep SF x BW x sync at --freq-hz.
+        #[arg(long)]
+        hunt_e22: bool,
+        /// Seconds to dwell per sweep point.
+        #[arg(long, default_value_t = 20)]
+        dwell: u64,
+        /// Use the private-network sync word (0x1424) instead of public LoRaWAN.
+        #[arg(long)]
+        private_sync: bool,
+        /// Disable RX boosted gain — for a transmitter close enough to compress
+        /// the front end.
+        #[arg(long)]
+        no_rx_boost: bool,
+        /// Write received frames as hex lines to this file.
+        #[arg(long)]
+        capture: Option<String>,
+        /// Stop after this many seconds.
+        #[arg(long, default_value_t = 300)]
+        seconds: u64,
+    },
+    /// Answer LoRaWAN OTAA joins and decode the uplinks that follow (requires
+    /// `radio` feature). A join responder, not a network server.
+    LorawanJoin {
+        #[arg(long, default_value = "/dev/spidev0.1")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        #[arg(long, default_value_t = 868_100_000)]
+        freq_hz: u32,
+        /// Spreading factor. EU868 joins at DR3 = SF9 on each join channel, so that
+        /// is the default; a listener on the wrong SF hears nothing at all.
+        #[arg(long, default_value_t = 9)]
+        sf: u8,
+        /// JSON file of provisioned devices: {"<DevEUI big-endian hex>": "<32-hex AppKey>"}.
+        /// Keep it out of the repo; it holds real credentials.
+        #[arg(long)]
+        creds: String,
+        /// Write every received frame to this file as JSONL (ciphertext, decrypted
+        /// payload and metadata) for offline vendor-payload work.
+        #[arg(long)]
+        capture: Option<String>,
+        #[arg(long, default_value_t = 300)]
+        seconds: u64,
+    },
+    /// Transmit LoRa frames from the SX1262 (requires `radio` feature) — proves the
+    /// gateway's transmit path against an independent receiver.
+    LoraTx {
+        #[arg(long, default_value = "/dev/spidev0.1")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        #[arg(long, default_value_t = 868_100_000)]
+        freq_hz: u32,
+        #[arg(long, default_value_t = 7)]
+        sf: u8,
+        #[arg(long, default_value_t = 125)]
+        bw: u32,
+        /// Use the private-network sync word (0x1424) instead of public LoRaWAN.
+        #[arg(long)]
+        private_sync: bool,
+        /// Output power in dBm.
+        #[arg(long, default_value_t = 2)]
+        power: i8,
+        #[arg(long, default_value_t = 10)]
+        count: u32,
+        #[arg(long, default_value_t = 2000)]
+        interval_ms: u64,
+    },
+    /// Receive wM-Bus mode C on an SX1262, with the full receive chain instrumented
+    /// (preamble/sync/RxDone counters, decoded device errors, noise-floor heartbeat).
+    Sx1262Rx {
+        #[arg(long, default_value = "/dev/spidev0.0")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        /// GPIO holding the antenna switch in receive (Waveshare HAT: BCM6, HIGH=RX).
+        #[arg(long, default_value_t = 6)]
+        rf_switch: u8,
+        /// Drive the RF-switch GPIO low instead of high.
+        #[arg(long)]
+        rf_switch_low: bool,
+        /// Do not let the chip drive DIO2 as the antenna-switch control.
+        #[arg(long)]
+        no_dio2_rf_switch: bool,
+        /// Sync word bytes to match (3 = 54 3D 54, 2 = 54 3D).
+        #[arg(long, default_value_t = 3)]
+        sync_bytes: u8,
+        /// Preamble bits required before sync is sought; 0 disables the gate.
+        #[arg(long, default_value_t = 8)]
+        preamble_detect_bits: u8,
+        /// Override the sync word, as hex (e.g. 5555 to lock on the raw preamble).
+        #[arg(long)]
+        sync_hex: Option<String>,
+        /// Carrier frequency in Hz.
+        #[arg(long, default_value_t = 868_950_000)]
+        freq_hz: u32,
+        /// Write received frames as hex lines to this file (replay-compatible).
+        #[arg(long)]
+        capture: Option<String>,
+        #[arg(long, default_value_t = 120)]
+        seconds: u64,
+    },
     /// Run the mock backend Device Manager: watch the gateway's data topic and answer
     /// op:startup / op:profile_request with op:profile messages from a catalog file.
     /// Stand-in for the real Device Manager (vendor-layers §7.2); serves model names
@@ -221,7 +409,8 @@ fn main() -> Result<()> {
             config,
             seconds,
             count,
-        } => run_capture(&config, &out, seconds, count),
+            device,
+        } => run_capture(&config, &out, seconds, count, device),
         Cmd::DumpRegs { config } => run_dumpregs(&config),
         Cmd::ProbeRaw {
             out,
@@ -250,6 +439,129 @@ fn main() -> Result<()> {
         } => run_sweep(&config, &db, seconds),
         Cmd::Import { db, from } => run_import(&db, &from),
         Cmd::ImportKeys { db, from_config } => run_import_keys(&db, &from_config),
+        Cmd::Sx1262Probe {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            dio2,
+            reset,
+            tcxo_mv,
+        } => run_sx1262_probe(&spidev, nss, busy, dio1, dio2, reset, tcxo_mv),
+        Cmd::LorawanJoin {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            creds,
+            capture,
+            seconds,
+        } => run_lorawan_join(
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            &creds,
+            capture.as_deref(),
+            seconds,
+        ),
+        Cmd::LoraTx {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            bw,
+            private_sync,
+            power,
+            count,
+            interval_ms,
+        } => run_lora_tx(
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            bw,
+            private_sync,
+            power,
+            count,
+            interval_ms,
+        ),
+        Cmd::LoraRx {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            bw,
+            sweep,
+            hunt_e22,
+            dwell,
+            private_sync,
+            no_rx_boost,
+            capture,
+            seconds,
+        } => run_lora_rx(
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            bw,
+            sweep,
+            hunt_e22,
+            dwell,
+            private_sync,
+            !no_rx_boost,
+            capture,
+            seconds,
+        ),
+        Cmd::Sx1262Rx {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            rf_switch,
+            rf_switch_low,
+            no_dio2_rf_switch,
+            sync_bytes,
+            preamble_detect_bits,
+            sync_hex,
+            freq_hz,
+            capture,
+            seconds,
+        } => run_sx1262_rx(
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            rf_switch,
+            !rf_switch_low,
+            !no_dio2_rf_switch,
+            sync_bytes,
+            preamble_detect_bits,
+            sync_hex,
+            freq_hz,
+            capture,
+            seconds,
+        ),
         Cmd::MockBackend {
             config,
             catalog,
@@ -419,6 +731,16 @@ fn run_monitor(
         .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
         .and_then(|d| d.spidev.clone())
         .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
+    let radio_driver = cfg
+        .devices
+        .values()
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
+        .and_then(|d| d.driver.clone());
+    let lora_listen = cfg
+        .devices
+        .values()
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
+        .and_then(|d| d.lora_listen.clone());
 
     // Shared keystore: seeded from config + optional `--keys` file, then fed live
     // from the MQTT control topic exactly as the C++ metermon is.
@@ -655,8 +977,18 @@ fn run_monitor(
             });
         }
 
-        let mut radio = source::Rfm69Source::open(&spidev).await?;
+        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
+        radio.set_lora_listen(lora_listen.clone());
         radio.start().await?;
+        if let Some(l) = &lora_listen {
+            log::info!(
+                "lora-listen: {}s window every {}s over {} channels x {} SFs",
+                l.window_secs,
+                l.period_secs,
+                l.freqs_hz.len(),
+                l.sfs.len()
+            );
+        }
         log::info!("metermon-rs monitor on {spidev} — reporting every {report_secs}s");
 
         let mut stats: BTreeMap<u32, MeterStat> = BTreeMap::new();
@@ -685,8 +1017,46 @@ fn run_monitor(
             if shutdown.load(Ordering::SeqCst) {
                 break;
             }
-            if let Some((frame, rssi, freq_offset)) = radio.poll().await? {
+            if let Some(sf) = radio.poll().await? {
                 last_frame_at = Some(Instant::now()); // any received frame proves RX is alive
+                let (frame, rssi, freq_offset) = match sf {
+                    source::SourceFrame::Wmbus {
+                        bytes,
+                        rssi_dbm,
+                        freq_off_hz,
+                    } => (bytes, rssi_dbm, freq_off_hz),
+                    source::SourceFrame::Lora {
+                        bytes,
+                        rssi_dbm,
+                        snr_db,
+                        freq_hz,
+                        sf,
+                    } => {
+                        // LoRa frames are not wM-Bus: log + publish raw, skip the
+                        // wM-Bus decode path entirely.
+                        log::info!(
+                            "LORA frame {}B rssi={rssi_dbm}dBm snr={snr_db:.1}dB {:.3}MHz SF{sf}: {}",
+                            bytes.len(),
+                            freq_hz as f64 / 1e6,
+                            hex::encode(&bytes)
+                        );
+                        let msg = serde_json::json!({
+                            "gwid": cfg.gwid,
+                            "mode": "lora",
+                            "freq_hz": freq_hz,
+                            "sf": sf,
+                            "rssi_dbm": rssi_dbm,
+                            "snr_db": snr_db,
+                            "raw_hex": hex::encode(&bytes),
+                        });
+                        if let Some(p) = publisher.as_mut() {
+                            if let Err(e) = p.publish_lora(&msg) {
+                                log::warn!("lora publish failed: {e}");
+                            }
+                        }
+                        continue;
+                    }
+                };
                 let (v, has_key) = {
                     let k = keys.lock().unwrap();
                     let v = {
@@ -812,7 +1182,7 @@ fn run_monitor(
                     uptime_secs: uptime,
                     radio_opmode: opmode,
                     radio_state: opmode
-                        .map(|o| health::RadioState::from_opmode(o).as_str())
+                        .map(|o| radio.decode_state(o).as_str())
                         .unwrap_or("unknown"),
                     frames_per_min: if uptime > 0 {
                         total as f64 * 60.0 / uptime as f64
@@ -887,7 +1257,8 @@ fn run_monitor(
                     Err(e) => log::warn!("airwave sweep failed: {e}"),
                 }
                 // Always restore C reception.
-                radio = source::Rfm69Source::open(&spidev).await?;
+                radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
+                radio.set_lora_listen(lora_listen.clone());
                 radio.start().await?;
                 last_sweep = Instant::now();
             }
@@ -909,6 +1280,345 @@ fn run_monitor(
         log::info!("metermon-rs monitor stopped cleanly");
         Ok(())
     })
+}
+
+/// Load provisioned join credentials: DevEUI (display order) -> AppKey hex.
+#[cfg(feature = "radio")]
+fn load_join_creds(path: &str) -> Result<Vec<join_responder::JoinCredential>> {
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&text)?;
+    let mut out = Vec::new();
+    for (eui, key) in map {
+        // DevEUIs are written the way people read them (big-endian) and transmitted
+        // reversed, so convert once here rather than at every comparison.
+        let eui_bytes = hex::decode(eui.replace([':', '-'], ""))
+            .map_err(|e| anyhow::anyhow!("DevEUI {eui}: {e}"))?;
+        let key_bytes = hex::decode(&key).map_err(|e| anyhow::anyhow!("AppKey for {eui}: {e}"))?;
+        if eui_bytes.len() != 8 || key_bytes.len() != 16 {
+            anyhow::bail!("{eui}: DevEUI must be 8 bytes and AppKey 16");
+        }
+        let mut dev_eui_le = [0u8; 8];
+        for (i, b) in eui_bytes.iter().rev().enumerate() {
+            dev_eui_le[i] = *b;
+        }
+        let mut app_key = [0u8; 16];
+        app_key.copy_from_slice(&key_bytes);
+        out.push(join_responder::JoinCredential {
+            dev_eui_le,
+            app_key,
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_lorawan_join(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    freq_hz: u32,
+    sf: u8,
+    creds_path: &str,
+    capture: Option<&str>,
+    seconds: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    let creds = load_join_creds(creds_path)?;
+    let mut responder = join_responder::JoinResponder::new(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        freq_hz,
+        sf,
+        creds,
+    )?;
+    if let Some(path) = capture {
+        responder.set_capture(path)?;
+        println!("capturing frames to {path}");
+    }
+    responder.run(
+        seconds,
+        |j| {
+            println!(
+                "  provisioning chain: {} joined as {:08X}",
+                j.dev_eui, j.dev_addr
+            );
+        },
+        |dev_addr, fcnt, payload, rssi, snr| {
+            println!(
+                "uplink {dev_addr:08X} fcnt {fcnt} rssi {rssi} dBm snr {snr:.1} dB: {}",
+                hex::encode(payload)
+            );
+            // The payload is OMS/wM-Bus records, so it goes through the same record
+            // parser as wired and wireless M-Bus — the transport changes, the decode
+            // path does not.
+            let mut rest = payload;
+            while !rest.is_empty() {
+                match mbus_rs::payload::record::parse_variable_record_consumed(rest) {
+                    Ok((rec, used)) if used > 0 => {
+                        println!(
+                            "    {} = {} {}",
+                            rec.quantity,
+                            match &rec.value {
+                                mbus_rs::payload::record::MBusRecordValue::Numeric(n) =>
+                                    format!("{n}"),
+                                mbus_rs::payload::record::MBusRecordValue::String(s) => s.clone(),
+                            },
+                            rec.unit
+                        );
+                        rest = &rest[used..];
+                    }
+                    Ok(_) => break,
+                    Err(e) => {
+                        println!("    record parse stopped: {e}");
+                        break;
+                    }
+                }
+            }
+        },
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_lorawan_join(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _freq_hz: u32,
+    _sf: u8,
+    _creds_path: &str,
+    _capture: Option<&str>,
+    _seconds: u64,
+) -> Result<()> {
+    bail_no_radio("lorawan-join")
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_lora_tx(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    freq_hz: u32,
+    sf: u8,
+    bw: u32,
+    private_sync: bool,
+    power: i8,
+    count: u32,
+    interval_ms: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    lora_rx::transmit(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        freq_hz,
+        sf,
+        bw,
+        private_sync,
+        power,
+        count,
+        interval_ms,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_lora_tx(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _freq_hz: u32,
+    _sf: u8,
+    _bw: u32,
+    _private_sync: bool,
+    _power: i8,
+    _count: u32,
+    _interval_ms: u64,
+) -> Result<()> {
+    bail_no_radio("lora-tx")
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_lora_rx(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    freq_hz: u32,
+    sf: u8,
+    bw: u32,
+    sweep: bool,
+    hunt_e22: bool,
+    dwell: u64,
+    private_sync: bool,
+    rx_boost: bool,
+    capture: Option<String>,
+    seconds: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    lora_rx::run(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        freq_hz,
+        sf,
+        bw,
+        sweep,
+        hunt_e22,
+        dwell,
+        private_sync,
+        rx_boost,
+        capture,
+        seconds,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_lora_rx(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _freq_hz: u32,
+    _sf: u8,
+    _bw: u32,
+    _sweep: bool,
+    _hunt_e22: bool,
+    _dwell: u64,
+    _private_sync: bool,
+    _rx_boost: bool,
+    _capture: Option<String>,
+    _seconds: u64,
+) -> Result<()> {
+    bail_no_radio("lora-rx")
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_sx1262_rx(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    rf_switch: u8,
+    rf_switch_high: bool,
+    dio2_rf_switch: bool,
+    sync_bytes: u8,
+    preamble_detect_bits: u8,
+    sync_hex: Option<String>,
+    freq_hz: u32,
+    capture: Option<String>,
+    seconds: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    sx1262_rx::run(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        Some(rf_switch),
+        rf_switch_high,
+        dio2_rf_switch,
+        sync_bytes,
+        preamble_detect_bits,
+        sync_hex,
+        freq_hz,
+        capture,
+        seconds,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_sx1262_rx(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _rf_switch: u8,
+    _rf_switch_high: bool,
+    _dio2_rf_switch: bool,
+    _sync_bytes: u8,
+    _preamble_detect_bits: u8,
+    _sync_hex: Option<String>,
+    _freq_hz: u32,
+    _capture: Option<String>,
+    _seconds: u64,
+) -> Result<()> {
+    bail_no_radio("sx1262-rx")
+}
+
+#[cfg(feature = "radio")]
+fn run_sx1262_probe(
+    spidev: &str,
+    nss: Option<u8>,
+    busy: u8,
+    dio1: u8,
+    dio2: Option<u8>,
+    reset: u8,
+    tcxo_mv: Option<u32>,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    sx1262_probe::run(
+        spidev,
+        GpioPins {
+            nss,
+            busy,
+            dio1,
+            dio2,
+            reset: Some(reset),
+        },
+        tcxo_mv,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+fn run_sx1262_probe(
+    _spidev: &str,
+    _nss: Option<u8>,
+    _busy: u8,
+    _dio1: u8,
+    _dio2: Option<u8>,
+    _reset: u8,
+    _tcxo_mv: Option<u32>,
+) -> Result<()> {
+    bail_no_radio("sx1262-probe")
 }
 
 /// Condense a decoded frame's records into a short human-readable reading, e.g.
@@ -1183,6 +1893,8 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
         .spidev
         .clone()
         .ok_or_else(|| anyhow::anyhow!("WMBUS device has no spidev"))?;
+    let radio_driver = device.driver.clone();
+    let lora_listen = device.lora_listen.clone();
 
     let shadow_topic = shadow.then(|| format!("{}-rust", cfg.mqtt.data_topic));
     // Shared keystore: fed live from the control topic exactly as metermon is.
@@ -1194,7 +1906,8 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        let mut radio = source::Rfm69Source::open(&spidev).await?;
+        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
+        radio.set_lora_listen(lora_listen.clone());
         let mut pub_ = publish::Publisher::connect(&cfg.mqtt, shadow_topic.as_deref(), None)?;
 
         // Subscribe to meter/control/<gwid> and install keys from op:key messages.
@@ -1214,7 +1927,23 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
         );
         radio.start().await?;
         loop {
-            if let Some((frame, _rssi, _off)) = radio.poll().await? {
+            if let Some(sf) = radio.poll().await? {
+                let frame = match sf {
+                    source::SourceFrame::Wmbus { bytes, .. } => bytes,
+                    source::SourceFrame::Lora {
+                        bytes,
+                        rssi_dbm,
+                        snr_db,
+                        ..
+                    } => {
+                        log::info!(
+                            "LORA frame {}B rssi={rssi_dbm}dBm snr={snr_db:.1}dB: {}",
+                            bytes.len(),
+                            hex::encode(&bytes)
+                        );
+                        continue;
+                    }
+                };
                 let decoded = {
                     let k = keys.lock().unwrap();
                     decode::decode_frame(&frame, &cfg, &k)
@@ -1236,7 +1965,13 @@ fn run_live(_config_path: &str, _shadow: bool) -> Result<()> {
 
 /// Capture raw frames from the radio to a hex file (no decode, no MQTT).
 #[cfg(feature = "radio")]
-fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Result<()> {
+fn run_capture(
+    config_path: &str,
+    out: &str,
+    seconds: u64,
+    count: usize,
+    device: Option<u32>,
+) -> Result<()> {
     use std::io::Write;
 
     let cfg = Config::load(config_path)?;
@@ -1246,10 +1981,15 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
         .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
         .and_then(|d| d.spidev.clone())
         .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
+    let radio_driver = cfg
+        .devices
+        .values()
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
+        .and_then(|d| d.driver.clone());
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        let mut radio = source::Rfm69Source::open(&spidev).await?;
+        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
         radio.start().await?;
         let mut file = std::fs::File::create(out)?;
         writeln!(
@@ -1263,12 +2003,33 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
         while n < count && tokio::time::Instant::now() < deadline {
             let remaining = deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, radio.poll()).await {
-                Ok(Ok(Some((frame, rssi, off)))) => {
+                Ok(Ok(Some(source::SourceFrame::Lora { bytes, .. }))) => {
+                    log::info!(
+                        "LORA frame ({}B) — not written to a wM-Bus capture",
+                        bytes.len()
+                    );
+                }
+                Ok(Ok(Some(source::SourceFrame::Wmbus {
+                    bytes: frame,
+                    rssi_dbm: rssi,
+                    freq_off_hz: off,
+                }))) => {
+                    // Filter before counting, so --count bounds the frames actually
+                    // wanted rather than whatever the band happened to be doing.
+                    let addr = mbus_rs::wmbus::mode_c::decode_mode_c(&frame)
+                        .ok()
+                        .map(|f| f.device_address);
+                    if let Some(want) = device {
+                        if addr != Some(want) {
+                            continue;
+                        }
+                    }
                     writeln!(file, "{}", hex::encode(&frame))?;
                     file.flush()?;
                     n += 1;
                     log::info!(
-                        "frame {n}: {} bytes rssi={rssi}dBm off={off}Hz  {}",
+                        "frame {n}: meter={} {} bytes rssi={rssi}dBm off={off}Hz  {}",
+                        addr.map(|a| a.to_string()).unwrap_or("?".into()),
                         frame.len(),
                         hex::encode(&frame)
                     );
@@ -1286,7 +2047,13 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
 }
 
 #[cfg(not(feature = "radio"))]
-fn run_capture(_config_path: &str, _out: &str, _seconds: u64, _count: usize) -> Result<()> {
+fn run_capture(
+    _config_path: &str,
+    _out: &str,
+    _seconds: u64,
+    _count: usize,
+    _device: Option<u32>,
+) -> Result<()> {
     bail_no_radio("capture")
 }
 

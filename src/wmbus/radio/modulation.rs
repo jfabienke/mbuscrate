@@ -38,8 +38,8 @@
 //! let mod_params = ModulationParams::Gfsk {
 //!     params: GfskModParams {
 //!         bitrate: 100_000,        // 100 kbps
-//!         modulation_shaping: 1,   // Gaussian 0.5
-//!         bandwidth: 156,          // 156 kHz RX bandwidth
+//!         modulation_shaping: 0x09, // Gaussian BT=0.5
+//!         bandwidth: 234,          // 234 kHz double-sideband RX bandwidth
 //!         fdev: 50_000,            // 50 kHz frequency deviation
 //!     },
 //! };
@@ -51,6 +51,7 @@
 //!     crc_on: true,                        // Enable CRC
 //!     crc_type: CrcType::Byte2,            // 2-byte CRC
 //!     sync_word_len: 4,                    // 4-byte sync word
+//!     preamble_detect_bits: 16,            // 16-bit preamble detector gate
 //! };
 //! ```
 
@@ -139,10 +140,14 @@ pub struct GfskModParams {
     /// - 3: Gaussian BT=0.3 (better noise performance)
     pub modulation_shaping: u8,
 
-    /// Receiver bandwidth in kHz
+    /// Double-sideband receiver bandwidth in kHz.
+    ///
+    /// Mapped to the nearest supported setting at or above this value when the
+    /// parameters are written. Note the SX126x measures bandwidth double-sided, so
+    /// a 100 kbps signal with 50 kHz deviation wants ~234 kHz, not ~117.
     ///
     /// Should satisfy: BW ≥ 2 × (fdev + bitrate/2)
-    pub bandwidth: u8,
+    pub bandwidth: u16,
 
     /// Frequency deviation in Hz
     ///
@@ -194,6 +199,10 @@ pub enum PacketParams {
         crc_on: bool,
         crc_type: CrcType,
         sync_word_len: u8,
+        /// Preamble bits that must be seen before the sync word is looked for.
+        /// 0 disables the gate entirely and locks directly on the sync word.
+        /// Must be strictly smaller than the sync word length.
+        preamble_detect_bits: u8,
     },
     LoRa {
         /// LoRa-specific packet parameters

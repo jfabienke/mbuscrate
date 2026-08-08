@@ -32,6 +32,18 @@ impl RadioState {
         }
     }
 
+    /// Decode an SX126x GetStatus byte (chip mode in bits 6:4). The raw byte is
+    /// still reported as `radio_opmode`; only the interpretation differs per chip.
+    pub fn from_sx126x_status(status: u8) -> Self {
+        match (status >> 4) & 0x07 {
+            0x2 | 0x3 => RadioState::Standby,
+            0x4 => RadioState::FreqSynth,
+            0x5 => RadioState::Rx,
+            0x6 => RadioState::Tx,
+            _ => RadioState::Unknown,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             RadioState::Sleep => "sleep",

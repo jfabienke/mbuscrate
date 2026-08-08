@@ -189,27 +189,36 @@ pub fn decode_mode_c(raw: &[u8]) -> Result<WMBusLinkFrame, DecodeError> {
             remaining -= blklen as isize;
         }
     } else {
-        // Type B: one CRC over block 0 = `l - 1` bytes from the L-field.
+        // Type B: the L-field counts every byte after itself, CRCs included, so the
+        // frame's extent is `2 + l` (type byte + L byte + l counted bytes) and
+        // anything beyond that is not frame. Sizing from the buffer instead of the
+        // L-field breaks under fixed-length radio reads: the trailing noise gets
+        // CRC-checked as a phantom second block and poisons every type B frame.
         if l < 1 {
             return Err(DecodeError::InvalidLength { length: raw[1] });
         }
-        let b0 = l - 1;
-        if 1 + b0 + CRC_LEN > raw.len() {
+        let frame_end = 2 + l;
+        if frame_end > raw.len() {
             return Err(DecodeError::BufferTooShort {
-                needed: 1 + b0 + CRC_LEN,
+                needed: frame_end,
                 actual: raw.len(),
             });
         }
+        // The first CRC covers at most 128 bytes (L through the 115th data byte,
+        // EN 13757-4 frame format B); short telegrams — everything this fleet
+        // sends, and all the reference decoder ever handled — are one block.
+        let b0 = (l - 1).min(128);
         crc_ok = verify_block(&raw[1..1 + b0], &raw[1 + b0..1 + b0 + CRC_LEN]);
         // Payload (CI onward) is the tail of block 0, after the 10-byte header.
         if 1 + b0 > 1 + HEADER_LEN {
             payload.extend_from_slice(&raw[1 + HEADER_LEN..1 + b0]);
         }
-        // Optional block 2 (with its own trailing CRC) for long telegrams.
+        // Second block (own trailing CRC) only when the L-field extends past the
+        // first block's capacity.
         let after = 1 + b0 + CRC_LEN;
-        if after + CRC_LEN <= raw.len() {
-            let b2 = &raw[after..raw.len() - CRC_LEN];
-            if !verify_block(b2, &raw[raw.len() - CRC_LEN..]) {
+        if frame_end > after {
+            let b2 = &raw[after..frame_end - CRC_LEN];
+            if !verify_block(b2, &raw[frame_end - CRC_LEN..frame_end]) {
                 crc_ok = false;
             }
             payload.extend_from_slice(b2);
@@ -252,6 +261,26 @@ mod tests {
         assert_eq!(f.ci(), Some(0x8D));
         // Real-frame CRC verification (Phase 1.3): the canonical CRC validates it.
         assert!(f.crc_ok);
+    }
+
+    #[test]
+    fn type_b_ignores_trailing_noise_from_fixed_length_reads() {
+        // The same real frame as above, padded the way a fixed-length radio read
+        // delivers it: the frame followed by whatever the receiver sliced out of
+        // noise. The L-field bounds the frame, so the padding must change nothing —
+        // sizing block 2 from the buffer instead treated this noise as a phantom
+        // block and failed CRC on every type B frame the SX1262 received.
+        let mut raw = hex::decode(
+            "3d25442d2c444464741b168d208d3048a121f6597959d56873b609a439b99d58531a8a726d9f0c",
+        )
+        .unwrap();
+        let exact = decode_mode_c(&raw).unwrap();
+        raw.resize(255, 0x00);
+        raw[100] = 0xA7; // arbitrary non-zero garbage inside the padding
+        let padded = decode_mode_c(&raw).unwrap();
+        assert!(padded.crc_ok);
+        assert_eq!(padded.payload, exact.payload);
+        assert_eq!(padded.device_address, exact.device_address);
     }
 
     #[test]

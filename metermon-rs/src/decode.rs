@@ -16,6 +16,8 @@ use mbus_rs::wmbus::compact_frame::CompactLayoutCache;
 use mbus_rs::wmbus::ell;
 use mbus_rs::wmbus::frame_decode::FrameType;
 use mbus_rs::wmbus::mode_c::decode_mode_c;
+use mbus_rs::wmbus::oms;
+use mbus_rs::wmbus::status::decode_status_byte;
 use mbus_rs::wmbus::AesKey;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
@@ -133,33 +135,10 @@ pub fn decode_frame_with_cache(
             decode_transport(obj, ci, after_ci, cache, meterid, frame.crc_ok, &ctx);
         }
         // Short TPL header (OMS 7.2.4): ACC, STS, Configuration Word, then payload.
-        0x7A => {
-            if after_ci.len() < 4 {
-                obj.insert("error".into(), json!("short header truncated"));
-                return out;
-            }
-            let sts = after_ci[1];
-            let cw = u16::from_le_bytes([after_ci[2], after_ci[3]]);
-            let mode = (cw >> 8) & 0x1F; // mode from CW, not CI (matches epulse)
-            obj.insert("status".into(), json!(sts));
-            obj.insert("mode".into(), json!(mode));
-            let ciphertext = &after_ci[4..];
-            if mode == 0 {
-                obj.insert("encrypted".into(), json!(false));
-                insert_records(obj, ciphertext, &ctx);
-            } else {
-                obj.insert("encrypted".into(), json!(true));
-                obj.insert("ciphertext_hex".into(), json!(hex::encode(ciphertext)));
-                obj.insert(
-                    "decrypt".into(),
-                    json!(if keys.get(meterid).is_some() {
-                        format!("mode {mode} decrypt pending Phase 1.4")
-                    } else {
-                        "no key for meter".into()
-                    }),
-                );
-            }
-        }
+        0x7A => decode_tpl(obj, after_ci, 0, &frame, keys, meterid, &ctx),
+        // Long TPL header: an 8-byte address repeat precedes ACC/STS/CW. Same body,
+        // four bytes further in — the offset the crate's find_ci_offset never handled.
+        0x72 => decode_tpl(obj, after_ci, 8, &frame, keys, meterid, &ctx),
         // Compact frame — records keyed by a format signature learned elsewhere.
         0x79 => {
             obj.insert("encrypted".into(), json!(false));
@@ -191,11 +170,16 @@ pub fn decode_frame_with_cache(
                 }
                 return out;
             }
-            let Some(hexkey) = keys.get(meterid) else {
+            let mfr = id_to_manufacturer(frame.manufacturer_id);
+            let Some((hexkey, key_source)) = keys.resolve(meterid, &mfr) else {
                 obj.insert("ciphertext_hex".into(), json!(hex::encode(after_ci)));
                 obj.insert("decrypt".into(), json!("no key for meter"));
                 return out;
             };
+            // Record which key opened it: a reading that only decrypts under a
+            // published factory default says the device was never given a unique
+            // one, which an operator should be able to see rather than infer.
+            obj.insert("key_source".into(), json!(key_source.as_str()));
             match AesKey::from_hex(hexkey)
                 .map_err(|e| e.to_string())
                 .and_then(|k| {
@@ -227,6 +211,120 @@ pub fn decode_frame_with_cache(
     }
 
     out
+}
+
+/// Decode an OMS TPL-header payload (short CI 0x7A or long CI 0x72), decrypting a
+/// mode-5 body when a key is held.
+///
+/// `addr_prefix` is the length of the address repeat before ACC — 0 for the short
+/// header, 8 for the long. The IV always uses the *link-layer* address
+/// (`frame.link_header`), not the TPL repeat, matching the epulse reference.
+#[allow(clippy::too_many_arguments)]
+fn decode_tpl(
+    obj: &mut serde_json::Map<String, Value>,
+    after_ci: &[u8],
+    addr_prefix: usize,
+    frame: &mbus_rs::wmbus::mode_c::WMBusLinkFrame,
+    keys: &KeyStore,
+    meterid: u32,
+    ctx: &DecodeContext,
+) {
+    // ACC, STS, CW(2) follow the optional address prefix.
+    if after_ci.len() < addr_prefix + 4 {
+        obj.insert("error".into(), json!("TPL header truncated"));
+        return;
+    }
+    let acc = after_ci[addr_prefix];
+    let sts = after_ci[addr_prefix + 1];
+    let cw = u16::from_le_bytes([after_ci[addr_prefix + 2], after_ci[addr_prefix + 3]]);
+    let mode = (cw >> 8) & 0x1F; // mode is in the config word, never the CI byte
+    obj.insert("status".into(), json!(sts));
+    // Bit-decode the cleartext status byte. The standard flags (bits 4:0) are named
+    // per EN 13757-3; the manufacturer bits (7:5) are reported raw, not guessed,
+    // since their meaning is vendor-defined (see wmbus::status).
+    let st = decode_status_byte(sts);
+    if !st.flags.is_empty() {
+        obj.insert("status_flags".into(), json!(st.flags));
+    }
+    if st.manufacturer_bits != 0 {
+        obj.insert(
+            "status_mfr_bits".into(),
+            json!(format!("0b{:03b}", st.manufacturer_bits)),
+        );
+    }
+    obj.insert("mode".into(), json!(mode));
+    let body = &after_ci[addr_prefix + 4..];
+
+    if mode == 0 {
+        obj.insert("encrypted".into(), json!(false));
+        insert_records(obj, body, ctx);
+        return;
+    }
+    obj.insert("encrypted".into(), json!(true));
+    if mode != 5 {
+        // Only Security Profile A (mode 5) is implemented; 7/9/13 would go here.
+        obj.insert("ciphertext_hex".into(), json!(hex::encode(body)));
+        obj.insert("decrypt".into(), json!(format!("unsupported mode {mode}")));
+        return;
+    }
+
+    // The config word's block count bounds the ciphertext; trailing bytes, if any,
+    // are unencrypted. Fall back to the whole body rounded to a block boundary.
+    let num_blocks = ((cw >> 4) & 0x0F) as usize;
+    let enc_len = if num_blocks > 0 {
+        (num_blocks * 16).min(body.len())
+    } else {
+        body.len() - (body.len() % 16)
+    };
+    let ciphertext = &body[..enc_len];
+
+    let mfr = id_to_manufacturer(frame.manufacturer_id);
+    let Some((hexkey, key_source)) = keys.resolve(meterid, &mfr) else {
+        obj.insert("ciphertext_hex".into(), json!(hex::encode(ciphertext)));
+        obj.insert("decrypt".into(), json!("no key for meter"));
+        return;
+    };
+    let key = match AesKey::from_hex(hexkey) {
+        Ok(k) => k,
+        Err(e) => {
+            obj.insert("decrypt".into(), json!(format!("bad key: {e}")));
+            return;
+        }
+    };
+    match oms::decrypt_mode5_cbc(ciphertext, &frame.link_header, acc, &key) {
+        Ok(plain) if oms::decrypted_ok(&plain) => {
+            obj.insert("decrypted".into(), json!(true));
+            obj.insert("key_source".into(), json!(key_source.as_str()));
+            // A frame that only opens under a published factory default is a device
+            // that was deployed but never personalised — worth flagging plainly, not
+            // burying, so an operator can find exposed meters.
+            if key_source == crate::keystore::KeySource::FactoryDefault {
+                obj.insert(
+                    "provisioning".into(),
+                    json!("UNPROVISIONED: factory-default key"),
+                );
+            }
+            insert_records(obj, &plain, ctx);
+        }
+        Ok(_) => {
+            // Decrypted cleanly but no idle-fill marker: the key was wrong. Never
+            // surfaced as records — a wrong-key plaintext is plausible garbage.
+            obj.insert("decrypted".into(), json!(false));
+            obj.insert("ciphertext_hex".into(), json!(hex::encode(ciphertext)));
+            obj.insert(
+                "decrypt".into(),
+                json!(format!(
+                    "wrong key ({}): no 2F 2F marker",
+                    key_source.as_str()
+                )),
+            );
+        }
+        Err(e) => {
+            obj.insert("decrypted".into(), json!(false));
+            obj.insert("ciphertext_hex".into(), json!(hex::encode(ciphertext)));
+            obj.insert("decrypt_error".into(), json!(e.to_string()));
+        }
+    }
 }
 
 /// Dispatch a transport-layer payload by its CI byte, learning record layouts from
@@ -308,7 +406,7 @@ fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &D
                         frame_quirks.push(q.quirk_id);
                     }
                 }
-                records.push(record_to_json(&rec));
+                records.push(record_to_json(&rec, &ctx.device.manufacturer, ctx.device.device_type));
                 offset += used;
             }
             Ok(_) => break, // no progress: stop rather than spin
@@ -332,18 +430,74 @@ fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &D
     }
 }
 
-fn record_to_json(rec: &MBusRecord) -> Value {
-    let value = match &rec.value {
-        MBusRecordValue::Numeric(n) => json!(n),
-        MBusRecordValue::String(s) => json!(s),
-    };
+fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Value {
+    let raw_hex = hex::encode(&rec.data[..rec.data_len]);
     let mut obj = json!({
         "dif": format!("0x{:02X}", rec.drh.dib.dif),
         "vif": format!("0x{:02X}", rec.drh.vib.vif),
-        "value": value,
-        "unit": rec.unit,
-        "quantity": rec.quantity,
+        "raw_hex": raw_hex,
     });
+
+    // An unknown VIF means we do not know the quantity, the unit, or even how to
+    // scale the bytes — so any "value" would be fabricated. This is precisely how
+    // the Zenner vendor field (DIF 0x55 / VIF 0xE7 chain) was reported as a
+    // nonsense 6.29e26 IEEE float: the data-field said "32-bit real", the VIF was
+    // unrecognised, and we decoded and emitted it anyway. Present the raw bytes and
+    // say plainly that the VIF is unknown, rather than dressing them as a reading.
+    if rec.quantity.is_empty() {
+        obj["unknown_vif"] = json!(true);
+        // A vendor field pending identification — the honest state until Zenner
+        // documentation or a non-zero capture pins its meaning (Evidence::Inferred).
+        if !rec.applied_quirks.is_empty() {
+            obj["quirks"] = json!(rec
+                .applied_quirks
+                .iter()
+                .map(|q| q.quirk_id)
+                .collect::<Vec<_>>());
+        }
+        return obj;
+    }
+
+    // Known VIF. A String value from a variable-length (LVAR) block is opaque
+    // vendor content, not text, unless it is actually printable — the 44-byte
+    // Zenner volume-history block otherwise renders as reversed mojibake. Keep the
+    // quantity/unit the VIF gives us, but let raw_hex carry the bytes.
+    match &rec.value {
+        MBusRecordValue::Numeric(n) => {
+            obj["value"] = json!(n);
+        }
+        MBusRecordValue::String(txt) => {
+            if txt.bytes().all(|b| (0x20..0x7F).contains(&b)) {
+                obj["value"] = json!(txt);
+            } else {
+                obj["value_opaque"] = json!(true);
+            }
+        }
+    }
+    obj["unit"] = json!(rec.unit);
+    obj["quantity"] = json!(rec.quantity);
+
+    // Zenner error-flags bit-decode. The field is a standard VIF 0xFD 0x17 record,
+    // but its bit meanings are vendor- and device-class-specific — so this is gated
+    // on both manufacturer and a confident class match, and a class we cannot pin
+    // leaves the raw value untouched rather than reading it off the wrong map.
+    if manufacturer == "ZRI"
+        && rec.drh.vib.vif == 0xFD
+        && rec.drh.vib.nvife >= 1
+        && rec.drh.vib.vife[0] == 0x17
+        && rec.data_len >= 2
+    {
+        if let Some(class) = mbus_rs::vendors::zenner::classify(device_type) {
+            let raw = u16::from_le_bytes([rec.data[0], rec.data[1]]);
+            if let Some(ef) = mbus_rs::vendors::zenner::decode_error_flags(class, None, raw) {
+                obj["error_flags"] = json!(ef.flags);
+                if !ef.undefined_bits.is_empty() {
+                    obj["error_flags_undefined_bits"] = json!(ef.undefined_bits);
+                }
+            }
+        }
+    }
+
     // A quirk-overridden reading is not the same fact as a standard one (P5): name
     // the quirk so two gateways that disagree can be audited.
     if !rec.applied_quirks.is_empty() {
@@ -511,5 +665,33 @@ mod tests {
     fn reports_decode_error_without_panicking() {
         let v = decode_frame(&[0x00, 0x01, 0x02], &empty_cfg(), &KeyStore::new());
         assert!(v.get("decode_error").is_some());
+    }
+
+    /// A record whose VIF we cannot resolve must present raw bytes and say so —
+    /// never a fabricated scalar. This is the defect the Zenner vendor field
+    /// exposed: DIF 0x55 (data field 5 = "32-bit real") with an unrecognised VIF
+    /// chain was decoded as an IEEE float and published as a nonsense 6.29e26.
+    #[test]
+    fn unknown_vif_record_is_raw_not_a_fabricated_reading() {
+        use mbus_rs::payload::record::parse_variable_record_consumed;
+        // DIF 0x05 (32-bit real), VIF chain 0xE7 0xC6 0x40 (unknown), 4 data bytes.
+        let (rec, _) =
+            parse_variable_record_consumed(&[0x05, 0xE7, 0xC6, 0x40, 0x11, 0x22, 0x33, 0x44])
+                .unwrap();
+        let j = record_to_json(&rec, "", 0);
+        assert_eq!(j["unknown_vif"], json!(true));
+        assert_eq!(j["raw_hex"], json!("11223344"));
+        assert!(
+            j.get("value").is_none(),
+            "an unknown VIF must not emit a decoded value"
+        );
+
+        // A known VIF (volume, 8-digit BCD) still decodes to a real reading.
+        let (vol, _) =
+            parse_variable_record_consumed(&[0x0C, 0x13, 0x34, 0x12, 0x00, 0x00]).unwrap();
+        let jv = record_to_json(&vol, "", 0);
+        assert_eq!(jv["quantity"], json!("Volume"));
+        assert!(jv.get("value").is_some());
+        assert!(jv.get("unknown_vif").is_none());
     }
 }

@@ -80,6 +80,49 @@ pub struct DeviceConfig {
     #[serde(rename = "type")]
     pub dev_type: String,
     pub spidev: Option<String>,
+    /// Radio driver for this device: "sx1262" (default) or "rfm69". The default
+    /// tracks the hardware on the gateway; the RFM69 HAT has been replaced by the
+    /// Waveshare SX1262 XXXM, but the driver remains selectable for other boards.
+    #[serde(default)]
+    pub driver: Option<String>,
+    /// Periodic LoRa listen windows carved out of wM-Bus receive (SX1262 only).
+    /// Absent = wM-Bus continuously, no switching.
+    #[serde(default, rename = "lora-listen")]
+    pub lora_listen: Option<LoraListenConfig>,
+}
+
+/// Dual-mode cadence: how often, and for how long, the radio leaves the wM-Bus
+/// profile to listen for LoRa. Each window uses the next (frequency, SF) from the
+/// rotation, so coverage of the sweep matrix accumulates across windows rather
+/// than costing one long outage.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct LoraListenConfig {
+    /// Seconds between window starts.
+    #[serde(default = "default_lora_period")]
+    pub period_secs: u64,
+    /// Seconds each window stays in LoRa.
+    #[serde(default = "default_lora_window")]
+    pub window_secs: u64,
+    /// Frequencies to rotate through (Hz). Default: the EU868 join channels.
+    #[serde(default = "default_lora_freqs")]
+    pub freqs_hz: Vec<u32>,
+    /// Spreading factors to rotate through. Default: SF12/9/7 — the join ladder's
+    /// most common rungs, slowest first.
+    #[serde(default = "default_lora_sfs")]
+    pub sfs: Vec<u8>,
+}
+
+fn default_lora_period() -> u64 {
+    120
+}
+fn default_lora_window() -> u64 {
+    8
+}
+fn default_lora_freqs() -> Vec<u32> {
+    vec![868_100_000, 868_300_000, 868_500_000]
+}
+fn default_lora_sfs() -> Vec<u8> {
+    vec![12, 9, 7]
 }
 
 impl Config {
