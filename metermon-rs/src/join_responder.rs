@@ -69,6 +69,7 @@ pub struct JoinResponder {
     sessions: HashMap<u32, SessionKeys>,
     next_dev_addr: u32,
     app_nonce: u32,
+    capture: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 impl JoinResponder {
@@ -92,6 +93,7 @@ impl JoinResponder {
             // 0x26xxxxxx is the conventional private-range DevAddr prefix.
             next_dev_addr: 0x2600_0001,
             app_nonce: 1,
+            capture: None,
         })
     }
 
@@ -163,6 +165,40 @@ impl JoinResponder {
         self.creds.iter().find(|c| &c.dev_eui_le == dev_eui_le)
     }
 
+    /// Capture every received frame as JSONL, for offline payload work.
+    ///
+    /// Records the ciphertext *and* the decrypted payload: the first lets a session
+    /// be replayed at protocol level, the second is what a vendor payload decoder is
+    /// developed against. Reverse-engineering a proprietary format from one-shot
+    /// console output is not something anyone should have to do twice.
+    pub fn set_capture(&mut self, path: &str) -> Result<()> {
+        self.capture = Some(std::io::BufWriter::new(
+            std::fs::File::create(path).with_context(|| format!("creating {path}"))?,
+        ));
+        Ok(())
+    }
+
+    fn record_capture(&mut self, kind: &str, raw: &[u8], plain: Option<&[u8]>, meta: &str) {
+        let Some(f) = self.capture.as_mut() else {
+            return;
+        };
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(
+            f,
+            "{{\"ts\":{ts},\"kind\":\"{kind}\",\"raw_hex\":\"{}\",\"plain_hex\":{},{meta}}}",
+            hex::encode(raw),
+            match plain {
+                Some(p) => format!("\"{}\"", hex::encode(p)),
+                None => "null".to_string(),
+            }
+        );
+        let _ = f.flush(); // a session that ends unexpectedly still leaves its frames
+    }
+
     /// Run until `seconds` elapse, answering joins and reporting uplinks.
     pub fn run(
         &mut self,
@@ -212,17 +248,41 @@ impl JoinResponder {
             let snr = pkt.lora.as_ref().map(|l| l.snr_db).unwrap_or(f32::NAN);
 
             if let Ok(jr) = JoinRequest::parse(&pkt.payload) {
+                let meta = format!(
+                    "\"dev_eui\":\"{}\",\"dev_nonce\":{},\"rssi_dbm\":{rssi},\"snr_db\":{snr:.1}",
+                    jr.dev_eui_display(),
+                    jr.dev_nonce
+                );
+                self.record_capture("join_request", &pkt.payload, None, &meta);
                 self.handle_join(jr, rx_at, rssi, snr, &mut on_join)?;
                 self.arm_uplink_rx()?;
                 continue;
             }
             match DataFrame::parse(&pkt.payload) {
-                Ok(df) if df.is_uplink() => self.handle_uplink(&df, rssi, snr, &mut on_uplink),
-                _ => println!(
-                    "  packet {}B rssi {rssi} dBm: neither a JoinRequest nor an uplink: {}",
-                    pkt.payload.len(),
-                    hex::encode(&pkt.payload)
-                ),
+                Ok(df) if df.is_uplink() => {
+                    let plain = self.sessions.get(&df.dev_addr).map(|k| {
+                        df.decrypt_payload(&k.nwk_skey, &k.app_skey, df.fcnt as u32)
+                    });
+                    let meta = format!(
+                        "\"dev_addr\":\"{:08X}\",\"fcnt\":{},\"fport\":{},\"rssi_dbm\":{rssi},\"snr_db\":{snr:.1}",
+                        df.dev_addr,
+                        df.fcnt,
+                        df.fport.map(|p| p.to_string()).unwrap_or("null".into())
+                    );
+                    self.record_capture("uplink", &pkt.payload, plain.as_deref(), &meta);
+                    self.handle_uplink(&df, rssi, snr, &mut on_uplink)
+                }
+                _ => {
+                    // Capture it anyway: an unrecognised frame is exactly what a new
+                    // vendor format looks like before it is understood.
+                    let meta = format!("\"rssi_dbm\":{rssi},\"snr_db\":{snr:.1}");
+                    self.record_capture("unparsed", &pkt.payload, None, &meta);
+                    println!(
+                        "  packet {}B rssi {rssi} dBm: neither a JoinRequest nor an uplink: {}",
+                        pkt.payload.len(),
+                        hex::encode(&pkt.payload)
+                    )
+                }
             }
         }
         Ok(())

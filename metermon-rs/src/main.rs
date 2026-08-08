@@ -283,6 +283,10 @@ enum Cmd {
         /// Keep it out of the repo; it holds real credentials.
         #[arg(long)]
         creds: String,
+        /// Write every received frame to this file as JSONL (ciphertext, decrypted
+        /// payload and metadata) for offline vendor-payload work.
+        #[arg(long)]
+        capture: Option<String>,
         #[arg(long, default_value_t = 300)]
         seconds: u64,
     },
@@ -447,8 +451,20 @@ fn main() -> Result<()> {
             freq_hz,
             sf,
             creds,
+            capture,
             seconds,
-        } => run_lorawan_join(&spidev, nss, busy, dio1, reset, freq_hz, sf, &creds, seconds),
+        } => run_lorawan_join(
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            &creds,
+            capture.as_deref(),
+            seconds,
+        ),
         Cmd::LoraTx {
             spidev,
             nss,
@@ -1292,6 +1308,7 @@ fn run_lorawan_join(
     freq_hz: u32,
     sf: u8,
     creds_path: &str,
+    capture: Option<&str>,
     seconds: u64,
 ) -> Result<()> {
     use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
@@ -1309,6 +1326,10 @@ fn run_lorawan_join(
         sf,
         creds,
     )?;
+    if let Some(path) = capture {
+        responder.set_capture(path)?;
+        println!("capturing frames to {path}");
+    }
     responder.run(
         seconds,
         |j| {
@@ -1363,6 +1384,7 @@ fn run_lorawan_join(
     _freq_hz: u32,
     _sf: u8,
     _creds_path: &str,
+    _capture: Option<&str>,
     _seconds: u64,
 ) -> Result<()> {
     bail_no_radio("lorawan-join")
