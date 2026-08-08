@@ -9,9 +9,9 @@
 
 use anyhow::{Context, Result};
 use mbus_rs::wmbus::radio::driver::{LoRaProfile, RadioProfile, Sx126xDriver};
-use mbus_rs::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, SpreadingFactor};
 use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
 use mbus_rs::wmbus::radio::hal::RaspberryPiHal;
+use mbus_rs::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, SpreadingFactor};
 use std::time::{Duration, Instant};
 
 /// Public LoRaWAN sync word. Private LoRa networks use the chip default 0x1424.
@@ -78,7 +78,11 @@ fn describe_lorawan(payload: &[u8]) -> String {
             } else {
                 "Down"
             };
-            let conf = if mtype >= 0b100 { "Confirmed" } else { "Unconfirmed" };
+            let conf = if mtype >= 0b100 {
+                "Confirmed"
+            } else {
+                "Unconfirmed"
+            };
             format!(
                 "{conf}Data{dir} dev_addr={:08X} fcnt={}",
                 u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]),
@@ -109,7 +113,11 @@ pub fn transmit(
     count: u32,
     interval_ms: u64,
 ) -> Result<()> {
-    let sync = if private_sync { 0x1424 } else { LORAWAN_PUBLIC_SYNC };
+    let sync = if private_sync {
+        0x1424
+    } else {
+        LORAWAN_PUBLIC_SYNC
+    };
     println!(
         "SX1262 LoRa transmit — {:.3} MHz SF{sf} BW{bw_khz} sync 0x{sync:04X} {power_dbm} dBm",
         freq_hz as f64 / 1e6
@@ -192,7 +200,11 @@ pub fn run(
     // The EU868 join channels every LoRaWAN device must use, crossed with the SF
     // ladder devices climb as joins go unanswered. Slow SFs get proportionally
     // more dwell because their airtime is longer and their duty cycle sparser.
-    let sync = if private_sync { 0x1424 } else { LORAWAN_PUBLIC_SYNC };
+    let sync = if private_sync {
+        0x1424
+    } else {
+        LORAWAN_PUBLIC_SYNC
+    };
     let schedule: Vec<SweepPoint> = if hunt_e22 {
         // E22 discovery: the module's air-rate presets map to undocumented
         // (SF, BW) pairs and its sync word is unverified, so cover the whole
@@ -257,7 +269,10 @@ pub fn run(
                 schedule.len()
             )
         } else {
-            format!("{:.3} MHz SF{sf} BW{bw_khz} · sync 0x{sync:04X}", freq_hz as f64 / 1e6)
+            format!(
+                "{:.3} MHz SF{sf} BW{bw_khz} · sync 0x{sync:04X}",
+                freq_hz as f64 / 1e6
+            )
         },
     );
 
@@ -273,7 +288,9 @@ pub fn run(
 
     let mut driver = Sx126xDriver::new(hal, 32_000_000);
     driver.calibrate(0x7F).context("calibrating")?;
-    driver.set_dio2_as_rf_switch(true).context("DIO2 RF switch")?;
+    driver
+        .set_dio2_as_rf_switch(true)
+        .context("DIO2 RF switch")?;
     // Boosted gain costs ~3 dB of headroom at the top of the range. Against a
     // bench transmitter arriving at -24 dBm the front end is already compressed,
     // and compression shows up as frames that demodulate into noise rather than
@@ -319,7 +336,11 @@ pub fn run(
                 point.sf,
                 point.bw_khz,
                 point.sync,
-                if point.implicit { "implicit" } else { "explicit" }
+                if point.implicit {
+                    "implicit"
+                } else {
+                    "explicit"
+                }
             );
         }
 

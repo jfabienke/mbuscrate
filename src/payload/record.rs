@@ -611,17 +611,17 @@ pub fn mbus_dif_datalength_lookup(dif: u8) -> usize {
         0x2 => 2,
         0x3 => 3,
         0x4 => 4,
-        0x5 => 6,
-        0x6 => 8,
-        0x7 => 0, // Special case
-        0x8 => 0, // Special case
+        0x5 => 4, // 32-bit real (IEEE-754 single) — 4 bytes, not 6
+        0x6 => 6, // 48-bit integer
+        0x7 => 8, // 64-bit integer — reading this as 0 desynced every later record
+        0x8 => 0, // selection for readout
         0x9 => 1,
         0xA => 2,
         0xB => 3,
         0xC => 4,
-        0xD => 0, // Variable length
+        0xD => 0, // variable length (LVAR): length byte handled separately
         0xE => 6,
-        0xF => 8,
+        0xF => 0, // special functions carry no fixed-length data
         _ => 0,
     }
 }
@@ -847,17 +847,17 @@ mod tests {
             (0x02, 2),
             (0x03, 3),
             (0x04, 4),
-            (0x05, 6),
-            (0x06, 8),
-            (0x07, 0), // Special case
-            (0x08, 0), // Special case
+            (0x05, 4), // 32-bit real
+            (0x06, 6), // 48-bit int
+            (0x07, 8), // 64-bit int
+            (0x08, 0), // selection for readout
             (0x09, 1),
             (0x0A, 2),
             (0x0B, 3),
             (0x0C, 4),
-            (0x0D, 0), // Variable length
+            (0x0D, 0), // variable length
             (0x0E, 6),
-            (0x0F, 8),
+            (0x0F, 0), // special functions
             (0x10, 0), // Out of range, defaults to 0
         ];
         for (dif, expected) in test_cases {

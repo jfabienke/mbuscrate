@@ -134,10 +134,10 @@ pub fn decode_frame_with_cache(
             decode_transport(obj, ci, after_ci, cache, meterid, frame.crc_ok, &ctx);
         }
         // Short TPL header (OMS 7.2.4): ACC, STS, Configuration Word, then payload.
-        0x7A => decode_tpl(obj, after_ci, 0, &frame, keys, meterid, cache, &ctx),
+        0x7A => decode_tpl(obj, after_ci, 0, &frame, keys, meterid, &ctx),
         // Long TPL header: an 8-byte address repeat precedes ACC/STS/CW. Same body,
         // four bytes further in — the offset the crate's find_ci_offset never handled.
-        0x72 => decode_tpl(obj, after_ci, 8, &frame, keys, meterid, cache, &ctx),
+        0x72 => decode_tpl(obj, after_ci, 8, &frame, keys, meterid, &ctx),
         // Compact frame — records keyed by a format signature learned elsewhere.
         0x79 => {
             obj.insert("encrypted".into(), json!(false));
@@ -226,7 +226,6 @@ fn decode_tpl(
     frame: &mbus_rs::wmbus::mode_c::WMBusLinkFrame,
     keys: &KeyStore,
     meterid: u32,
-    cache: &mut CompactLayoutCache,
     ctx: &DecodeContext,
 ) {
     // ACC, STS, CW(2) follow the optional address prefix.
@@ -286,7 +285,10 @@ fn decode_tpl(
             // that was deployed but never personalised — worth flagging plainly, not
             // burying, so an operator can find exposed meters.
             if key_source == crate::keystore::KeySource::FactoryDefault {
-                obj.insert("provisioning".into(), json!("UNPROVISIONED: factory-default key"));
+                obj.insert(
+                    "provisioning".into(),
+                    json!("UNPROVISIONED: factory-default key"),
+                );
             }
             insert_records(obj, &plain, ctx);
         }
@@ -297,7 +299,10 @@ fn decode_tpl(
             obj.insert("ciphertext_hex".into(), json!(hex::encode(ciphertext)));
             obj.insert(
                 "decrypt".into(),
-                json!(format!("wrong key ({}): no 2F 2F marker", key_source.as_str())),
+                json!(format!(
+                    "wrong key ({}): no 2F 2F marker",
+                    key_source.as_str()
+                )),
             );
         }
         Err(e) => {
@@ -412,17 +417,51 @@ fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &D
 }
 
 fn record_to_json(rec: &MBusRecord) -> Value {
-    let value = match &rec.value {
-        MBusRecordValue::Numeric(n) => json!(n),
-        MBusRecordValue::String(s) => json!(s),
-    };
+    let raw_hex = hex::encode(&rec.data[..rec.data_len]);
     let mut obj = json!({
         "dif": format!("0x{:02X}", rec.drh.dib.dif),
         "vif": format!("0x{:02X}", rec.drh.vib.vif),
-        "value": value,
-        "unit": rec.unit,
-        "quantity": rec.quantity,
+        "raw_hex": raw_hex,
     });
+
+    // An unknown VIF means we do not know the quantity, the unit, or even how to
+    // scale the bytes — so any "value" would be fabricated. This is precisely how
+    // the Zenner vendor field (DIF 0x55 / VIF 0xE7 chain) was reported as a
+    // nonsense 6.29e26 IEEE float: the data-field said "32-bit real", the VIF was
+    // unrecognised, and we decoded and emitted it anyway. Present the raw bytes and
+    // say plainly that the VIF is unknown, rather than dressing them as a reading.
+    if rec.quantity.is_empty() {
+        obj["unknown_vif"] = json!(true);
+        // A vendor field pending identification — the honest state until Zenner
+        // documentation or a non-zero capture pins its meaning (Evidence::Inferred).
+        if !rec.applied_quirks.is_empty() {
+            obj["quirks"] = json!(rec
+                .applied_quirks
+                .iter()
+                .map(|q| q.quirk_id)
+                .collect::<Vec<_>>());
+        }
+        return obj;
+    }
+
+    // Known VIF. A String value from a variable-length (LVAR) block is opaque
+    // vendor content, not text, unless it is actually printable — the 44-byte
+    // Zenner volume-history block otherwise renders as reversed mojibake. Keep the
+    // quantity/unit the VIF gives us, but let raw_hex carry the bytes.
+    match &rec.value {
+        MBusRecordValue::Numeric(n) => {
+            obj["value"] = json!(n);
+        }
+        MBusRecordValue::String(txt) => {
+            if txt.bytes().all(|b| (0x20..0x7F).contains(&b)) {
+                obj["value"] = json!(txt);
+            } else {
+                obj["value_opaque"] = json!(true);
+            }
+        }
+    }
+    obj["unit"] = json!(rec.unit);
+    obj["quantity"] = json!(rec.quantity);
     // A quirk-overridden reading is not the same fact as a standard one (P5): name
     // the quirk so two gateways that disagree can be audited.
     if !rec.applied_quirks.is_empty() {
@@ -590,5 +629,33 @@ mod tests {
     fn reports_decode_error_without_panicking() {
         let v = decode_frame(&[0x00, 0x01, 0x02], &empty_cfg(), &KeyStore::new());
         assert!(v.get("decode_error").is_some());
+    }
+
+    /// A record whose VIF we cannot resolve must present raw bytes and say so —
+    /// never a fabricated scalar. This is the defect the Zenner vendor field
+    /// exposed: DIF 0x55 (data field 5 = "32-bit real") with an unrecognised VIF
+    /// chain was decoded as an IEEE float and published as a nonsense 6.29e26.
+    #[test]
+    fn unknown_vif_record_is_raw_not_a_fabricated_reading() {
+        use mbus_rs::payload::record::parse_variable_record_consumed;
+        // DIF 0x05 (32-bit real), VIF chain 0xE7 0xC6 0x40 (unknown), 4 data bytes.
+        let (rec, _) =
+            parse_variable_record_consumed(&[0x05, 0xE7, 0xC6, 0x40, 0x11, 0x22, 0x33, 0x44])
+                .unwrap();
+        let j = record_to_json(&rec);
+        assert_eq!(j["unknown_vif"], json!(true));
+        assert_eq!(j["raw_hex"], json!("11223344"));
+        assert!(
+            j.get("value").is_none(),
+            "an unknown VIF must not emit a decoded value"
+        );
+
+        // A known VIF (volume, 8-digit BCD) still decodes to a real reading.
+        let (vol, _) =
+            parse_variable_record_consumed(&[0x0C, 0x13, 0x34, 0x12, 0x00, 0x00]).unwrap();
+        let jv = record_to_json(&vol);
+        assert_eq!(jv["quantity"], json!("Volume"));
+        assert!(jv.get("value").is_some());
+        assert!(jv.get("unknown_vif").is_none());
     }
 }

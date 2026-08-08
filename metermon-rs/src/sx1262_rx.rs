@@ -8,9 +8,9 @@
 
 use anyhow::{Context, Result};
 use mbus_rs::wmbus::mode_c::decode_mode_c;
+use mbus_rs::wmbus::radio::driver::Sx126xDriver;
 use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
 use mbus_rs::wmbus::radio::hal::{Hal, RaspberryPiHal};
-use mbus_rs::wmbus::radio::driver::Sx126xDriver;
 use std::time::{Duration, Instant};
 
 const OP_GET_STATUS: u8 = 0xC0;

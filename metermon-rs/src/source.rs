@@ -169,9 +169,7 @@ impl Rfm69Source {
 /// HIGH for the receive path in addition to DIO2 driving the other leg.
 #[cfg(feature = "radio")]
 pub struct Sx1262Source {
-    driver: mbus_rs::wmbus::radio::driver::Sx126xDriver<
-        mbus_rs::wmbus::radio::hal::RaspberryPiHal,
-    >,
+    driver: mbus_rs::wmbus::radio::driver::Sx126xDriver<mbus_rs::wmbus::radio::hal::RaspberryPiHal>,
     /// LoRa listen cadence; `None` = wM-Bus continuously.
     lora: Option<crate::config::LoraListenConfig>,
     /// Whether the radio currently runs the LoRa profile.
@@ -248,7 +246,10 @@ impl Sx1262Source {
     /// The next (frequency, SF) in the rotation. Frequencies advance fastest so one
     /// SF pass covers all channels before the ladder moves.
     fn next_point(&mut self) -> (u32, u8) {
-        let l = self.lora.as_ref().expect("rotation only runs with LoRa enabled");
+        let l = self
+            .lora
+            .as_ref()
+            .expect("rotation only runs with LoRa enabled");
         let freqs = &l.freqs_hz;
         let sfs = &l.sfs;
         let f = freqs[self.rotation % freqs.len().max(1)];
@@ -272,17 +273,18 @@ impl Sx1262Source {
         }
         if self.in_lora_window {
             // Window over: back to base wM-Bus.
-            self.driver.switch_profile(&RadioProfile::Wmbus(WmbusProfile::mode_c(
-                Self::FREQ_HZ,
-                Self::BITRATE,
-            )))?;
+            self.driver
+                .switch_profile(&RadioProfile::Wmbus(WmbusProfile::mode_c(
+                    Self::FREQ_HZ,
+                    Self::BITRATE,
+                )))?;
             self.driver.set_rx_boosted_gain(true)?;
             self.driver.set_rx_continuous()?;
             self.in_lora_window = false;
             // Anchor the next opening to this window's start, not its end, so the
             // cadence is the configured period rather than period + window.
-            self.window_boundary = now
-                + std::time::Duration::from_secs(l.period_secs.saturating_sub(l.window_secs));
+            self.window_boundary =
+                now + std::time::Duration::from_secs(l.period_secs.saturating_sub(l.window_secs));
             log::info!("lora window closed; wM-Bus RX resumed");
         } else {
             let (freq, sf_n) = self.next_point();
@@ -296,16 +298,17 @@ impl Sx1262Source {
                 11 => SpreadingFactor::SF11,
                 _ => SpreadingFactor::SF12,
             };
-            self.driver.switch_profile(&RadioProfile::LoRa(LoRaProfile {
-                frequency_hz: freq,
-                sf,
-                bw: LoRaBandwidth::BW125,
-                cr: CodingRate::CR4_5,
-                power_dbm: 14,
-                sync_word: Some(0x3444), // public LoRaWAN
-                implicit_header: false,
-            iq_inverted: false,
-            }))?;
+            self.driver
+                .switch_profile(&RadioProfile::LoRa(LoRaProfile {
+                    frequency_hz: freq,
+                    sf,
+                    bw: LoRaBandwidth::BW125,
+                    cr: CodingRate::CR4_5,
+                    power_dbm: 14,
+                    sync_word: Some(0x3444), // public LoRaWAN
+                    implicit_header: false,
+                    iq_inverted: false,
+                }))?;
             self.driver.set_rx_boosted_gain(true)?;
             self.driver.set_rx_continuous()?;
             self.in_lora_window = true;

@@ -18,7 +18,11 @@ mod config;
 mod decode;
 mod devices;
 mod health;
+#[cfg(feature = "radio")]
+mod join_responder;
 mod keystore;
+#[cfg(feature = "radio")]
+mod lora_rx;
 mod mock_backend;
 mod profiles;
 mod publish;
@@ -26,10 +30,6 @@ mod source;
 mod sweep;
 #[cfg(feature = "radio")]
 mod sx1262_probe;
-#[cfg(feature = "radio")]
-mod join_responder;
-#[cfg(feature = "radio")]
-mod lora_rx;
 #[cfg(feature = "radio")]
 mod sx1262_rx;
 
@@ -485,7 +485,17 @@ fn main() -> Result<()> {
             count,
             interval_ms,
         } => run_lora_tx(
-            &spidev, nss, busy, dio1, reset, freq_hz, sf, bw, private_sync, power, count,
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            bw,
+            private_sync,
+            power,
+            count,
             interval_ms,
         ),
         Cmd::LoraRx {
@@ -1275,8 +1285,7 @@ fn run_monitor(
 /// Load provisioned join credentials: DevEUI (display order) -> AppKey hex.
 #[cfg(feature = "radio")]
 fn load_join_creds(path: &str) -> Result<Vec<join_responder::JoinCredential>> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
     let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&text)?;
     let mut out = Vec::new();
     for (eui, key) in map {
@@ -1284,8 +1293,7 @@ fn load_join_creds(path: &str) -> Result<Vec<join_responder::JoinCredential>> {
         // reversed, so convert once here rather than at every comparison.
         let eui_bytes = hex::decode(eui.replace([':', '-'], ""))
             .map_err(|e| anyhow::anyhow!("DevEUI {eui}: {e}"))?;
-        let key_bytes =
-            hex::decode(&key).map_err(|e| anyhow::anyhow!("AppKey for {eui}: {e}"))?;
+        let key_bytes = hex::decode(&key).map_err(|e| anyhow::anyhow!("AppKey for {eui}: {e}"))?;
         if eui_bytes.len() != 8 || key_bytes.len() != 16 {
             anyhow::bail!("{eui}: DevEUI must be 8 bytes and AppKey 16");
         }
@@ -1996,7 +2004,10 @@ fn run_capture(
             let remaining = deadline - tokio::time::Instant::now();
             match tokio::time::timeout(remaining, radio.poll()).await {
                 Ok(Ok(Some(source::SourceFrame::Lora { bytes, .. }))) => {
-                    log::info!("LORA frame ({}B) — not written to a wM-Bus capture", bytes.len());
+                    log::info!(
+                        "LORA frame ({}B) — not written to a wM-Bus capture",
+                        bytes.len()
+                    );
                 }
                 Ok(Ok(Some(source::SourceFrame::Wmbus {
                     bytes: frame,

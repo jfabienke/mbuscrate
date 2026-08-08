@@ -260,9 +260,10 @@ impl JoinResponder {
             }
             match DataFrame::parse(&pkt.payload) {
                 Ok(df) if df.is_uplink() => {
-                    let plain = self.sessions.get(&df.dev_addr).map(|k| {
-                        df.decrypt_payload(&k.nwk_skey, &k.app_skey, df.fcnt as u32)
-                    });
+                    let plain = self
+                        .sessions
+                        .get(&df.dev_addr)
+                        .map(|k| df.decrypt_payload(&k.nwk_skey, &k.app_skey, df.fcnt as u32));
                     let meta = format!(
                         "\"dev_addr\":\"{:08X}\",\"fcnt\":{},\"fport\":{},\"rssi_dbm\":{rssi},\"snr_db\":{snr:.1}",
                         df.dev_addr,
