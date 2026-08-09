@@ -21,6 +21,7 @@ mod devices;
 mod health;
 #[cfg(feature = "radio")]
 mod join_responder;
+mod join_store;
 mod keystore;
 #[cfg(feature = "radio")]
 mod lora_rx;
@@ -289,6 +290,11 @@ enum Cmd {
         /// Keep it out of the repo; it holds real credentials.
         #[arg(long)]
         creds: String,
+        /// redb file holding durable 1.0.4 join state (DevNonce high-water, next
+        /// JoinNonce). Persisting it is what stops replays and JoinNonce regression
+        /// across restarts.
+        #[arg(long, default_value = "lorawan-join.redb")]
+        join_db: String,
         /// Write every received frame to this file as JSONL (ciphertext, decrypted
         /// payload and metadata) for offline vendor-payload work.
         #[arg(long)]
@@ -458,6 +464,7 @@ fn main() -> Result<()> {
             freq_hz,
             sf,
             creds,
+            join_db,
             capture,
             seconds,
         } => run_lorawan_join(
@@ -469,6 +476,7 @@ fn main() -> Result<()> {
             freq_hz,
             sf,
             &creds,
+            &join_db,
             capture.as_deref(),
             seconds,
         ),
@@ -1323,11 +1331,15 @@ fn run_lorawan_join(
     freq_hz: u32,
     sf: u8,
     creds_path: &str,
+    join_db: &str,
     capture: Option<&str>,
     seconds: u64,
 ) -> Result<()> {
     use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
     let creds = load_join_creds(creds_path)?;
+    let store = join_store::RedbJoinStore::open(join_db)
+        .map_err(|e| anyhow::anyhow!("opening join store {join_db}: {e}"))?;
+    println!("join state persisted to {join_db}");
     let mut responder = join_responder::JoinResponder::new(
         spidev,
         GpioPins {
@@ -1340,6 +1352,7 @@ fn run_lorawan_join(
         freq_hz,
         sf,
         creds,
+        Box::new(store),
     )?;
     if let Some(path) = capture {
         responder.set_capture(path)?;
@@ -1399,6 +1412,7 @@ fn run_lorawan_join(
     _freq_hz: u32,
     _sf: u8,
     _creds_path: &str,
+    _join_db: &str,
     _capture: Option<&str>,
     _seconds: u64,
 ) -> Result<()> {

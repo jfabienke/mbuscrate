@@ -255,6 +255,115 @@ pub fn derive_session_keys(
     }
 }
 
+// ============================ 1.0.4 anti-replay ============================
+//
+// LoRaWAN 1.0.4 makes DevNonce a device-side monotonic counter and JoinNonce a
+// network-side one, each checked for strict increase to reject replays. Enforcing
+// that needs durable per-device state; the *rules* live here as pure logic, the
+// *storage* is a gateway concern behind [`JoinStore`]. See
+// docs/design/lorawan-join-persistence.md.
+
+/// Result of checking a JoinRequest's DevNonce against the highest one accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevNonceVerdict {
+    /// First-ever, or strictly greater than the last accepted — accept.
+    Fresh,
+    /// Not strictly greater than the last accepted — a replay, reject.
+    Replay { last: u16, seen: u16 },
+}
+
+/// The 1.0.4 DevNonce freshness rule, in isolation: strictly greater, or first-seen.
+pub fn admit_dev_nonce(last: Option<u16>, seen: u16) -> DevNonceVerdict {
+    match last {
+        None => DevNonceVerdict::Fresh,
+        Some(l) if seen > l => DevNonceVerdict::Fresh,
+        Some(l) => DevNonceVerdict::Replay { last: l, seen },
+    }
+}
+
+/// Outcome of admitting a whole join through a [`JoinStore`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinAdmission {
+    /// Accepted: the DevNonce was recorded and this JoinNonce reserved, both durably.
+    Admitted { join_nonce: u32 },
+    /// Rejected as a DevNonce replay; nothing was changed.
+    Replay { last: u16, seen: u16 },
+}
+
+/// Error from a [`JoinStore`] backend.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("join store: {0}")]
+pub struct JoinStoreError(pub String);
+
+/// Durable per-device join state — the persistence a 1.0.4 network side requires.
+///
+/// Implemented by the gateway (redb-backed in production, in memory for tests). The
+/// single `admit_join` operation must be atomic and durable *before it returns*, so
+/// the caller can rely on "recorded" being true before it transmits a JoinAccept —
+/// the durable-before-live ordering that closes both replay windows.
+pub trait JoinStore {
+    /// Atomically, for `dev_eui`: apply [`admit_dev_nonce`]; if Fresh, record the
+    /// DevNonce and reserve the next (strictly increasing) JoinNonce, both durable
+    /// on return, and report `Admitted`; if Replay, change nothing and report it.
+    fn admit_join(
+        &mut self,
+        dev_eui: &[u8; 8],
+        dev_nonce: u16,
+    ) -> Result<JoinAdmission, JoinStoreError>;
+
+    /// Highest DevNonce recorded for `dev_eui`, or `None` if never seen.
+    fn last_dev_nonce(&self, dev_eui: &[u8; 8]) -> Option<u16>;
+
+    /// Clear a device's DevNonce high-water for a legitimate re-provision. Without
+    /// this, a factory-reset device (DevNonce back to 0) is correctly but
+    /// permanently rejected as a replay.
+    fn reset_dev_nonce(&mut self, dev_eui: &[u8; 8]) -> Result<(), JoinStoreError>;
+}
+
+/// In-memory [`JoinStore`] for tests and non-persistent bench use.
+///
+/// Correct while the process lives; it does not survive a restart, which is exactly
+/// the gap the redb-backed store closes — so production must not use this.
+#[derive(Debug, Default)]
+pub struct InMemoryJoinStore {
+    last_dev_nonce: std::collections::HashMap<[u8; 8], u16>,
+    next_join_nonce: std::collections::HashMap<[u8; 8], u32>,
+}
+
+impl InMemoryJoinStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl JoinStore for InMemoryJoinStore {
+    fn admit_join(
+        &mut self,
+        dev_eui: &[u8; 8],
+        dev_nonce: u16,
+    ) -> Result<JoinAdmission, JoinStoreError> {
+        if let DevNonceVerdict::Replay { last, seen } =
+            admit_dev_nonce(self.last_dev_nonce.get(dev_eui).copied(), dev_nonce)
+        {
+            return Ok(JoinAdmission::Replay { last, seen });
+        }
+        self.last_dev_nonce.insert(*dev_eui, dev_nonce);
+        let jn = self.next_join_nonce.entry(*dev_eui).or_insert(1);
+        let join_nonce = *jn;
+        *jn = join_nonce.wrapping_add(1) & 0x00FF_FFFF;
+        Ok(JoinAdmission::Admitted { join_nonce })
+    }
+
+    fn last_dev_nonce(&self, dev_eui: &[u8; 8]) -> Option<u16> {
+        self.last_dev_nonce.get(dev_eui).copied()
+    }
+
+    fn reset_dev_nonce(&mut self, dev_eui: &[u8; 8]) -> Result<(), JoinStoreError> {
+        self.last_dev_nonce.remove(dev_eui);
+        Ok(())
+    }
+}
+
 /// A parsed data frame (uplink or downlink), before authentication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataFrame {
@@ -569,5 +678,85 @@ mod tests {
         assert_eq!(f.fport, None);
         assert!(f.frm_payload.is_empty());
         assert_eq!(f.fcnt, 9);
+    }
+
+    #[test]
+    fn dev_nonce_rule_accepts_first_and_strictly_greater_only() {
+        assert_eq!(admit_dev_nonce(None, 0), DevNonceVerdict::Fresh);
+        assert_eq!(admit_dev_nonce(Some(5), 6), DevNonceVerdict::Fresh);
+        assert_eq!(
+            admit_dev_nonce(Some(5), 5),
+            DevNonceVerdict::Replay { last: 5, seen: 5 }
+        );
+        assert_eq!(
+            admit_dev_nonce(Some(5), 4),
+            DevNonceVerdict::Replay { last: 5, seen: 4 }
+        );
+    }
+
+    #[test]
+    fn in_memory_store_admits_advances_and_rejects_replays() {
+        let mut s = InMemoryJoinStore::new();
+        let eui = [0x00, 0x04, 0xA3, 0x0B, 0x00, 0xFF, 0x00, 0x01];
+
+        // First join: admitted, JoinNonce starts at 1.
+        assert_eq!(
+            s.admit_join(&eui, 0).unwrap(),
+            JoinAdmission::Admitted { join_nonce: 1 }
+        );
+        // Next fresh DevNonce: admitted, JoinNonce advances — never repeats.
+        assert_eq!(
+            s.admit_join(&eui, 1).unwrap(),
+            JoinAdmission::Admitted { join_nonce: 2 }
+        );
+        // Replayed DevNonce (equal): rejected, and nothing advanced.
+        assert_eq!(
+            s.admit_join(&eui, 1).unwrap(),
+            JoinAdmission::Replay { last: 1, seen: 1 }
+        );
+        // A later fresh one still gets JoinNonce 3, proving the replay did not burn one.
+        assert_eq!(
+            s.admit_join(&eui, 2).unwrap(),
+            JoinAdmission::Admitted { join_nonce: 3 }
+        );
+        assert_eq!(s.last_dev_nonce(&eui), Some(2));
+    }
+
+    #[test]
+    fn reset_allows_a_reprovisioned_device_to_rejoin_from_zero() {
+        let mut s = InMemoryJoinStore::new();
+        let eui = [1, 2, 3, 4, 5, 6, 7, 8];
+        s.admit_join(&eui, 100).unwrap();
+        // A device that reset to DevNonce 0 is correctly rejected as replay...
+        assert!(matches!(
+            s.admit_join(&eui, 0).unwrap(),
+            JoinAdmission::Replay { .. }
+        ));
+        // ...until an explicit re-provision clears the high-water.
+        s.reset_dev_nonce(&eui).unwrap();
+        assert!(matches!(
+            s.admit_join(&eui, 0).unwrap(),
+            JoinAdmission::Admitted { .. }
+        ));
+    }
+
+    #[test]
+    fn join_nonce_is_per_device() {
+        let mut s = InMemoryJoinStore::new();
+        let a = [0xAAu8; 8];
+        let b = [0xBBu8; 8];
+        // Each device gets its own monotonic sequence starting at 1.
+        assert_eq!(
+            s.admit_join(&a, 0).unwrap(),
+            JoinAdmission::Admitted { join_nonce: 1 }
+        );
+        assert_eq!(
+            s.admit_join(&b, 0).unwrap(),
+            JoinAdmission::Admitted { join_nonce: 1 }
+        );
+        assert_eq!(
+            s.admit_join(&a, 1).unwrap(),
+            JoinAdmission::Admitted { join_nonce: 2 }
+        );
     }
 }

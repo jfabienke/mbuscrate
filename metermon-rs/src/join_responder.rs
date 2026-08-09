@@ -68,7 +68,10 @@ pub struct JoinResponder {
     /// Sessions established this run, keyed by DevAddr.
     sessions: HashMap<u32, SessionKeys>,
     next_dev_addr: u32,
-    app_nonce: u32,
+    /// Durable 1.0.4 anti-replay state (DevNonce high-water, next JoinNonce). The
+    /// JoinNonce that used to live in an in-memory field now comes from here, so it
+    /// survives restarts instead of resetting.
+    store: Box<dyn mbus_rs::lorawan::JoinStore>,
     capture: Option<std::io::BufWriter<std::fs::File>>,
 }
 
@@ -79,6 +82,7 @@ impl JoinResponder {
         freq_hz: u32,
         sf: u8,
         creds: Vec<JoinCredential>,
+        store: Box<dyn mbus_rs::lorawan::JoinStore>,
     ) -> Result<Self> {
         let mut hal = RaspberryPiHal::from_spidev(spidev, &pins).context("opening SPI/GPIO")?;
         hal.reset().context("reset")?;
@@ -92,7 +96,7 @@ impl JoinResponder {
             sessions: HashMap::new(),
             // 0x26xxxxxx is the conventional private-range DevAddr prefix.
             next_dev_addr: 0x2600_0001,
-            app_nonce: 1,
+            store,
             capture: None,
         })
     }
@@ -311,14 +315,33 @@ impl JoinResponder {
             return Ok(());
         }
 
+        // 1.0.4 anti-replay, durable before we transmit: this records the DevNonce
+        // and reserves a strictly-increasing JoinNonce in one committed write, so a
+        // replayed JoinRequest is refused and a restart cannot regress the JoinNonce.
+        let join_nonce = match self.store.admit_join(&jr.dev_eui_le, jr.dev_nonce) {
+            Ok(JoinAdmission::Admitted { join_nonce }) => join_nonce,
+            Ok(JoinAdmission::Replay { last, seen }) => {
+                println!(
+                    "join: {} — DevNonce replay (last {last}, seen {seen}), rejected",
+                    jr.dev_eui_display()
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                // A join we cannot record durably is a join we must not grant, or the
+                // next boot reopens the replay hole. Drop; the device retries.
+                println!("join: {} — join store write failed: {e}", jr.dev_eui_display());
+                return Ok(());
+            }
+        };
+
         let params = JoinAcceptParams {
-            app_nonce: self.app_nonce,
+            app_nonce: join_nonce,
             net_id: 0x0000_0013,
             dev_addr: self.next_dev_addr,
             dl_settings: 0,
             rx_delay: 1,
         };
-        self.app_nonce = self.app_nonce.wrapping_add(1) & 0x00FF_FFFF;
         self.next_dev_addr = self.next_dev_addr.wrapping_add(1);
 
         let accept = build_join_accept(&cred.app_key, &params);
