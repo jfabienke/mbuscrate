@@ -13,8 +13,8 @@
 
 use anyhow::{Context, Result};
 use mbus_rs::lorawan::{
-    build_join_accept, derive_session_keys, DataFrame, JoinAcceptParams, JoinAdmission, JoinRequest,
-    SessionKeys,
+    build_join_accept, derive_session_keys, DataFrame, JoinAcceptParams, JoinAdmission,
+    JoinRequest, SessionKeys,
 };
 use mbus_rs::wmbus::radio::driver::{LoRaProfile, RadioProfile, Sx126xDriver};
 use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
@@ -331,7 +331,10 @@ impl JoinResponder {
             Err(e) => {
                 // A join we cannot record durably is a join we must not grant, or the
                 // next boot reopens the replay hole. Drop; the device retries.
-                println!("join: {} — join store write failed: {e}", jr.dev_eui_display());
+                println!(
+                    "join: {} — join store write failed: {e}",
+                    jr.dev_eui_display()
+                );
                 return Ok(());
             }
         };

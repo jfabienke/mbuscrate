@@ -17,9 +17,8 @@
 mod capture_dedup;
 mod config;
 mod decode;
-mod gps;
-mod upsync;
 mod devices;
+mod gps;
 mod health;
 #[cfg(feature = "radio")]
 mod join_responder;
@@ -36,6 +35,7 @@ mod sweep;
 mod sx1262_probe;
 #[cfg(feature = "radio")]
 mod sx1262_rx;
+mod upsync;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

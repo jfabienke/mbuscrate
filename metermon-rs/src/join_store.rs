@@ -9,7 +9,9 @@
 //! responder relies on before it transmits a JoinAccept. See
 //! docs/design/lorawan-join-persistence.md.
 
-use mbus_rs::lorawan::{admit_dev_nonce, DevNonceVerdict, JoinAdmission, JoinStore, JoinStoreError};
+use mbus_rs::lorawan::{
+    admit_dev_nonce, DevNonceVerdict, JoinAdmission, JoinStore, JoinStoreError,
+};
 use redb::{Database, ReadableDatabase, TableDefinition};
 use std::path::Path;
 use std::sync::Arc;
@@ -94,7 +96,8 @@ impl JoinStore for RedbJoinStore {
         let w = self.db.begin_write().map_err(err)?;
         {
             let mut t = w.open_table(JOIN_STATE).map_err(err)?;
-            t.insert(key(dev_eui).as_str(), json.as_str()).map_err(err)?;
+            t.insert(key(dev_eui).as_str(), json.as_str())
+                .map_err(err)?;
         }
         w.commit().map_err(err)?; // durable before we return, hence before transmit
         Ok(JoinAdmission::Admitted { join_nonce })
@@ -121,7 +124,8 @@ impl JoinStore for RedbJoinStore {
         let w = self.db.begin_write().map_err(err)?;
         {
             let mut t = w.open_table(JOIN_STATE).map_err(err)?;
-            t.insert(key(dev_eui).as_str(), json.as_str()).map_err(err)?;
+            t.insert(key(dev_eui).as_str(), json.as_str())
+                .map_err(err)?;
         }
         w.commit().map_err(err)?;
         Ok(())

@@ -30,7 +30,11 @@ pub struct DupGuard {
 impl DupGuard {
     /// `limit` consecutive identical frames trips [`DupVerdict::Stuck`].
     pub fn new(limit: usize) -> Self {
-        Self { last: None, consecutive: 0, limit: limit.max(1) }
+        Self {
+            last: None,
+            consecutive: 0,
+            limit: limit.max(1),
+        }
     }
 
     /// Classify the next raw frame. A non-identical frame resets the run, so
@@ -79,7 +83,7 @@ mod tests {
         assert_eq!(g.check(&[1]), DupVerdict::Duplicate);
         assert_eq!(g.check(&[1]), DupVerdict::Duplicate);
         assert_eq!(g.check(&[2]), DupVerdict::New); // reset
-        // The run counter is back to zero, so it takes the full limit again.
+                                                    // The run counter is back to zero, so it takes the full limit again.
         assert_eq!(g.check(&[2]), DupVerdict::Duplicate);
         assert_eq!(g.check(&[2]), DupVerdict::Duplicate);
         assert_eq!(g.check(&[2]), DupVerdict::Stuck);

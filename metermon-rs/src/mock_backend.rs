@@ -121,7 +121,9 @@ pub fn responses_for(msg: &Value, catalog: &Catalog, keys: &KeyStore) -> Vec<Val
                 msg.get("gw").and_then(|v| v.as_str()),
                 msg.get("seq").and_then(|v| v.as_u64()),
             ) {
-                (Some(gw), Some(seq)) => vec![json!({ "op": "observed_ack", "gw": gw, "seq": seq })],
+                (Some(gw), Some(seq)) => {
+                    vec![json!({ "op": "observed_ack", "gw": gw, "seq": seq })]
+                }
                 _ => Vec::new(),
             }
         }
@@ -179,18 +181,18 @@ impl ObservedInventory {
                 return None;
             }
         }
-        let gw_pos = msg.get("gw_pos").and_then(|p| {
-            Some((p.get("lat")?.as_f64()?, p.get("lon")?.as_f64()?))
-        });
+        let gw_pos = msg
+            .get("gw_pos")
+            .and_then(|p| Some((p.get("lat")?.as_f64()?, p.get("lon")?.as_f64()?)));
         let meters = msg.get("meters").and_then(|m| m.as_array())?;
         let mut n = 0;
         for m in meters {
             let Some(serial) = m.get("serial").and_then(|v| v.as_u64()).map(|s| s as u32) else {
                 continue;
             };
-            let pos_estimate = m.get("pos_estimate").and_then(|p| {
-                Some((p.get("lat")?.as_f64()?, p.get("lon")?.as_f64()?))
-            });
+            let pos_estimate = m
+                .get("pos_estimate")
+                .and_then(|p| Some((p.get("lat")?.as_f64()?, p.get("lon")?.as_f64()?)));
             self.obs.insert(
                 (gw.clone(), serial),
                 Observation {
@@ -357,7 +359,13 @@ mod observed_tests {
         // Even when the observed meter IS in the catalog, an observed message
         // draws only an ack — never a profile or key.
         let mut cat = Catalog::new();
-        cat.insert(74644444, CatalogEntry { model: "MULTICAL 21".into(), firmware: None });
+        cat.insert(
+            74644444,
+            CatalogEntry {
+                model: "MULTICAL 21".into(),
+                firmware: None,
+            },
+        );
         let msg = observed("6543", 1, None, json!([{ "serial": 74644444 }]));
         let r = responses_for(&msg, &cat, &KeyStore::new());
         assert!(r.iter().all(|m| m["op"] == "observed_ack"));
@@ -393,10 +401,18 @@ mod observed_tests {
     #[test]
     fn two_gateways_hearing_one_meter_are_kept_separately() {
         let mut inv = ObservedInventory::new();
-        inv.apply(&observed("gwA", 1, Some((56.0, 10.0)),
-            json!([{ "serial": 42, "last_rssi": -60 }])));
-        inv.apply(&observed("gwB", 1, Some((56.1, 10.1)),
-            json!([{ "serial": 42, "last_rssi": -80 }])));
+        inv.apply(&observed(
+            "gwA",
+            1,
+            Some((56.0, 10.0)),
+            json!([{ "serial": 42, "last_rssi": -60 }]),
+        ));
+        inv.apply(&observed(
+            "gwB",
+            1,
+            Some((56.1, 10.1)),
+            json!([{ "serial": 42, "last_rssi": -80 }]),
+        ));
         assert_eq!(inv.observations(42).len(), 2);
     }
 
@@ -404,10 +420,15 @@ mod observed_tests {
     fn install_tag_wins_over_gateway_estimate() {
         let mut inv = ObservedInventory::new();
         inv.set_install_tag(42, 56.5, 10.5);
-        inv.apply(&observed("gwA", 1, None, json!([{
-            "serial": 42, "last_rssi": -60,
-            "pos_estimate": { "lat": 56.0, "lon": 10.0, "confidence_m": 50 }
-        }])));
+        inv.apply(&observed(
+            "gwA",
+            1,
+            None,
+            json!([{
+                "serial": 42, "last_rssi": -60,
+                "pos_estimate": { "lat": 56.0, "lon": 10.0, "confidence_m": 50 }
+            }]),
+        ));
         // Canonical position is the install-tag, not the estimate.
         assert_eq!(inv.resolved_position(42), Some((56.5, 10.5)));
         // …and the disagreement is flagged for review.
@@ -418,12 +439,22 @@ mod observed_tests {
     fn estimate_fills_the_gap_when_no_install_tag() {
         let mut inv = ObservedInventory::new();
         // Two gateways estimate; strongest RSSI wins.
-        inv.apply(&observed("gwA", 1, None, json!([{
+        inv.apply(&observed(
+            "gwA",
+            1,
+            None,
+            json!([{
             "serial": 7, "last_rssi": -90,
-            "pos_estimate": { "lat": 1.0, "lon": 1.0 } }])));
-        inv.apply(&observed("gwB", 1, None, json!([{
+            "pos_estimate": { "lat": 1.0, "lon": 1.0 } }]),
+        ));
+        inv.apply(&observed(
+            "gwB",
+            1,
+            None,
+            json!([{
             "serial": 7, "last_rssi": -55,
-            "pos_estimate": { "lat": 2.0, "lon": 2.0 } }])));
+            "pos_estimate": { "lat": 2.0, "lon": 2.0 } }]),
+        ));
         assert_eq!(inv.resolved_position(7), Some((2.0, 2.0)));
         assert!(!inv.position_conflict(7, 0.01)); // no install-tag → no conflict
     }

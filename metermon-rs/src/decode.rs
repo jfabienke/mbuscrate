@@ -406,7 +406,11 @@ fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &D
                         frame_quirks.push(q.quirk_id);
                     }
                 }
-                records.push(record_to_json(&rec, &ctx.device.manufacturer, ctx.device.device_type));
+                records.push(record_to_json(
+                    &rec,
+                    &ctx.device.manufacturer,
+                    ctx.device.device_type,
+                ));
                 offset += used;
             }
             Ok(_) => break, // no progress: stop rather than spin
