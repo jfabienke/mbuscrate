@@ -14,11 +14,19 @@ use std::io::BufRead;
 use mbus_rs::wmbus::weak_key_audit::{audit_capture, Profile, Verdict};
 
 fn parse_hex_line(line: &str) -> Option<Vec<u8>> {
-    let s: String = line.split('#').next().unwrap_or("").split_whitespace().collect();
-    if s.is_empty() || s.len() % 2 != 0 {
+    let s: String = line
+        .split('#')
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect();
+    if s.is_empty() || !s.len().is_multiple_of(2) {
         return None;
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 fn profile_str(p: &Profile) -> String {
@@ -34,7 +42,9 @@ fn verdict_str(v: &Verdict) -> String {
     match v {
         Verdict::DefaultKey(name) => format!("!! DEFAULT KEY ({name}) — readable by anyone"),
         Verdict::Plaintext => "!! PLAINTEXT — unencrypted on air".into(),
-        Verdict::SessionReuse { sn } => format!("!! SESSION REUSE (SN {sn:#010x}) — CTR keystream reuse"),
+        Verdict::SessionReuse { sn } => {
+            format!("!! SESSION REUSE (SN {sn:#010x}) — CTR keystream reuse")
+        }
         Verdict::NoDefaultKeyMatch => "ok  no default-key match".into(),
         Verdict::EncryptedNoWeakness => "ok  encrypted, no key-free weakness".into(),
         Verdict::Unaudited(why) => format!("--  unaudited ({why})"),
@@ -47,21 +57,40 @@ fn main() -> std::io::Result<()> {
         std::process::exit(2);
     });
     let file = std::fs::File::open(&path)?;
-    let frames: Vec<Vec<u8>> =
-        std::io::BufReader::new(file).lines().map_while(Result::ok).filter_map(|l| parse_hex_line(&l)).collect();
+    let frames: Vec<Vec<u8>> = std::io::BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|l| parse_hex_line(&l))
+        .collect();
 
     println!("== wM-Bus passive weak-key audit ==");
-    println!("capture: {path}   frames: {frames}\n", frames = frames.len());
+    println!(
+        "capture: {path}   frames: {frames}\n",
+        frames = frames.len()
+    );
 
     let results = audit_capture(&frames);
     let exposed = results.iter().filter(|m| m.verdict.is_exposure()).count();
+    let classified: u32 = results.iter().map(|m| m.frames_seen).sum();
+    println!(
+        "coverage: {classified}/{total} frames classified ({dropped} CRC-failed or unsupported CI, not audited)\n",
+        total = frames.len(),
+        dropped = frames.len() as u32 - classified,
+    );
 
-    println!("{:>10}  {:<4}  {:<14}  {:>6}  verdict", "serial", "mfr", "profile", "frames");
+    println!(
+        "{:>10}  {:<4}  {:<14}  {:>6}  verdict",
+        "serial", "mfr", "profile", "frames"
+    );
     println!("{}", "-".repeat(78));
     for m in &results {
         println!(
             "{:>10}  {:<4}  {:<14}  {:>6}  {}",
-            m.serial, m.mfr, profile_str(&m.profile), m.frames_seen, verdict_str(&m.verdict)
+            m.serial,
+            m.mfr,
+            profile_str(&m.profile),
+            m.frames_seen,
+            verdict_str(&m.verdict)
         );
     }
 
