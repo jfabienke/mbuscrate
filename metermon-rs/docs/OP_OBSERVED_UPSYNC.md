@@ -137,6 +137,14 @@ metres), suitable for asset maps and "which area," not survey-grade.
 
 ## Status
 
-Design. The offline-testable mock receiver (`responses_for` + `ObservedInventory`
-+ tests) lands first; the gateway-side `gps` module, `build_observed`, and the
-redb watermark/outbox follow.
+Implemented end-to-end (offline-tested; live run pending):
+- Backend/mock: `responses_for(op:observed)` + `ObservedInventory` (8 tests).
+- Gateway: `gps` module (gpsd client, 3 tests), `upsync::build_observed` (5 tests),
+  `DeviceStore::{observed_since, observed_watermark, observed_seq, advance_observed}`,
+  and the periodic sync wired into the monitor loop (60 s cadence, advance on
+  publish success, GPS via the optional `gps` config field).
+- Radio path cross-checked for aarch64-unknown-linux-musl.
+
+Not yet done: `op:observed_ack`-driven watermark advance (currently advances on
+publish success), per-meter `pos_estimate` (backend multilateration), and a live
+run on the Pi.

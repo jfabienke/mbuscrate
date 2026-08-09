@@ -34,6 +34,10 @@ pub struct Config {
     /// data/status/health stay on the primary `mqtt` broker.
     #[serde(rename = "key-mqtt", default)]
     pub key_mqtt: Option<KeyMqttConfig>,
+    /// Optional gpsd address (e.g. "127.0.0.1:2947"). When set, the monitor tags its
+    /// `op:observed` up-sync with the gateway's position. Absent = no GPS.
+    #[serde(default)]
+    pub gps: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

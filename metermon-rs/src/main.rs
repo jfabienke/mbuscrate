@@ -17,6 +17,8 @@
 mod capture_dedup;
 mod config;
 mod decode;
+mod gps;
+mod upsync;
 mod devices;
 mod health;
 #[cfg(feature = "radio")]
@@ -1010,6 +1012,15 @@ fn run_monitor(
             log::info!("airwave discovery sweep enabled: every {sweep_hours}h");
         }
 
+        // op:observed up-sync: report the fleet we hear (+ GPS position) upstream.
+        // See docs/OP_OBSERVED_UPSYNC.md.
+        let gps = cfg.gps.as_deref().map(|addr| {
+            log::info!("GPS: streaming fixes from gpsd {addr}");
+            gps::spawn(addr)
+        });
+        let upsync_interval = Duration::from_secs(60);
+        let mut last_upsync = Instant::now();
+
         // Gateway watchdog: recover the radio if no frame arrives within the stall window
         // (5 min vs the normal sub-minute cadence), escalating to a process restart after
         // 3 failed in-process recoveries (systemd relaunches).
@@ -1270,6 +1281,47 @@ fn run_monitor(
                 radio.set_lora_listen(lora_listen.clone());
                 radio.start().await?;
                 last_sweep = Instant::now();
+            }
+
+            // Periodic op:observed up-sync of the geo-tagged fleet inventory.
+            if last_upsync.elapsed() >= upsync_interval {
+                if let Some(pub_) = publisher.as_mut() {
+                    let hwm = dm.observed_watermark().unwrap_or(0);
+                    match dm.observed_since(hwm) {
+                        Ok(recs) if !recs.is_empty() => {
+                            let seq = dm.observed_seq().unwrap_or(0) + 1;
+                            let fix = gps.as_ref().and_then(|h| h.latest());
+                            let (msg, new_hwm) = upsync::build_observed(
+                                &cfg.gwid,
+                                fix.as_ref(),
+                                &recs,
+                                seq,
+                                hwm,
+                                devices::now_unix(),
+                            );
+                            // QoS AtLeastOnce: a successful publish means the broker
+                            // accepted the batch, so advance. Until then the same
+                            // records re-select next tick, so an outage drains rather
+                            // than drops. (An op:observed_ack-driven advance is a
+                            // future refinement.)
+                            match pub_.publish_json(&msg) {
+                                Ok(()) => match dm.advance_observed(new_hwm, seq) {
+                                    Ok(()) => log::info!(
+                                        "op:observed: synced {} meter(s) (seq {seq})",
+                                        recs.len()
+                                    ),
+                                    Err(e) => log::warn!("advance observed watermark: {e}"),
+                                },
+                                Err(e) => {
+                                    log::warn!("op:observed publish failed (will retry): {e}")
+                                }
+                            }
+                        }
+                        Ok(_) => {} // nothing new since the last sync
+                        Err(e) => log::warn!("observed_since: {e}"),
+                    }
+                }
+                last_upsync = Instant::now();
             }
         }
 

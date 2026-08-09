@@ -74,6 +74,32 @@ struct DeviceRecord {
     applied_quirks: Vec<String>,
 }
 
+/// META keys for the `op:observed` up-sync (see docs/OP_OBSERVED_UPSYNC.md).
+const OBSERVED_HWM_KEY: &str = "observed_hwm"; // last synced last_seen high-water mark
+const OBSERVED_SEQ_KEY: &str = "observed_seq"; // monotonic per-gateway sync sequence
+
+/// A device must have at least this many CRC-valid frames before it is eligible for
+/// up-sync — the ghost guard, so a one-off CRC fluke never becomes a synced asset.
+const OBSERVED_MIN_FRAMES_OK: u64 = 2;
+
+/// Gateway-owned observation of one meter, projected for the `op:observed` up-sync.
+/// Deliberately excludes keys and backend-owned profile fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedRecord {
+    pub serial: u32,
+    pub mfr: String,
+    pub device_type: u8,
+    pub mode: String,
+    pub encrypted: bool,
+    pub has_key: bool,
+    pub silent: bool,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    pub frames_ok: u64,
+    pub frames_total: u64,
+    pub last_rssi: i16,
+}
+
 /// Persisted event record (JSON-encoded as the `events` table value).
 #[derive(Serialize, Deserialize)]
 struct EventRecord {
@@ -260,6 +286,67 @@ impl DeviceManager {
             out.push(row?.0.value());
         }
         Ok(out)
+    }
+
+    /// Records whose `last_seen` is newer than `hwm` and which pass the ghost guard,
+    /// projected for the `op:observed` up-sync. Pass `hwm = 0` for a full snapshot.
+    pub fn observed_since(&self, hwm: i64) -> Result<Vec<ObservedRecord>> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(DEVICES)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (k, v) = row?;
+            let rec: DeviceRecord = serde_json::from_str(v.value())?;
+            if rec.frames_ok >= OBSERVED_MIN_FRAMES_OK && rec.last_seen > hwm {
+                out.push(ObservedRecord {
+                    serial: k.value(),
+                    mfr: rec.manufacturer,
+                    device_type: rec.device_type,
+                    mode: rec.mode,
+                    encrypted: rec.encrypted,
+                    has_key: rec.has_key,
+                    silent: rec.silent,
+                    first_seen: rec.first_seen,
+                    last_seen: rec.last_seen,
+                    frames_ok: rec.frames_ok,
+                    frames_total: rec.frames_total,
+                    last_rssi: rec.last_rssi,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Current up-sync high-water mark (max `last_seen` confirmed synced). 0 = never.
+    pub fn observed_watermark(&self) -> Result<i64> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(META)?;
+        Ok(t.get(OBSERVED_HWM_KEY)?
+            .map(|g| g.value().parse().unwrap_or(0))
+            .unwrap_or(0))
+    }
+
+    /// Current up-sync sequence number (last used). 0 = none sent.
+    pub fn observed_seq(&self) -> Result<u64> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(META)?;
+        Ok(t.get(OBSERVED_SEQ_KEY)?
+            .map(|g| g.value().parse().unwrap_or(0))
+            .unwrap_or(0))
+    }
+
+    /// Persist the watermark and sequence after a sync is *confirmed* (ack or
+    /// publish success). Until this is called the same records re-select on the next
+    /// sync, so a backhaul outage drains rather than drops.
+    pub fn advance_observed(&self, new_hwm: i64, seq: u64) -> Result<()> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut t = txn.open_table(META)?;
+            t.insert(OBSERVED_HWM_KEY, new_hwm.to_string().as_str())?;
+            t.insert(OBSERVED_SEQ_KEY, seq.to_string().as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
     }
 
     /// Load all persisted `(meterid, hexkey)` pairs, to seed the keystore at startup before
