@@ -112,7 +112,135 @@ pub fn responses_for(msg: &Value, catalog: &Catalog, keys: &KeyStore) -> Vec<Val
             );
             out
         }
+        // Up-sync: the gateway reports the fleet it hears (see
+        // docs/OP_OBSERVED_UPSYNC.md). Fire-and-forget for the observations; we
+        // return an ack so the gateway can advance its sync watermark
+        // deterministically. No profiles or keys are ever emitted in response.
+        Some("observed") => {
+            match (
+                msg.get("gw").and_then(|v| v.as_str()),
+                msg.get("seq").and_then(|v| v.as_u64()),
+            ) {
+                (Some(gw), Some(seq)) => vec![json!({ "op": "observed_ack", "gw": gw, "seq": seq })],
+                _ => Vec::new(),
+            }
+        }
         _ => Vec::new(),
+    }
+}
+
+/// One gateway's observation of one meter — the gateway-owned fields carried by
+/// `op:observed`. Deliberately excludes identity/profile/keys (backend-owned).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Observation {
+    pub gw: String,
+    pub serial: u32,
+    pub last_rssi: i64,
+    pub last_seen: i64,
+    pub gw_pos: Option<(f64, f64)>,
+    /// Gateway RSSI-multilateration estimate — advisory only.
+    pub pos_estimate: Option<(f64, f64)>,
+}
+
+/// Backend-side accumulator for `op:observed`, keyed `(gw, serial)` so gateways
+/// never overwrite each other. Also tracks operator/app-supplied install-tags,
+/// which always win over a gateway `pos_estimate`.
+#[derive(Debug, Default)]
+pub struct ObservedInventory {
+    obs: BTreeMap<(String, u32), Observation>,
+    /// Canonical meter positions set out-of-band (e.g. the technician app's
+    /// install geotag). A present entry here is authoritative over any estimate.
+    install_tags: BTreeMap<u32, (f64, f64)>,
+    /// Highest `seq` applied per gateway — idempotency against QoS redelivery.
+    seq_seen: BTreeMap<String, u64>,
+}
+
+impl ObservedInventory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record an authoritative install-tag for a meter (app/backend side).
+    pub fn set_install_tag(&mut self, serial: u32, lat: f64, lon: f64) {
+        self.install_tags.insert(serial, (lat, lon));
+    }
+
+    /// Apply one `op:observed` message. Returns the number of observations stored,
+    /// or `None` if the message is malformed or a stale/duplicate `seq`.
+    pub fn apply(&mut self, msg: &Value) -> Option<usize> {
+        if msg.get("op").and_then(|v| v.as_str()) != Some("observed") {
+            return None;
+        }
+        let gw = msg.get("gw").and_then(|v| v.as_str())?.to_string();
+        let seq = msg.get("seq").and_then(|v| v.as_u64())?;
+        // Idempotent: ignore a seq we've already applied from this gateway.
+        if let Some(&last) = self.seq_seen.get(&gw) {
+            if seq <= last {
+                return None;
+            }
+        }
+        let gw_pos = msg.get("gw_pos").and_then(|p| {
+            Some((p.get("lat")?.as_f64()?, p.get("lon")?.as_f64()?))
+        });
+        let meters = msg.get("meters").and_then(|m| m.as_array())?;
+        let mut n = 0;
+        for m in meters {
+            let Some(serial) = m.get("serial").and_then(|v| v.as_u64()).map(|s| s as u32) else {
+                continue;
+            };
+            let pos_estimate = m.get("pos_estimate").and_then(|p| {
+                Some((p.get("lat")?.as_f64()?, p.get("lon")?.as_f64()?))
+            });
+            self.obs.insert(
+                (gw.clone(), serial),
+                Observation {
+                    gw: gw.clone(),
+                    serial,
+                    last_rssi: m.get("last_rssi").and_then(|v| v.as_i64()).unwrap_or(0),
+                    last_seen: m.get("last_seen").and_then(|v| v.as_i64()).unwrap_or(0),
+                    gw_pos,
+                    pos_estimate,
+                },
+            );
+            n += 1;
+        }
+        self.seq_seen.insert(gw, seq);
+        Some(n)
+    }
+
+    /// All observations of a meter, across gateways.
+    pub fn observations(&self, serial: u32) -> Vec<&Observation> {
+        self.obs
+            .iter()
+            .filter(|((_, s), _)| *s == serial)
+            .map(|(_, o)| o)
+            .collect()
+    }
+
+    /// Resolved position for a meter, applying the ownership rule: an install-tag
+    /// always wins; otherwise the best (strongest-RSSI) gateway estimate, if any.
+    pub fn resolved_position(&self, serial: u32) -> Option<(f64, f64)> {
+        if let Some(&tag) = self.install_tags.get(&serial) {
+            return Some(tag);
+        }
+        self.observations(serial)
+            .into_iter()
+            .filter_map(|o| o.pos_estimate.map(|p| (o.last_rssi, p)))
+            .max_by_key(|(rssi, _)| *rssi) // strongest signal = least negative
+            .map(|(_, p)| p)
+    }
+
+    /// True when a gateway estimate disagrees with the install-tag beyond
+    /// `tol_deg` — a mislabel / moved-meter signal worth surfacing for review.
+    pub fn position_conflict(&self, serial: u32, tol_deg: f64) -> bool {
+        let Some(&(tlat, tlon)) = self.install_tags.get(&serial) else {
+            return false;
+        };
+        self.observations(serial).into_iter().any(|o| {
+            o.pos_estimate.is_some_and(|(elat, elon)| {
+                (elat - tlat).abs() > tol_deg || (elon - tlon).abs() > tol_deg
+            })
+        })
     }
 }
 
@@ -193,6 +321,112 @@ pub fn run(config_path: &str, catalog_path: &str, keys_path: Option<&str>) -> Re
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod observed_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn observed(gw: &str, seq: u64, gw_pos: Option<(f64, f64)>, meters: Value) -> Value {
+        let mut m = json!({ "op": "observed", "ts": 1, "gw": gw, "seq": seq, "meters": meters });
+        if let Some((lat, lon)) = gw_pos {
+            m["gw_pos"] = json!({ "lat": lat, "lon": lon, "hdop": 0.8, "fix_ts": 1 });
+        }
+        m
+    }
+
+    #[test]
+    fn observed_gets_an_ack_carrying_gw_and_seq() {
+        let msg = observed("6543", 42, None, json!([]));
+        let r = responses_for(&msg, &Catalog::new(), &KeyStore::new());
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0]["op"], "observed_ack");
+        assert_eq!(r[0]["gw"], "6543");
+        assert_eq!(r[0]["seq"], 42);
+    }
+
+    #[test]
+    fn observed_without_gw_or_seq_is_ignored() {
+        let msg = json!({ "op": "observed", "meters": [] });
+        assert!(responses_for(&msg, &Catalog::new(), &KeyStore::new()).is_empty());
+    }
+
+    #[test]
+    fn responses_never_leak_keys_or_profiles_for_observed() {
+        // Even when the observed meter IS in the catalog, an observed message
+        // draws only an ack — never a profile or key.
+        let mut cat = Catalog::new();
+        cat.insert(74644444, CatalogEntry { model: "MULTICAL 21".into(), firmware: None });
+        let msg = observed("6543", 1, None, json!([{ "serial": 74644444 }]));
+        let r = responses_for(&msg, &cat, &KeyStore::new());
+        assert!(r.iter().all(|m| m["op"] == "observed_ack"));
+    }
+
+    #[test]
+    fn inventory_stores_observations_keyed_by_gw_and_serial() {
+        let mut inv = ObservedInventory::new();
+        let msg = observed(
+            "6543",
+            1,
+            Some((56.16, 10.20)),
+            json!([{ "serial": 85312884, "last_rssi": -63, "last_seen": 100 }]),
+        );
+        assert_eq!(inv.apply(&msg), Some(1));
+        let obs = inv.observations(85312884);
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].last_rssi, -63);
+        assert_eq!(obs[0].gw_pos, Some((56.16, 10.20)));
+    }
+
+    #[test]
+    fn duplicate_or_stale_seq_is_idempotent() {
+        let mut inv = ObservedInventory::new();
+        let m = json!([{ "serial": 1, "last_rssi": -50, "last_seen": 10 }]);
+        assert_eq!(inv.apply(&observed("6543", 5, None, m.clone())), Some(1));
+        // same seq again → ignored
+        assert_eq!(inv.apply(&observed("6543", 5, None, m.clone())), None);
+        // lower seq → ignored
+        assert_eq!(inv.apply(&observed("6543", 4, None, m)), None);
+    }
+
+    #[test]
+    fn two_gateways_hearing_one_meter_are_kept_separately() {
+        let mut inv = ObservedInventory::new();
+        inv.apply(&observed("gwA", 1, Some((56.0, 10.0)),
+            json!([{ "serial": 42, "last_rssi": -60 }])));
+        inv.apply(&observed("gwB", 1, Some((56.1, 10.1)),
+            json!([{ "serial": 42, "last_rssi": -80 }])));
+        assert_eq!(inv.observations(42).len(), 2);
+    }
+
+    #[test]
+    fn install_tag_wins_over_gateway_estimate() {
+        let mut inv = ObservedInventory::new();
+        inv.set_install_tag(42, 56.5, 10.5);
+        inv.apply(&observed("gwA", 1, None, json!([{
+            "serial": 42, "last_rssi": -60,
+            "pos_estimate": { "lat": 56.0, "lon": 10.0, "confidence_m": 50 }
+        }])));
+        // Canonical position is the install-tag, not the estimate.
+        assert_eq!(inv.resolved_position(42), Some((56.5, 10.5)));
+        // …and the disagreement is flagged for review.
+        assert!(inv.position_conflict(42, 0.01));
+    }
+
+    #[test]
+    fn estimate_fills_the_gap_when_no_install_tag() {
+        let mut inv = ObservedInventory::new();
+        // Two gateways estimate; strongest RSSI wins.
+        inv.apply(&observed("gwA", 1, None, json!([{
+            "serial": 7, "last_rssi": -90,
+            "pos_estimate": { "lat": 1.0, "lon": 1.0 } }])));
+        inv.apply(&observed("gwB", 1, None, json!([{
+            "serial": 7, "last_rssi": -55,
+            "pos_estimate": { "lat": 2.0, "lon": 2.0 } }])));
+        assert_eq!(inv.resolved_position(7), Some((2.0, 2.0)));
+        assert!(!inv.position_conflict(7, 0.01)); // no install-tag → no conflict
+    }
 }
 
 #[cfg(test)]
