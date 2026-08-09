@@ -14,6 +14,7 @@
 // legitimately doesn't read them — silence dead-code noise rather than the real signal.
 #![cfg_attr(not(feature = "radio"), allow(dead_code))]
 
+mod capture_dedup;
 mod config;
 mod decode;
 mod devices;
@@ -1987,8 +1988,38 @@ fn run_capture(
         .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
         .and_then(|d| d.driver.clone());
 
+    // Hard watchdog. The per-poll `timeout` below cannot cancel a radio SPI
+    // transaction that has blocked its runtime thread in-kernel (a `D`-state
+    // wedge, which once stranded the gateway for hours). This independent OS
+    // thread force-exits the process `grace` seconds past the deadline no matter
+    // what, so the command always returns and whatever supervises it can recover.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        use std::sync::atomic::Ordering;
+        let done = done.clone();
+        let grace = seconds.saturating_add(30);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(grace);
+            while std::time::Instant::now() < deadline {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            if !done.load(Ordering::Relaxed) {
+                log::error!(
+                    "capture watchdog: {grace}s elapsed without completing — the radio is \
+                     likely wedged; force-exiting so the caller can recover"
+                );
+                std::process::exit(2);
+            }
+        });
+    }
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async move {
+    let result = rt.block_on(async move {
+        use capture_dedup::{DupGuard, DupVerdict};
+
         let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
         radio.start().await?;
         let mut file = std::fs::File::create(out)?;
@@ -2000,8 +2031,18 @@ fn run_capture(
         log::info!("capturing up to {count} frames / {seconds}s from {spidev} -> {out}");
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
         let mut n = 0usize;
-        while n < count && tokio::time::Instant::now() < deadline {
-            let remaining = deadline - tokio::time::Instant::now();
+        // 30 identical frames in a row => the receiver is re-reading a stale buffer.
+        let mut dedup = DupGuard::new(30);
+
+        let outcome: Result<&str> = loop {
+            if n >= count {
+                break Ok("count reached");
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break Ok("time limit");
+            }
+            let remaining = deadline - now;
             match tokio::time::timeout(remaining, radio.poll()).await {
                 Ok(Ok(Some(source::SourceFrame::Lora { bytes, .. }))) => {
                     log::info!(
@@ -2014,6 +2055,19 @@ fn run_capture(
                     rssi_dbm: rssi,
                     freq_off_hz: off,
                 }))) => {
+                    // Stale-buffer / stuck-receiver guard, before the device filter
+                    // so it sees the raw radio output.
+                    match dedup.check(&frame) {
+                        DupVerdict::Duplicate => continue,
+                        DupVerdict::Stuck => {
+                            break Err(anyhow::anyhow!(
+                                "receiver stuck: 30 byte-identical frames in a row \
+                                 (radio re-reading a stale buffer) — stopping before it wedges"
+                            ));
+                        }
+                        DupVerdict::New => {}
+                    }
+
                     // Filter before counting, so --count bounds the frames actually
                     // wanted rather than whatever the band happened to be doing.
                     let addr = mbus_rs::wmbus::mode_c::decode_mode_c(&frame)
@@ -2038,12 +2092,28 @@ fn run_capture(
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
                 Ok(Err(e)) => log::warn!("recv error: {e}"),
-                Err(_) => break, // deadline
+                Err(_) => break Ok("time limit"),
             }
+        };
+
+        // Always return the radio to standby so the monitor can reopen it. This
+        // runs on every exit path except the watchdog force-exit (a wedge that
+        // stop() itself could not complete anyway).
+        if let Err(e) = radio.stop().await {
+            log::warn!("returning radio to standby after capture failed: {e}");
         }
-        log::info!("captured {n} frames to {out}");
-        Ok(())
-    })
+
+        match &outcome {
+            Ok(reason) => log::info!("captured {n} frames to {out} ({reason})"),
+            Err(e) => log::error!("capture aborted after {n} frames: {e}"),
+        }
+        outcome.map(|_| ())
+    });
+
+    // Stand the watchdog down: the work returned (cleanly or with an error), so no
+    // force-exit is needed.
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    result
 }
 
 #[cfg(not(feature = "radio"))]
