@@ -63,7 +63,16 @@ pub fn build_observed(
         "meters": meters,
     });
     if let Some(f) = gw_fix.filter(|f| f.valid) {
-        msg["gw_pos"] = json!({ "lat": f.lat, "lon": f.lon, "hdop": f.hdop, "fix_ts": f.ts });
+        let mut pos = json!({ "lat": f.lat, "lon": f.lon, "fix_ts": f.ts });
+        // Accuracy fields only when the receiver reported them: an absent value
+        // must stay absent — a filled-in 0.0 would read as a *perfect* fix.
+        if let Some(eph) = f.eph_m {
+            pos["eph_m"] = json!(eph);
+        }
+        if let Some(hdop) = f.hdop {
+            pos["hdop"] = json!(hdop);
+        }
+        msg["gw_pos"] = pos;
     }
     (msg, new_hwm)
 }
@@ -117,14 +126,46 @@ mod tests {
 
     #[test]
     fn includes_gw_pos_only_for_a_valid_fix() {
-        let fix = GpsFix { lat: 56.16, lon: 10.20, alt_m: Some(42.0), hdop: 0.8, ts: 5, valid: true };
+        let fix = GpsFix {
+            lat: 56.16,
+            lon: 10.20,
+            alt_m: Some(42.0),
+            eph_m: Some(3.5),
+            hdop: None,
+            ts: 5,
+            valid: true,
+        };
         let (msg, _) = build_observed("6543", Some(&fix), &[rec(1, 100, -60)], 1, 0, 1_000);
         assert_eq!(msg["gw_pos"]["lat"], 56.16);
         assert_eq!(msg["gw_pos"]["fix_ts"], 5);
+        assert_eq!(msg["gw_pos"]["eph_m"], 3.5);
 
-        let invalid = GpsFix { valid: false, ..fix };
+        // An invalidated fix (GPS lost) must drop gw_pos entirely — the stale
+        // position is not re-published.
+        let invalid = GpsFix {
+            valid: false,
+            ..fix
+        };
         let (msg2, _) = build_observed("6543", Some(&invalid), &[rec(1, 100, -60)], 1, 0, 1_000);
         assert!(msg2.get("gw_pos").is_none());
+    }
+
+    #[test]
+    fn unknown_accuracy_is_omitted_not_zero() {
+        let fix = GpsFix {
+            lat: 56.16,
+            lon: 10.20,
+            alt_m: None,
+            eph_m: None,
+            hdop: None,
+            ts: 5,
+            valid: true,
+        };
+        let (msg, _) = build_observed("6543", Some(&fix), &[rec(1, 100, -60)], 1, 0, 1_000);
+        let pos = &msg["gw_pos"];
+        assert!(pos.get("hdop").is_none(), "no hdop key when unknown");
+        assert!(pos.get("eph_m").is_none(), "no eph_m key when unknown");
+        assert_eq!(pos["lat"], 56.16); // position itself still present
     }
 
     #[test]

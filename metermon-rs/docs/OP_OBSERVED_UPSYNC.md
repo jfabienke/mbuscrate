@@ -46,7 +46,7 @@ the Device Manager. Fire-and-forget at QoS AtLeastOnce; an optional
   "ts": 1723200000,
   "gw": "6543",
   "seq": 42,
-  "gw_pos": { "lat": 56.1629, "lon": 10.2039, "hdop": 0.8, "fix_ts": 1723199990 },
+  "gw_pos": { "lat": 56.1629, "lon": 10.2039, "eph_m": 3.5, "fix_ts": 1723199990 },
   "meters": [
     {
       "serial": 85312884,
@@ -71,7 +71,12 @@ the Device Manager. Fire-and-forget at QoS AtLeastOnce; an optional
   redeliver, so the backend dedups on `(gw, seq)`. Observations are last-writer
   snapshots, so re-applying one is harmless anyway.
 - `gw_pos` — the gateway's current GPS fix (from the `gps` module). Omitted when
-  no fix; `fix_ts` lets the backend judge staleness.
+  there is no fix **and when the fix is lost** (a gpsd TPV with `mode < 2`
+  invalidates the held fix, so a dead antenna stops the position rather than
+  freezing it); `fix_ts` lets the backend judge staleness of the last one it saw.
+  `eph_m` (estimated position error, metres, from gpsd `eph`) and `hdop` are
+  optional and appear only when the receiver reported them — an unknown accuracy
+  is an absent key, never `0.0`.
 - `pos_estimate` — present only when RSSI multilateration has produced one.
 - **No `key`, no `model`/`firmware`** — those are backend-owned; leaking a key
   upstream is a defect, not a feature.
