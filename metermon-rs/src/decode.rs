@@ -788,4 +788,92 @@ mod tests {
         assert!(jv.get("value").is_some());
         assert!(jv.get("unknown_vif").is_none());
     }
+
+    // ---- Techem end-to-end golden frames -----------------------------------
+    //
+    // Real reference telegrams from the wmbusmeters GPL test corpus, decoded
+    // through the full path. wmbusmeters telegrams are *logical* frames (no block
+    // CRCs); `frame_a` re-blocks them into a Type-A mode-C frame with correct CRCs
+    // so `decode_mode_c` accepts them and `crc_ok` is true.
+
+    /// Re-block a logical telegram (L C M A V T CI …) into a Type-A mode-C frame:
+    /// sync 0xCD, 10-byte header + CRC, then 16-byte app blocks each + CRC.
+    fn frame_a(logical: &[u8]) -> Vec<u8> {
+        use mbus_rs::wmbus::crc::calculate_wmbus_crc;
+        let mut out = vec![0xCDu8];
+        let (hdr, app) = logical.split_at(10);
+        out.extend_from_slice(hdr);
+        out.extend_from_slice(&calculate_wmbus_crc(hdr).to_be_bytes());
+        for chunk in app.chunks(16) {
+            out.extend_from_slice(chunk);
+            out.extend_from_slice(&calculate_wmbus_crc(chunk).to_be_bytes());
+        }
+        out
+    }
+
+    fn has_value(v: &Value, target: f64) -> bool {
+        v["records"]
+            .as_array()
+            .map(|a| {
+                a.iter().any(|r| {
+                    r.get("value")
+                        .and_then(|x| x.as_f64())
+                        .is_some_and(|x| (x - target).abs() < 1e-6)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn e2e_fhkvdataiii_positional_via_ci_seam() {
+        // Positional HCA (CI 0xA0) routed through the 0xA0-0xB7 seam -> normalized
+        // records + vendor naming. Values come from our own decoder.
+        let logical = hex::decode(
+            "34446850226677116980A0119F27020480048300C408F709143C003D341A2B0B2A0707000000000000062D114457563D71A1850000",
+        )
+        .unwrap();
+        let v = decode_frame(&frame_a(&logical), &empty_cfg(), &KeyStore::new());
+        assert_eq!(v["crc_ok"], true);
+        assert_eq!(v["manufacturer"], "TCH");
+        assert_eq!(v["model"], "Techem FHKV data III");
+        assert_eq!(v["media"], "heat cost allocator");
+        assert!(has_value(&v, 131.0), "current_hca 131");
+        assert!(has_value(&v, 1026.0), "previous_hca 1026");
+    }
+
+    #[test]
+    fn e2e_fhkvdataiv_encrypted_oms() {
+        // Encrypted (TPL mode-5) HCA: decrypts to standard DIF/VIF via the generic
+        // path; the extension only names it. Key from the wmbusmeters corpus.
+        let logical = hex::decode(
+            "4E4468507620541494087AAD004005089D86B62A329B3439873999738F82461ABDE3C7AC78692B363F3B41EB68607F9C9160F550769B065B6EA00A2E44346E29FF5DC5CB86283C69324AD33D137F6F",
+        )
+        .unwrap();
+        let mut keys = KeyStore::new();
+        keys.install(14_542_076, "FCF41938F63432975B52505F547FCEDF".into());
+        let v = decode_frame(&frame_a(&logical), &empty_cfg(), &keys);
+        assert_eq!(v["model"], "Techem FHKV data IV");
+        assert_eq!(v["decrypted"], true, "mode-5 decrypt succeeded");
+        assert!(v.get("record_error").is_none(), "records decoded cleanly");
+        assert!(
+            v["records"].as_array().is_some_and(|a| !a.is_empty()),
+            "decrypted payload yielded records"
+        );
+    }
+
+    #[test]
+    fn e2e_vario451mid_ell_oms() {
+        // ELL-wrapped (CI 0x8C), unencrypted OMS heat meter: validates the ELL ->
+        // DIF/VIF path for a Techem device + naming.
+        let logical = hex::decode(
+            "734468501204439417048c0084900f002c2536700000B767B64527c50ac67a33005007102f2f8404062846000082046c9f2c8d04861f1e72fe00000000000000000000000000000000000000000000000000000000440600000000426cffff0406c94700002f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+        )
+        .unwrap();
+        let v = decode_frame(&frame_a(&logical), &empty_cfg(), &KeyStore::new());
+        assert_eq!(v["model"], "Techem vario 451 MID");
+        assert!(
+            v["records"].as_array().is_some_and(|a| !a.is_empty()),
+            "ELL payload yielded records"
+        );
+    }
 }
