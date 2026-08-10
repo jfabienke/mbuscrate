@@ -1,13 +1,18 @@
 //! LoRaWAN 1.0.x join and data-frame cryptography.
 //!
 //! Enough of a network server to complete an OTAA join and read the uplinks that
-//! follow — deliberately not a LoRaWAN network server. It has no DevNonce replay
-//! store, no frame-counter policy, no MAC-command handling and no duty-cycle
-//! accounting; those are the long tail that separates "answers a join" from "runs
-//! a network", and the gateway names the difference rather than blurring it.
+//! follow — deliberately not a LoRaWAN network server. DevNonce anti-replay *is*
+//! handled (see [`DevNoncePolicy`] and the [`JoinStore`] trait, backed durably by
+//! the gateway's redb store), but there is no frame-counter policy, no MAC-command
+//! handling and no duty-cycle accounting; those are the long tail that separates
+//! "answers a join" from "runs a network", and the gateway names the difference
+//! rather than blurring it. See docs/design/lorawan-join-persistence.md.
 //!
-//! Targets **1.0.2**, the version confirmed on the Zenner hardware. 1.1 changes
-//! the join MIC inputs and adds a NwkKey, so these routines do not carry over.
+//! The join/session crypto is byte-identical across LoRaWAN 1.0.0–1.0.4 (1.0.4 only
+//! renamed AppNonce→JoinNonce; the math is unchanged), which is what the Zenner
+//! hardware runs. What *does* differ by version is the DevNonce anti-replay rule,
+//! and that is [`DevNoncePolicy`]'s job. Only 1.1 breaks this module — it changes
+//! the join MIC inputs and adds a NwkKey — so these routines stop at 1.0.x.
 //!
 //! Everything here is pure: bytes in, bytes out, no radio and no clock. The
 //! timing-critical half (receive windows, transmission) belongs to the gateway,
@@ -281,6 +286,54 @@ pub fn admit_dev_nonce(last: Option<u16>, seen: u16) -> DevNonceVerdict {
     }
 }
 
+/// Which DevNonce anti-replay rule to apply — the device's LoRaWAN version decides.
+///
+/// 1.0.2 (and the LMIC-based Zenner fleet) draws DevNonce **randomly**, so the only
+/// correct replay test is set membership over recently-accepted values: a strict
+/// counter check would reject the ~half of random nonces that happen to fall below
+/// the running high-water mark, making re-joins fail intermittently. 1.0.3+ made
+/// DevNonce a monotonic counter, so a strict-increase check is exact there.
+///
+/// [`RandomWindow`](DevNoncePolicy::RandomWindow) is the safe default: because it
+/// rejects only a genuine repeat, it also admits a monotonic counter's nonces
+/// (each is unique and thus never in the window), so it never mis-rejects a 1.0.3+
+/// device either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevNoncePolicy {
+    /// 1.0.2: random DevNonce. Reject only if the value is still remembered in the
+    /// window of the last `keep` accepted nonces.
+    RandomWindow { keep: usize },
+    /// 1.0.3/1.0.4: monotonic DevNonce. Reject unless strictly greater than the
+    /// highest accepted (see [`admit_dev_nonce`]).
+    Counter,
+}
+
+impl Default for DevNoncePolicy {
+    fn default() -> Self {
+        // The fleet runs 1.0.2; windowed is correct there and harmless for counters.
+        DevNoncePolicy::RandomWindow { keep: 128 }
+    }
+}
+
+/// The 1.0.2 random-DevNonce rule, in isolation: fresh unless the value is still in
+/// the remembered window `recent`. `last_hi` (the running high-water, kept only for
+/// diagnostics) fills the `Replay` report; it plays no part in the decision — a
+/// value *below* the high-water is perfectly fresh here, which is the whole point.
+pub fn admit_dev_nonce_windowed(
+    recent: &[u16],
+    last_hi: Option<u16>,
+    seen: u16,
+) -> DevNonceVerdict {
+    if recent.contains(&seen) {
+        DevNonceVerdict::Replay {
+            last: last_hi.unwrap_or(seen),
+            seen,
+        }
+    } else {
+        DevNonceVerdict::Fresh
+    }
+}
+
 /// Outcome of admitting a whole join through a [`JoinStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinAdmission {
@@ -328,11 +381,23 @@ pub trait JoinStore {
 pub struct InMemoryJoinStore {
     last_dev_nonce: std::collections::HashMap<[u8; 8], u16>,
     next_join_nonce: std::collections::HashMap<[u8; 8], u32>,
+    /// Window of recently-accepted DevNonces per device, for the 1.0.2 policy.
+    recent: std::collections::HashMap<[u8; 8], Vec<u16>>,
+    policy: DevNoncePolicy,
 }
 
 impl InMemoryJoinStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// With an explicit anti-replay policy (the default is
+    /// [`DevNoncePolicy::RandomWindow`], correct for the 1.0.2 fleet).
+    pub fn with_policy(policy: DevNoncePolicy) -> Self {
+        Self {
+            policy,
+            ..Self::default()
+        }
     }
 }
 
@@ -342,12 +407,26 @@ impl JoinStore for InMemoryJoinStore {
         dev_eui: &[u8; 8],
         dev_nonce: u16,
     ) -> Result<JoinAdmission, JoinStoreError> {
-        if let DevNonceVerdict::Replay { last, seen } =
-            admit_dev_nonce(self.last_dev_nonce.get(dev_eui).copied(), dev_nonce)
-        {
+        let last_hi = self.last_dev_nonce.get(dev_eui).copied();
+        let verdict = match self.policy {
+            DevNoncePolicy::Counter => admit_dev_nonce(last_hi, dev_nonce),
+            DevNoncePolicy::RandomWindow { .. } => {
+                let recent = self.recent.get(dev_eui).map(Vec::as_slice).unwrap_or(&[]);
+                admit_dev_nonce_windowed(recent, last_hi, dev_nonce)
+            }
+        };
+        if let DevNonceVerdict::Replay { last, seen } = verdict {
             return Ok(JoinAdmission::Replay { last, seen });
         }
         self.last_dev_nonce.insert(*dev_eui, dev_nonce);
+        if let DevNoncePolicy::RandomWindow { keep } = self.policy {
+            let w = self.recent.entry(*dev_eui).or_default();
+            w.push(dev_nonce);
+            if w.len() > keep {
+                let excess = w.len() - keep;
+                w.drain(0..excess);
+            }
+        }
         let jn = self.next_join_nonce.entry(*dev_eui).or_insert(1);
         let join_nonce = *jn;
         *jn = join_nonce.wrapping_add(1) & 0x00FF_FFFF;
@@ -360,6 +439,7 @@ impl JoinStore for InMemoryJoinStore {
 
     fn reset_dev_nonce(&mut self, dev_eui: &[u8; 8]) -> Result<(), JoinStoreError> {
         self.last_dev_nonce.remove(dev_eui);
+        self.recent.remove(dev_eui);
         Ok(())
     }
 }
@@ -723,19 +803,119 @@ mod tests {
     }
 
     #[test]
-    fn reset_allows_a_reprovisioned_device_to_rejoin_from_zero() {
+    fn reset_clears_the_window_so_a_used_nonce_can_recur() {
+        // Under the default (1.0.2 windowed) policy, a *reused* nonce is the replay
+        // to guard against — not a merely-lower one. reset() clears the window so a
+        // re-provisioned device may legitimately draw the same value again.
         let mut s = InMemoryJoinStore::new();
         let eui = [1, 2, 3, 4, 5, 6, 7, 8];
         s.admit_join(&eui, 100).unwrap();
-        // A device that reset to DevNonce 0 is correctly rejected as replay...
+        // Replaying the exact nonce is rejected...
         assert!(matches!(
-            s.admit_join(&eui, 0).unwrap(),
+            s.admit_join(&eui, 100).unwrap(),
             JoinAdmission::Replay { .. }
         ));
-        // ...until an explicit re-provision clears the high-water.
+        // ...until an explicit re-provision clears the remembered window.
         s.reset_dev_nonce(&eui).unwrap();
         assert!(matches!(
-            s.admit_join(&eui, 0).unwrap(),
+            s.admit_join(&eui, 100).unwrap(),
+            JoinAdmission::Admitted { .. }
+        ));
+    }
+
+    #[test]
+    fn counter_rule_spuriously_rejects_a_fresh_random_nonce() {
+        // The defect, in isolation: a 1.0.2 device draws DevNonce randomly, so a
+        // fresh value can land *below* the running high-water. The counter rule
+        // (1.0.4) wrongly calls that a replay — this is exactly what would strand a
+        // real meter on re-join.
+        assert_eq!(
+            admit_dev_nonce(Some(40_000), 12_000),
+            DevNonceVerdict::Replay {
+                last: 40_000,
+                seen: 12_000
+            },
+        );
+        // The windowed rule (1.0.2) admits it — it was never used before.
+        let recent = [40_000u16];
+        assert_eq!(
+            admit_dev_nonce_windowed(&recent, Some(40_000), 12_000),
+            DevNonceVerdict::Fresh,
+        );
+        // But a genuine repeat is still refused.
+        assert_eq!(
+            admit_dev_nonce_windowed(&recent, Some(40_000), 40_000),
+            DevNonceVerdict::Replay {
+                last: 40_000,
+                seen: 40_000
+            },
+        );
+    }
+
+    #[test]
+    fn windowed_store_admits_a_non_monotonic_random_sequence() {
+        // A realistic LMIC-style random draw with values rising and falling: every
+        // distinct value must be admitted, and JoinNonce advances once per admit.
+        let mut s = InMemoryJoinStore::new();
+        let eui = [0xEEu8; 8];
+        let seq = [40_000u16, 12_000, 55_000, 3, 12_001, 41_000];
+        for (i, &n) in seq.iter().enumerate() {
+            assert_eq!(
+                s.admit_join(&eui, n).unwrap(),
+                JoinAdmission::Admitted {
+                    join_nonce: (i + 1) as u32
+                },
+                "fresh random DevNonce {n} must be admitted",
+            );
+        }
+        // Replaying any earlier value is now a replay, JoinNonce not burned.
+        assert!(matches!(
+            s.admit_join(&eui, 12_000).unwrap(),
+            JoinAdmission::Replay { seen: 12_000, .. }
+        ));
+        assert_eq!(
+            s.admit_join(&eui, 99).unwrap(),
+            JoinAdmission::Admitted { join_nonce: 7 }
+        );
+    }
+
+    #[test]
+    fn window_forgets_beyond_keep_so_a_very_old_nonce_may_recur() {
+        // Bounded history: once a nonce falls out of the last `keep`, it is no longer
+        // remembered — acceptable because meter join cadence is rare and the MIC
+        // still binds every request. keep=2 makes the boundary easy to see.
+        let mut s = InMemoryJoinStore::with_policy(DevNoncePolicy::RandomWindow { keep: 2 });
+        let eui = [7u8; 8];
+        s.admit_join(&eui, 10).unwrap(); // window [10]
+        s.admit_join(&eui, 20).unwrap(); // window [10,20]
+        s.admit_join(&eui, 30).unwrap(); // window [20,30] — 10 evicted
+                                         // 10 is no longer remembered, so it is admitted again.
+        assert!(matches!(
+            s.admit_join(&eui, 10).unwrap(),
+            JoinAdmission::Admitted { .. }
+        ));
+        // 30 is still in the window, so it is still a replay.
+        assert!(matches!(
+            s.admit_join(&eui, 30).unwrap(),
+            JoinAdmission::Replay { .. }
+        ));
+    }
+
+    #[test]
+    fn counter_policy_still_enforces_strict_increase() {
+        // Opt-in 1.0.4 hardening remains available and unchanged.
+        let mut s = InMemoryJoinStore::with_policy(DevNoncePolicy::Counter);
+        let eui = [3u8; 8];
+        assert!(matches!(
+            s.admit_join(&eui, 5).unwrap(),
+            JoinAdmission::Admitted { .. }
+        ));
+        assert!(matches!(
+            s.admit_join(&eui, 4).unwrap(),
+            JoinAdmission::Replay { .. }
+        ));
+        assert!(matches!(
+            s.admit_join(&eui, 6).unwrap(),
             JoinAdmission::Admitted { .. }
         ));
     }

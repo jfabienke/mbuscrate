@@ -3,4 +3,10 @@
 *.keys
 *key*.json
 keys.jsonl
+# LoRaWAN join credentials hold per-device AppKeys — local only, never committed
+# (see docs/LORA_JOIN_REHEARSAL.md).
+*creds*.json
+# Durable join/device stores and radio capture dumps are bench artifacts.
+*.redb
+join-frames*.jsonl
 /target

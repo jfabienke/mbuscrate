@@ -292,9 +292,9 @@ enum Cmd {
         /// Keep it out of the repo; it holds real credentials.
         #[arg(long)]
         creds: String,
-        /// redb file holding durable 1.0.4 join state (DevNonce high-water, next
-        /// JoinNonce). Persisting it is what stops replays and JoinNonce regression
-        /// across restarts.
+        /// redb file holding durable join state (window of used DevNonces — the
+        /// 1.0.2 fleet draws them randomly — and the next JoinNonce). Persisting it
+        /// is what stops replays and JoinNonce regression across restarts.
         #[arg(long, default_value = "lorawan-join.redb")]
         join_db: String,
         /// Write every received frame to this file as JSONL (ciphertext, decrypted

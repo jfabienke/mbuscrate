@@ -5,11 +5,14 @@
 //! crypto costs microseconds. That is the durable-before-live rule expressed as a
 //! deadline — the Device Manager owns and distributes keys, the gateway answers.
 //!
-//! **This is a join responder, not a network server.** No DevNonce replay store, no
-//! frame-counter policy, no MAC commands, no duty-cycle accounting, and a single
-//! channel where a real gateway hears eight. It exists to prove the provisioning
-//! chain end to end and to exercise the decode path; a real LNS would replace it
-//! behind the same interface.
+//! **This is a join responder, not a network server.** DevNonce anti-replay *is*
+//! enforced durably (via the [`JoinStore`], with the version-aware
+//! [`DevNoncePolicy`](mbus_rs::lorawan::DevNoncePolicy) — the fleet's 1.0.2 devices
+//! draw DevNonce randomly, so the store remembers a window of used values rather than
+//! a high-water counter), but there is no frame-counter policy, no MAC commands, no
+//! duty-cycle accounting, and a single channel where a real gateway hears eight. It
+//! exists to prove the provisioning chain end to end and to exercise the decode
+//! path; a real LNS would replace it behind the same interface.
 
 use anyhow::{Context, Result};
 use mbus_rs::lorawan::{
@@ -316,9 +319,10 @@ impl JoinResponder {
             return Ok(());
         }
 
-        // 1.0.4 anti-replay, durable before we transmit: this records the DevNonce
-        // and reserves a strictly-increasing JoinNonce in one committed write, so a
-        // replayed JoinRequest is refused and a restart cannot regress the JoinNonce.
+        // DevNonce anti-replay, durable before we transmit: this records the DevNonce
+        // (per the store's DevNoncePolicy — windowed for the 1.0.2 fleet) and reserves
+        // a strictly-increasing JoinNonce in one committed write, so a replayed
+        // JoinRequest is refused and a restart cannot regress the JoinNonce.
         let join_nonce = match self.store.admit_join(&jr.dev_eui_le, jr.dev_nonce) {
             Ok(JoinAdmission::Admitted { join_nonce }) => join_nonce,
             Ok(JoinAdmission::Replay { last, seen }) => {

@@ -174,3 +174,27 @@ remain deliberately out of the "join responder, not a network server" boundary.
 The design is untested against a real 1.0.4 meter; validation is against the Pico
 RadioLib rig and the persistence tests above until a production LoRa device exists.
 ```
+
+## Addendum (2026-08-10) — the high-water rule was wrong for the fleet
+
+The DevNonce half of this design encoded the **1.0.4** model: DevNonce as a
+device-side monotonic counter, admitted only on strict increase. The fleet's
+actual devices run **LoRaWAN 1.0.2** on an LMIC-derived stack, which draws
+DevNonce **randomly** (spec 1.0.2 §6.2.4: the network tracks *used* nonces).
+Against random draws, a high-water check admits the first join and then rejects
+every re-join whose draw lands below the running maximum — expected acceptance
+~1/(n+1) after n accepted joins. The Pico/RadioLib rig never caught this because
+RadioLib increments DevNonce unconditionally even in 1.0.x mode: the oracle was
+implementation-independent but shared the 1.0.4 *spec model*, so test (b) above
+celebrated as "correct rejection" the very behaviour that is a false-reject bug
+for a 1.0.2 device.
+
+The fix (`DevNoncePolicy` in `src/lorawan.rs`): anti-replay is now set-membership
+over a persisted window of recently-used nonces (`RandomWindow`, the default —
+also safe for counter devices, whose nonces never repeat), with the strict
+counter (`Counter`) kept as opt-in 1.0.4 hardening. `JoinRecord` gained a
+`recent_nonces` field (serde-default; migration seeds it from `last_dev_nonce`).
+The JoinNonce half of this design is unaffected and stands as written. The
+`pico-lora-jointest` firmware gained `r` (join with an injected random DevNonce)
+and `p` (replay it) to exercise the 1.0.2 model on air; see
+`metermon-rs/docs/LORA_JOIN_REHEARSAL.md`.

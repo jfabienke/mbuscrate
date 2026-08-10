@@ -60,8 +60,10 @@ pico_enable_stdio_usb(pico-lora-meter 1)
 pico_enable_stdio_uart(pico-lora-meter 0)
 pico_add_extra_outputs(pico-lora-meter)
 
-# LoRaWAN join-persistence tester — an OTAA end-device that reports DevNonce and
-# JoinNonce per join, for validating the responder's 1.0.4 anti-replay store.
+# LoRaWAN join tester — an OTAA end-device that reports DevNonce and JoinNonce
+# per join. 'j' uses RadioLib's monotonic counter (the 1.0.4 model); 'r' injects a
+# random DevNonce (the 1.0.2 model the real fleet uses — RadioLib cannot emit
+# these natively); 'p' replays the last random nonce (must be rejected).
 # Credentials come from the cmake command line (-DJT_DEV_EUI=... etc.); the
 # defaults match meter.cpp and the gateway's join-creds.json.
 add_executable(pico-lora-jointest
@@ -78,8 +80,9 @@ endif()
 if(JT_APP_KEY)
     target_compile_definitions(pico-lora-jointest PUBLIC JT_APP_KEY=${JT_APP_KEY})
 endif()
+# pico_rand: 'r' draws its random DevNonce from get_rand_32().
 target_link_libraries(pico-lora-jointest
-    pico_stdlib hardware_spi hardware_gpio hardware_timer pico_multicore hardware_pwm RadioLib)
+    pico_stdlib pico_rand hardware_spi hardware_gpio hardware_timer pico_multicore hardware_pwm RadioLib)
 pico_enable_stdio_usb(pico-lora-jointest 1)
 pico_enable_stdio_uart(pico-lora-jointest 0)
 pico_add_extra_outputs(pico-lora-jointest)
