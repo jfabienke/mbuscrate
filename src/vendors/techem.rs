@@ -16,12 +16,14 @@
 //! exercise them directly.
 #![allow(dead_code)]
 
-use super::{VendorDataRecord, VendorExtension, VendorVariable};
+use super::{VendorDataRecord, VendorDeviceInfo, VendorExtension, VendorVariable};
 use crate::error::MBusError;
+use serde_json::Value;
 
-/// Techem `VendorExtension` — registered under `"TCH"`. Only the manufacturer-CI
-/// hook is implemented; the newer OMS cells need no vendor code (the generic
-/// DIF/VIF path decodes them), and `Variant::select` returns `None` for them.
+/// Techem `VendorExtension` — registered under `"TCH"`. Decodes the legacy
+/// positional telegrams (manufacturer CI) and names the device from its
+/// `(version, device_type)`; the newer OMS cells need no decode code (the generic
+/// DIF/VIF path handles them), only the naming.
 pub struct TechemExtension;
 
 impl VendorExtension for TechemExtension {
@@ -39,6 +41,44 @@ impl VendorExtension for TechemExtension {
         // Newer OMS cells select to None here and fall through to the generic path.
         Ok(Variant::select(version, device_type).and_then(|v| v.decode(payload)))
     }
+
+    fn enrich_device_header(
+        &self,
+        manufacturer_id: &str,
+        mut info: VendorDeviceInfo,
+    ) -> Result<Option<VendorDeviceInfo>, MBusError> {
+        if manufacturer_id != "TCH" {
+            return Ok(None);
+        }
+        match identify(info.version, info.device_type) {
+            Some((model, media)) => {
+                info.model = Some(model.to_string());
+                info.additional_info
+                    .insert("media".to_string(), Value::String(media.to_string()));
+                Ok(Some(info))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+/// Human-readable `(model, media)` for a Techem `(version, device_type)` — covering
+/// both legacy and OMS cells. Identity only; decoding is [`Variant`].
+pub fn identify(version: u8, device_type: u8) -> Option<(&'static str, &'static str)> {
+    Some(match (version, device_type) {
+        (0x69 | 0x94, 0x80) => ("Techem FHKV data III", "heat cost allocator"),
+        (0x69 | 0x94, 0x08) => ("Techem FHKV data IV", "heat cost allocator"),
+        (0x6A, 0x08) => ("Techem FHKV radio 4", "heat cost allocator"),
+        (0x70 | 0x95, 0x62) => ("Techem mk-radio (warm water)", "warm water"),
+        (0x70 | 0x95, 0x72) => ("Techem mk-radio (cold water)", "water"),
+        (0x50, 0x72) => ("Techem mk-radio 3a", "water"),
+        (0x95, 0x37) => ("Techem mk-radio 4a", "water"),
+        (0x22 | 0x39 | 0x45, 0x04 | 0x43 | 0xC3) => ("Techem compact V", "heat"),
+        (0x27, 0x04 | 0xC3) => ("Techem vario 4", "heat"),
+        (0x28, 0x04) => ("Techem vario 411", "heat"),
+        (0x17, 0x04) => ("Techem vario 451 MID", "heat"),
+        _ => return None,
+    })
 }
 
 /// Techem device category (from the wM-Bus device-type byte).
@@ -267,6 +307,44 @@ mod tests {
         // A newer OMS cell (device_type 0x08) returns None so the generic path takes it.
         let oms = crate::vendors::dispatch_ci_hook(&reg, "TCH", 0x69, 0x08, 0xA0, &payload).unwrap();
         assert!(oms.is_none());
+    }
+
+    #[test]
+    fn identifies_models_across_legacy_and_oms_cells() {
+        assert_eq!(
+            identify(0x69, 0x80),
+            Some(("Techem FHKV data III", "heat cost allocator"))
+        );
+        assert_eq!(
+            identify(0x69, 0x08),
+            Some(("Techem FHKV data IV", "heat cost allocator"))
+        );
+        assert_eq!(identify(0x17, 0x04), Some(("Techem vario 451 MID", "heat")));
+        assert_eq!(identify(0x95, 0x37), Some(("Techem mk-radio 4a", "water")));
+        assert_eq!(identify(0xFF, 0xFF), None);
+    }
+
+    #[test]
+    fn enrich_names_device_via_registry() {
+        let reg = crate::vendors::VendorRegistry::with_defaults().unwrap();
+        let info = VendorDeviceInfo {
+            manufacturer_id: 0x5068,
+            device_id: 11_776_622,
+            version: 0x69,
+            device_type: 0x80,
+            model: None,
+            serial_number: None,
+            firmware_version: None,
+            additional_info: Default::default(),
+        };
+        let out = crate::vendors::dispatch_header_hook(&reg, "TCH", info)
+            .unwrap()
+            .expect("TCH names its device");
+        assert_eq!(out.model.as_deref(), Some("Techem FHKV data III"));
+        assert_eq!(
+            out.additional_info.get("media").unwrap(),
+            "heat cost allocator"
+        );
     }
 
     #[test]

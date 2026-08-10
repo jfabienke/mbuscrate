@@ -12,8 +12,8 @@
 use mbus_rs::id_to_manufacturer;
 use mbus_rs::payload::record::{parse_variable_record_in_context, MBusRecord, MBusRecordValue};
 use mbus_rs::vendors::{
-    dispatch_ci_hook, DecodeContext, DeviceIdentity, Integrity, VendorDataRecord, VendorRegistry,
-    VendorVariable,
+    dispatch_ci_hook, dispatch_header_hook, DecodeContext, DeviceIdentity, Integrity,
+    VendorDataRecord, VendorDeviceInfo, VendorRegistry, VendorVariable,
 };
 use mbus_rs::wmbus::compact_frame::CompactLayoutCache;
 use mbus_rs::wmbus::ell;
@@ -116,8 +116,34 @@ pub fn decode_frame_with_cache(
     let obj = out.as_object_mut().unwrap();
     // Make the profile channel observable end to end (§7.2), even before anything
     // interprets the model (that is migration step 5).
+    let has_profile = resolved_model.is_some();
     if let Some(model) = resolved_model {
         obj.insert("profile".into(), json!(model));
+    }
+    // Vendor self-identification — a fallback when the Device Manager holds no
+    // profile for this meter: name model/media from (version, device_type) via the
+    // resolved extension. P6: only from a frame whose header validated, so a corrupt
+    // header cannot mislabel the device.
+    if !has_profile && frame.crc_ok {
+        let basic = VendorDeviceInfo {
+            manufacturer_id: frame.manufacturer_id,
+            device_id: meterid,
+            version: frame.version,
+            device_type: frame.device_type,
+            model: None,
+            serial_number: None,
+            firmware_version: None,
+            additional_info: Default::default(),
+        };
+        let mfr = id_to_manufacturer(frame.manufacturer_id);
+        if let Ok(Some(info)) = dispatch_header_hook(vendor_registry(), &mfr, basic) {
+            if let Some(model) = info.model {
+                obj.insert("model".into(), json!(model));
+            }
+            if let Some(media) = info.additional_info.get("media") {
+                obj.insert("media".into(), media.clone());
+            }
+        }
     }
 
     // No application payload (e.g. ACC-NR / SND-NKE short frames).
