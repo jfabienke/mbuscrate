@@ -11,7 +11,10 @@
 
 use mbus_rs::id_to_manufacturer;
 use mbus_rs::payload::record::{parse_variable_record_in_context, MBusRecord, MBusRecordValue};
-use mbus_rs::vendors::{DecodeContext, DeviceIdentity, Integrity, VendorRegistry};
+use mbus_rs::vendors::{
+    dispatch_ci_hook, DecodeContext, DeviceIdentity, Integrity, VendorDataRecord, VendorRegistry,
+    VendorVariable,
+};
 use mbus_rs::wmbus::compact_frame::CompactLayoutCache;
 use mbus_rs::wmbus::ell;
 use mbus_rs::wmbus::frame_decode::FrameType;
@@ -204,12 +207,73 @@ pub fn decode_frame_with_cache(
                 }
             }
         }
+        // Manufacturer-specific CI (EN 13757-4): a non-OMS payload. Delegate to the
+        // resolved vendor extension — it returns normalized records (e.g. Techem's
+        // positional telegrams translated to standard fields). Generic: no vendor is
+        // named here; the registry keys on the manufacturer.
+        0xA0..=0xB7 => {
+            obj.insert("encrypted".into(), json!(false));
+            let mfr = id_to_manufacturer(frame.manufacturer_id);
+            match dispatch_ci_hook(
+                vendor_registry(),
+                &mfr,
+                frame.version,
+                frame.device_type,
+                ci,
+                after_ci,
+            ) {
+                Ok(Some(recs)) if !recs.is_empty() => {
+                    let arr: Vec<Value> = recs.iter().map(vendor_record_to_json).collect();
+                    obj.insert("records".into(), json!(arr));
+                }
+                // No handler for this (manufacturer, version, device_type), or nothing
+                // decoded — surface the raw payload rather than a fabricated reading.
+                _ => {
+                    obj.insert("mfct_ci".into(), json!(true));
+                    obj.insert("payload_hex".into(), json!(hex::encode(after_ci)));
+                }
+            }
+        }
         other => {
             obj.insert("error".into(), json!(format!("unhandled CI 0x{other:02X}")));
             obj.insert("payload_hex".into(), json!(hex::encode(after_ci)));
         }
     }
 
+    out
+}
+
+/// Render a vendor-decoded record as JSON, matching the shape of `record_to_json`.
+fn vendor_record_to_json(r: &VendorDataRecord) -> Value {
+    let mut out = json!({
+        "dif": format!("0x{:02X}", r.dif),
+        "vif": format!("0x{:02X}", r.vif),
+        "quantity": r.quantity,
+    });
+    let o = out.as_object_mut().unwrap();
+    if !r.unit.is_empty() {
+        o.insert("unit".into(), json!(r.unit));
+    }
+    match &r.value {
+        VendorVariable::Numeric(n) => {
+            o.insert("value".into(), json!(n));
+        }
+        VendorVariable::String(s) => {
+            o.insert("value".into(), json!(s));
+        }
+        VendorVariable::Boolean(b) => {
+            o.insert("value".into(), json!(b));
+        }
+        VendorVariable::Binary(b) => {
+            o.insert("value_hex".into(), json!(hex::encode(b)));
+        }
+        VendorVariable::Custom { name, value } => {
+            o.insert(name.clone(), value.clone());
+        }
+        VendorVariable::ErrorFlags { flags } => {
+            o.insert("error_flags".into(), json!(format!("0x{flags:08X}")));
+        }
+    }
     out
 }
 
