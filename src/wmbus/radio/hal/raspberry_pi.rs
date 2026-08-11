@@ -792,6 +792,14 @@ impl RaspberryPiHalBuilder {
         self
     }
 
+    /// Disable DIO2 pin control (the chip does not use DIO2 as an RF switch or IRQ).
+    /// The symmetric partner of [`no_reset`](Self::no_reset), for boards that leave
+    /// DIO2 unconnected.
+    pub fn no_dio2(mut self) -> Self {
+        self.gpio_pins.dio2 = None;
+        self
+    }
+
     /// Set the RESET pin GPIO number (optional)
     pub fn reset_pin(mut self, pin: u8) -> Self {
         self.gpio_pins.reset = Some(pin);
