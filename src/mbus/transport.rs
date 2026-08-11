@@ -15,8 +15,7 @@
 use super::serial::MBusBaudRate;
 use crate::error::MBusError;
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_serial::SerialPortBuilderExt;
+use tokio::io::AsyncWriteExt;
 
 /// Errors raised by a [`ByteTransport`]. These are transport-level only — framing, checksum, and
 /// timeout classification belong to the session/codec above.
@@ -70,9 +69,9 @@ pub async fn fill_exact(t: &mut dyn ByteTransport, buf: &mut [u8]) -> Result<(),
     Ok(())
 }
 
-/// Production [`ByteTransport`] over a `tokio_serial::SerialStream`.
+/// Production [`ByteTransport`] over a `serial2_tokio::SerialPort`.
 pub struct SerialTransport {
-    port: tokio_serial::SerialStream,
+    port: serial2_tokio::SerialPort,
     port_name: String,
 }
 
@@ -90,14 +89,21 @@ impl SerialTransport {
 fn build_port(
     port_name: &str,
     baud: MBusBaudRate,
-) -> Result<tokio_serial::SerialStream, MBusError> {
-    tokio_serial::new(port_name, baud.as_u32())
-        .data_bits(tokio_serial::DataBits::Eight)
-        .stop_bits(tokio_serial::StopBits::One)
-        .parity(tokio_serial::Parity::Even)
-        .timeout(baud.timeout())
-        .open_native_async()
-        .map_err(|e| MBusError::SerialPortError(e.to_string()))
+) -> Result<serial2_tokio::SerialPort, MBusError> {
+    // M-Bus line settings: 8 data bits, even parity, 1 stop bit (8E1), no flow control.
+    // serial2 configures via a `Settings` closure (vs tokio-serial's builder). The read
+    // timeout tokio-serial set here was a no-op on an async port — read deadlines are
+    // enforced above this layer (`tokio::time::timeout`), so it isn't reproduced.
+    serial2_tokio::SerialPort::open(port_name, |mut settings: serial2::Settings| {
+        settings.set_raw();
+        settings.set_baud_rate(baud.as_u32())?;
+        settings.set_char_size(serial2::CharSize::Bits8);
+        settings.set_stop_bits(serial2::StopBits::One);
+        settings.set_parity(serial2::Parity::Even);
+        settings.set_flow_control(serial2::FlowControl::None);
+        Ok(settings)
+    })
+    .map_err(|e| MBusError::SerialPortError(e.to_string()))
 }
 
 #[async_trait]
