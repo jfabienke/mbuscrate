@@ -90,7 +90,18 @@ pub static KNOWN_MANUFACTURERS: Lazy<HashMap<u16, ManufacturerInfo>> = Lazy::new
     );
 
     // Other HCA manufacturers
-    map.insert(0x0907, ManufacturerInfo::new("BHG", "Brunata Hürth", false));
+    map.insert(
+        0x0907,
+        ManufacturerInfo::with_description(
+            "BHG",
+            "Brunata (Denmark)",
+            false,
+            "Danish submetering incumbent; wM-Bus telemetry rides ZENNER EDC/PDC B.One \
+             modules (see docs/BRUNATA_RESEARCH.md). Do NOT confuse with BMT (0x09B4, \
+             \"BMETERS, Italy\" — HydroCal/HydroDigit) or BRU (Klaus Bruchmann); both are \
+             unrelated companies whose product names look Brunata-ish",
+        ),
+    );
     map.insert(
         0x2674,
         ManufacturerInfo::new("IST", "ista International", false),
