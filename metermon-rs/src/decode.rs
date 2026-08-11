@@ -12,8 +12,8 @@
 use mbus_rs::id_to_manufacturer;
 use mbus_rs::payload::record::{parse_variable_record_in_context, MBusRecord, MBusRecordValue};
 use mbus_rs::vendors::{
-    dispatch_ci_hook, dispatch_header_hook, DecodeContext, DeviceIdentity, Integrity,
-    VendorDataRecord, VendorDeviceInfo, VendorRegistry, VendorVariable,
+    dispatch_ci_hook, dispatch_header_hook, dispatch_status_hook, DecodeContext, DeviceIdentity,
+    Integrity, VendorDataRecord, VendorDeviceInfo, VendorRegistry, VendorVariable,
 };
 use mbus_rs::wmbus::compact_frame::CompactLayoutCache;
 use mbus_rs::wmbus::ell;
@@ -155,6 +155,19 @@ pub fn decode_frame_with_cache(
         }
     };
     obj.insert("ci".into(), json!(format!("0x{ci:02X}")));
+    // Decode-path provenance. A Techem HCA (and others) emit BOTH an unencrypted
+    // manufacturer-specific telegram and an encrypted OMS one for the same meter;
+    // tagging which path produced a reading lets a downstream store dedup — prefer
+    // the standard OMS reading when it decrypts, fall back to the proprietary one
+    // when no key is held. Keyed on the CI class, so it is set even if decode fails.
+    obj.insert(
+        "reading_source".into(),
+        json!(match ci {
+            0x72 | 0x78 | 0x79 | 0x7A | 0x8C..=0x8F => "oms",
+            0xA0..=0xB7 => "manufacturer_specific",
+            _ => "unknown",
+        }),
+    );
     let after_ci = frame.application_data();
 
     match ci {
@@ -303,6 +316,36 @@ fn vendor_record_to_json(r: &VendorDataRecord) -> Value {
     out
 }
 
+/// Flatten vendor-interpreted status variables into a JSON object for the
+/// `status_vendor` field. `Custom { name, value }` becomes a named key; the other
+/// variants fall back to a generic key so nothing is silently dropped.
+fn vendor_status_to_json(vars: &[VendorVariable]) -> Value {
+    let mut m = serde_json::Map::new();
+    for v in vars {
+        match v {
+            VendorVariable::Custom { name, value } => {
+                m.insert(name.clone(), value.clone());
+            }
+            VendorVariable::Boolean(b) => {
+                m.insert("flag".into(), json!(b));
+            }
+            VendorVariable::String(s) => {
+                m.insert("text".into(), json!(s));
+            }
+            VendorVariable::Numeric(n) => {
+                m.insert("value".into(), json!(n));
+            }
+            VendorVariable::ErrorFlags { flags } => {
+                m.insert("error_flags".into(), json!(format!("0x{flags:08X}")));
+            }
+            VendorVariable::Binary(b) => {
+                m.insert("hex".into(), json!(hex::encode(b)));
+            }
+        }
+    }
+    Value::Object(m)
+}
+
 /// Decode an OMS TPL-header payload (short CI 0x7A or long CI 0x72), decrypting a
 /// mode-5 body when a key is held.
 ///
@@ -341,6 +384,17 @@ fn decode_tpl(
             "status_mfr_bits".into(),
             json!(format!("0b{:03b}", st.manufacturer_bits)),
         );
+        // Give the resolved vendor extension a chance to interpret the
+        // manufacturer bits (previously a dead hook — no live caller). Vendors
+        // that publish no meaning surface the raw value; none of this fabricates
+        // semantics for a manufacturer that hasn't documented them.
+        let mfr = id_to_manufacturer(frame.manufacturer_id);
+        if let Ok(Some(vars)) = dispatch_status_hook(vendor_registry(), &mfr, sts) {
+            let sv = vendor_status_to_json(&vars);
+            if sv.as_object().is_some_and(|m| !m.is_empty()) {
+                obj.insert("status_vendor".into(), sv);
+            }
+        }
     }
     obj.insert("mode".into(), json!(mode));
     let body = &after_ci[addr_prefix + 4..];
@@ -837,6 +891,7 @@ mod tests {
         assert_eq!(v["manufacturer"], "TCH");
         assert_eq!(v["model"], "Techem FHKV data III");
         assert_eq!(v["media"], "heat cost allocator");
+        assert_eq!(v["reading_source"], "manufacturer_specific");
         assert!(has_value(&v, 131.0), "current_hca 131");
         assert!(has_value(&v, 1026.0), "previous_hca 1026");
     }
@@ -853,6 +908,7 @@ mod tests {
         keys.install(14_542_076, "FCF41938F63432975B52505F547FCEDF".into());
         let v = decode_frame(&frame_a(&logical), &empty_cfg(), &keys);
         assert_eq!(v["model"], "Techem FHKV data IV");
+        assert_eq!(v["reading_source"], "oms");
         assert_eq!(v["decrypted"], true, "mode-5 decrypt succeeded");
         assert!(v.get("record_error").is_none(), "records decoded cleanly");
         assert!(

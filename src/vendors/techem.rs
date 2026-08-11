@@ -18,7 +18,7 @@
 
 use super::{VendorDataRecord, VendorDeviceInfo, VendorExtension, VendorVariable};
 use crate::error::MBusError;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Techem `VendorExtension` — registered under `"TCH"`. Decodes the legacy
 /// positional telegrams (manufacturer CI) and names the device from its
@@ -59,6 +59,35 @@ impl VendorExtension for TechemExtension {
             }
             None => Ok(None),
         }
+    }
+
+    /// Interpret the manufacturer-specific status bits (7:5) of the TPL status
+    /// byte. Techem does not publish their meaning and they are absent from the
+    /// community drivers, so we surface the raw value rather than assert an
+    /// unverified interpretation — an operator can still see and correlate the
+    /// anomaly, and a real capture can later replace this with named flags. The
+    /// standard health bits (2 low-battery, 3 permanent-, 4 temporary-error) are
+    /// EN-13757-defined and decoded generically upstream, so we don't touch them.
+    /// Returns `None` when no manufacturer bit is set (the common case).
+    fn decode_status_bits(
+        &self,
+        manufacturer_id: &str,
+        status_byte: u8,
+    ) -> Result<Option<Vec<VendorVariable>>, MBusError> {
+        if manufacturer_id != "TCH" {
+            return Ok(None);
+        }
+        let mfr = (status_byte >> 5) & 0x07;
+        if mfr == 0 {
+            return Ok(None);
+        }
+        Ok(Some(vec![VendorVariable::Custom {
+            name: "techem_status_mfr".to_string(),
+            value: json!({
+                "bits": format!("0b{mfr:03b}"),
+                "note": "manufacturer-specific; meaning unconfirmed (no published Techem table)",
+            }),
+        }]))
     }
 }
 
@@ -422,5 +451,24 @@ mod tests {
         assert!((n(&r, "previous_volume_m3") - 0.1).abs() < 1e-9);
         assert!((n(&r, "current_volume_m3") - 0.3).abs() < 1e-9);
         assert!((n(&r, "total_volume_m3") - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn status_bits_surface_manufacturer_bits_honestly() {
+        let ext = TechemExtension;
+        // Only standard bits set (bit 2 = low battery) -> nothing added; those are
+        // decoded generically, not by the vendor hook.
+        assert!(ext.decode_status_bits("TCH", 0b0000_0100).unwrap().is_none());
+        // A manufacturer bit set (bit 7) -> surfaced raw, unnamed.
+        let vars = ext.decode_status_bits("TCH", 0b1010_0000).unwrap().unwrap();
+        match &vars[0] {
+            VendorVariable::Custom { name, value } => {
+                assert_eq!(name, "techem_status_mfr");
+                assert_eq!(value["bits"], "0b101");
+            }
+            _ => panic!("expected a custom status variable"),
+        }
+        // Wrong manufacturer -> None even with bits set.
+        assert!(ext.decode_status_bits("KAM", 0b1110_0000).unwrap().is_none());
     }
 }
