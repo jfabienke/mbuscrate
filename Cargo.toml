@@ -16,7 +16,11 @@ env_logger = "0.11"
 nom = "8.0"
 proptest = "1.11"
 tokio = { version = "1.53", features = ["full"] }
-tokio-serial = "5.5"
+# serial2/serial2-tokio replace tokio-serial (→ serialport-rs, which drags in the
+# GPL-3.0 `unescaper` + MPL-2.0 `serialport`). serial2 is BSD-2-Clause OR Apache-2.0
+# with no serialport-rs dependency. Wired-M-Bus transport only (src/mbus/transport.rs).
+serial2 = "0.2"
+serial2-tokio = "0.1"
 bytes = "1.12"
 thiserror = "2.0"
 async-trait = "0.1"

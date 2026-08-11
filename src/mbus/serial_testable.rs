@@ -14,9 +14,9 @@ pub trait SerialPort: AsyncReadExt + AsyncWriteExt + Unpin + Send {
     async fn flush(&mut self) -> Result<(), std::io::Error>;
 }
 
-// Implement SerialPort for tokio_serial::SerialStream
+// Implement SerialPort for serial2_tokio::SerialPort
 #[async_trait::async_trait]
-impl SerialPort for tokio_serial::SerialStream {
+impl SerialPort for serial2_tokio::SerialPort {
     async fn flush(&mut self) -> Result<(), std::io::Error> {
         AsyncWriteExt::flush(self).await
     }
