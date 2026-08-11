@@ -21,9 +21,9 @@ pub mod mode_switching;
 pub mod network;
 #[cfg(feature = "crypto")]
 pub mod oms;
-pub mod weak_key_audit;
 pub mod radio;
 pub mod status;
+pub mod weak_key_audit;
 
 pub use radio::{
     driver::Sx126xDriver,

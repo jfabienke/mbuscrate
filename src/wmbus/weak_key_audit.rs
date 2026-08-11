@@ -346,7 +346,13 @@ mod tests {
     // classify one payload and fold it, as audit_capture does per frame.
     fn audit_one(serial: u32, payload: &[u8]) -> Vec<MeterVerdict> {
         let keys = default_keys();
-        aggregate(std::iter::once(classify(serial, "KAM".into(), link(), payload, &keys)))
+        aggregate(std::iter::once(classify(
+            serial,
+            "KAM".into(),
+            link(),
+            payload,
+            &keys,
+        )))
     }
 
     #[test]
@@ -372,7 +378,10 @@ mod tests {
     #[test]
     fn arm2_flags_a_plaintext_ell_meter() {
         // SN top 3 bits = 000 => EllSecurity::None => cleartext.
-        let v = audit_one(1, &ell2_payload(0x00, 0x2A, 0x0000_0042, &[0x0C, 0x13, 0x00, 0x00]));
+        let v = audit_one(
+            1,
+            &ell2_payload(0x00, 0x2A, 0x0000_0042, &[0x0C, 0x13, 0x00, 0x00]),
+        );
         assert_eq!(v[0].verdict, Verdict::Plaintext);
         assert!(v[0].verdict.is_exposure());
     }
@@ -382,8 +391,20 @@ mod tests {
         // SN top 3 bits = 001 => AES-128-CTR. Same SN twice => keystream reuse.
         let sn = 0x2000_0007;
         let keys = default_keys();
-        let f1 = classify(63398862, "KAM".into(), link(), &ell2_payload(0, 1, sn, &[0xDE, 0xAD]), &keys);
-        let f2 = classify(63398862, "KAM".into(), link(), &ell2_payload(0, 2, sn, &[0xBE, 0xEF]), &keys);
+        let f1 = classify(
+            63398862,
+            "KAM".into(),
+            link(),
+            &ell2_payload(0, 1, sn, &[0xDE, 0xAD]),
+            &keys,
+        );
+        let f2 = classify(
+            63398862,
+            "KAM".into(),
+            link(),
+            &ell2_payload(0, 2, sn, &[0xBE, 0xEF]),
+            &keys,
+        );
         let v = aggregate([f1, f2].into_iter());
         assert_eq!(v[0].verdict, Verdict::SessionReuse { sn });
         assert_eq!(v[0].frames_seen, 2);
@@ -392,8 +413,20 @@ mod tests {
     #[test]
     fn arm2_clears_ctr_with_distinct_session_numbers() {
         let keys = default_keys();
-        let f1 = classify(1, "KAM".into(), link(), &ell2_payload(0, 1, 0x2000_0007, &[0xDE, 0xAD]), &keys);
-        let f2 = classify(1, "KAM".into(), link(), &ell2_payload(0, 2, 0x2000_0008, &[0xBE, 0xEF]), &keys);
+        let f1 = classify(
+            1,
+            "KAM".into(),
+            link(),
+            &ell2_payload(0, 1, 0x2000_0007, &[0xDE, 0xAD]),
+            &keys,
+        );
+        let f2 = classify(
+            1,
+            "KAM".into(),
+            link(),
+            &ell2_payload(0, 2, 0x2000_0008, &[0xBE, 0xEF]),
+            &keys,
+        );
         let v = aggregate([f1, f2].into_iter());
         assert_eq!(v[0].verdict, Verdict::EncryptedNoWeakness);
         assert!(!v[0].verdict.is_exposure());
