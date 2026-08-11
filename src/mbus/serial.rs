@@ -163,7 +163,7 @@ impl CollisionStatistics {
     }
 }
 
-/// Represents a handle to the M-Bus serial connection, encapsulating the tokio_serial::SerialPort.
+/// Represents a handle to the M-Bus serial connection, encapsulating the serial2_tokio::SerialPort.
 pub struct MBusDeviceHandle {
     transport: Box<dyn ByteTransport>,
     config: SerialConfig,
