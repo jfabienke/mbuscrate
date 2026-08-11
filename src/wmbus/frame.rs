@@ -353,8 +353,14 @@ pub fn parse_wmbus_frame_with_vendor(
     if let (Some(mfr_id), Some(reg)) = (manufacturer_id, registry) {
         if frame.control_info >= 0xA0 && frame.control_info <= 0xB7 {
             // Dispatch to vendor hook
-            if let Ok(Some(_vendor_record)) =
-                vendors::dispatch_ci_hook(reg, mfr_id, frame.control_info, &frame.payload)
+            if let Ok(Some(_vendor_records)) = vendors::dispatch_ci_hook(
+                reg,
+                mfr_id,
+                frame.version,
+                frame.device_type,
+                frame.control_info,
+                &frame.payload,
+            )
             {
                 // For now, just mark in payload that vendor handling occurred
                 // In a full implementation, we'd convert vendor_record to appropriate format

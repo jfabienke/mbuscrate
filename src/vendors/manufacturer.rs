@@ -95,7 +95,7 @@ pub static KNOWN_MANUFACTURERS: Lazy<HashMap<u16, ManufacturerInfo>> = Lazy::new
         0x2674,
         ManufacturerInfo::new("IST", "ista International", false),
     );
-    map.insert(0x5068, ManufacturerInfo::new("TCH", "Techem GmbH", false));
+    map.insert(0x5068, ManufacturerInfo::new("TCH", "Techem GmbH", true));
     map.insert(
         0x6A4D,
         ManufacturerInfo::new("ZRM", "Minol Zenner Group", false),
@@ -620,12 +620,15 @@ mod tests {
         // Reference manufacturer
         assert!(manufacturers.iter().any(|(_, info)| info.code == "CEN"));
 
-        // Only QUNDIS should have quirks
-        let quirky_count = manufacturers
+        // QUNDIS and Techem carry vendor extensions.
+        let quirky: Vec<&str> = manufacturers
             .iter()
             .filter(|(_, info)| info.has_quirks)
-            .count();
-        assert_eq!(quirky_count, 1, "Only QUNDIS should have quirks");
+            .map(|(_, info)| info.code)
+            .collect();
+        assert_eq!(quirky.len(), 2, "expected QDS + TCH to have quirks, got {quirky:?}");
+        assert!(quirky.contains(&"QDS"));
+        assert!(quirky.contains(&"TCH"));
     }
 
     #[test]

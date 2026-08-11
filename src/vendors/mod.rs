@@ -8,6 +8,7 @@ pub mod context;
 pub mod manufacturer;
 pub mod quirks;
 pub mod qundis_hca;
+pub mod techem;
 pub mod zenner;
 
 use std::collections::HashMap;
@@ -136,14 +137,19 @@ pub trait VendorExtension: Send + Sync {
 
     /// Hook 3: Handle CI 0xA0-0xB7 manufacturer commands (wM-Bus)
     ///
-    /// Called for manufacturer-specific control information.
-    /// Return custom record or None for standard unknown CI handling.
+    /// Called for manufacturer-specific control information — a non-OMS payload
+    /// under a manufacturer CI. `version`/`device_type` are the link-header
+    /// selector bytes (many vendors, e.g. Techem, pick the payload layout from
+    /// these). Return the fully-decoded records (a positional telegram yields
+    /// several), or `None` for standard unknown-CI handling.
     fn handle_ci_manufacturer_range(
         &self,
         _manufacturer_id: &str,
+        _version: u8,
+        _device_type: u8,
         _ci: u8,
         _payload: &[u8],
-    ) -> Result<Option<VendorDataRecord>, MBusError> {
+    ) -> Result<Option<Vec<VendorDataRecord>>, MBusError> {
         Ok(None)
     }
 
@@ -366,6 +372,10 @@ impl VendorRegistry {
         // QUNDIS date handling is a Layer 2 quirk: it overrides a standard VIF.
         registry.register_quirk(Arc::new(crate::vendors::qundis_hca::QundisDateQuirk::new()));
 
+        // Techem: legacy positional telegrams (CI 0xA0-0xA2) translated to standard
+        // records; newer Techem cells are OMS and decode via the generic path.
+        registry.register("TCH", Arc::new(crate::vendors::techem::TechemExtension))?;
+
         // Future vendor extensions can be added here
         // e.g., registry.register("KAM", kamstrup_extension)?;
 
@@ -452,11 +462,13 @@ pub fn dispatch_vif_hook(
 pub fn dispatch_ci_hook(
     registry: &VendorRegistry,
     manufacturer_id: &str,
+    version: u8,
+    device_type: u8,
     ci: u8,
     payload: &[u8],
-) -> Result<Option<VendorDataRecord>, MBusError> {
+) -> Result<Option<Vec<VendorDataRecord>>, MBusError> {
     if let Some(extension) = registry.get(manufacturer_id) {
-        extension.handle_ci_manufacturer_range(manufacturer_id, ci, payload)
+        extension.handle_ci_manufacturer_range(manufacturer_id, version, device_type, ci, payload)
     } else {
         Ok(None)
     }

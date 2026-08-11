@@ -11,7 +11,10 @@
 
 use mbus_rs::id_to_manufacturer;
 use mbus_rs::payload::record::{parse_variable_record_in_context, MBusRecord, MBusRecordValue};
-use mbus_rs::vendors::{DecodeContext, DeviceIdentity, Integrity, VendorRegistry};
+use mbus_rs::vendors::{
+    dispatch_ci_hook, dispatch_header_hook, dispatch_status_hook, DecodeContext, DeviceIdentity,
+    Integrity, VendorDataRecord, VendorDeviceInfo, VendorRegistry, VendorVariable,
+};
 use mbus_rs::wmbus::compact_frame::CompactLayoutCache;
 use mbus_rs::wmbus::ell;
 use mbus_rs::wmbus::frame_decode::FrameType;
@@ -113,8 +116,34 @@ pub fn decode_frame_with_cache(
     let obj = out.as_object_mut().unwrap();
     // Make the profile channel observable end to end (§7.2), even before anything
     // interprets the model (that is migration step 5).
+    let has_profile = resolved_model.is_some();
     if let Some(model) = resolved_model {
         obj.insert("profile".into(), json!(model));
+    }
+    // Vendor self-identification — a fallback when the Device Manager holds no
+    // profile for this meter: name model/media from (version, device_type) via the
+    // resolved extension. P6: only from a frame whose header validated, so a corrupt
+    // header cannot mislabel the device.
+    if !has_profile && frame.crc_ok {
+        let basic = VendorDeviceInfo {
+            manufacturer_id: frame.manufacturer_id,
+            device_id: meterid,
+            version: frame.version,
+            device_type: frame.device_type,
+            model: None,
+            serial_number: None,
+            firmware_version: None,
+            additional_info: Default::default(),
+        };
+        let mfr = id_to_manufacturer(frame.manufacturer_id);
+        if let Ok(Some(info)) = dispatch_header_hook(vendor_registry(), &mfr, basic) {
+            if let Some(model) = info.model {
+                obj.insert("model".into(), json!(model));
+            }
+            if let Some(media) = info.additional_info.get("media") {
+                obj.insert("media".into(), media.clone());
+            }
+        }
     }
 
     // No application payload (e.g. ACC-NR / SND-NKE short frames).
@@ -126,6 +155,19 @@ pub fn decode_frame_with_cache(
         }
     };
     obj.insert("ci".into(), json!(format!("0x{ci:02X}")));
+    // Decode-path provenance. A Techem HCA (and others) emit BOTH an unencrypted
+    // manufacturer-specific telegram and an encrypted OMS one for the same meter;
+    // tagging which path produced a reading lets a downstream store dedup — prefer
+    // the standard OMS reading when it decrypts, fall back to the proprietary one
+    // when no key is held. Keyed on the CI class, so it is set even if decode fails.
+    obj.insert(
+        "reading_source".into(),
+        json!(match ci {
+            0x72 | 0x78 | 0x79 | 0x7A | 0x8C..=0x8F => "oms",
+            0xA0..=0xB7 => "manufacturer_specific",
+            _ => "unknown",
+        }),
+    );
     let after_ci = frame.application_data();
 
     match ci {
@@ -204,6 +246,33 @@ pub fn decode_frame_with_cache(
                 }
             }
         }
+        // Manufacturer-specific CI (EN 13757-4): a non-OMS payload. Delegate to the
+        // resolved vendor extension — it returns normalized records (e.g. Techem's
+        // positional telegrams translated to standard fields). Generic: no vendor is
+        // named here; the registry keys on the manufacturer.
+        0xA0..=0xB7 => {
+            obj.insert("encrypted".into(), json!(false));
+            let mfr = id_to_manufacturer(frame.manufacturer_id);
+            match dispatch_ci_hook(
+                vendor_registry(),
+                &mfr,
+                frame.version,
+                frame.device_type,
+                ci,
+                after_ci,
+            ) {
+                Ok(Some(recs)) if !recs.is_empty() => {
+                    let arr: Vec<Value> = recs.iter().map(vendor_record_to_json).collect();
+                    obj.insert("records".into(), json!(arr));
+                }
+                // No handler for this (manufacturer, version, device_type), or nothing
+                // decoded — surface the raw payload rather than a fabricated reading.
+                _ => {
+                    obj.insert("mfct_ci".into(), json!(true));
+                    obj.insert("payload_hex".into(), json!(hex::encode(after_ci)));
+                }
+            }
+        }
         other => {
             obj.insert("error".into(), json!(format!("unhandled CI 0x{other:02X}")));
             obj.insert("payload_hex".into(), json!(hex::encode(after_ci)));
@@ -211,6 +280,70 @@ pub fn decode_frame_with_cache(
     }
 
     out
+}
+
+/// Render a vendor-decoded record as JSON, matching the shape of `record_to_json`.
+fn vendor_record_to_json(r: &VendorDataRecord) -> Value {
+    let mut out = json!({
+        "dif": format!("0x{:02X}", r.dif),
+        "vif": format!("0x{:02X}", r.vif),
+        "quantity": r.quantity,
+    });
+    let o = out.as_object_mut().unwrap();
+    if !r.unit.is_empty() {
+        o.insert("unit".into(), json!(r.unit));
+    }
+    match &r.value {
+        VendorVariable::Numeric(n) => {
+            o.insert("value".into(), json!(n));
+        }
+        VendorVariable::String(s) => {
+            o.insert("value".into(), json!(s));
+        }
+        VendorVariable::Boolean(b) => {
+            o.insert("value".into(), json!(b));
+        }
+        VendorVariable::Binary(b) => {
+            o.insert("value_hex".into(), json!(hex::encode(b)));
+        }
+        VendorVariable::Custom { name, value } => {
+            o.insert(name.clone(), value.clone());
+        }
+        VendorVariable::ErrorFlags { flags } => {
+            o.insert("error_flags".into(), json!(format!("0x{flags:08X}")));
+        }
+    }
+    out
+}
+
+/// Flatten vendor-interpreted status variables into a JSON object for the
+/// `status_vendor` field. `Custom { name, value }` becomes a named key; the other
+/// variants fall back to a generic key so nothing is silently dropped.
+fn vendor_status_to_json(vars: &[VendorVariable]) -> Value {
+    let mut m = serde_json::Map::new();
+    for v in vars {
+        match v {
+            VendorVariable::Custom { name, value } => {
+                m.insert(name.clone(), value.clone());
+            }
+            VendorVariable::Boolean(b) => {
+                m.insert("flag".into(), json!(b));
+            }
+            VendorVariable::String(s) => {
+                m.insert("text".into(), json!(s));
+            }
+            VendorVariable::Numeric(n) => {
+                m.insert("value".into(), json!(n));
+            }
+            VendorVariable::ErrorFlags { flags } => {
+                m.insert("error_flags".into(), json!(format!("0x{flags:08X}")));
+            }
+            VendorVariable::Binary(b) => {
+                m.insert("hex".into(), json!(hex::encode(b)));
+            }
+        }
+    }
+    Value::Object(m)
 }
 
 /// Decode an OMS TPL-header payload (short CI 0x7A or long CI 0x72), decrypting a
@@ -251,6 +384,17 @@ fn decode_tpl(
             "status_mfr_bits".into(),
             json!(format!("0b{:03b}", st.manufacturer_bits)),
         );
+        // Give the resolved vendor extension a chance to interpret the
+        // manufacturer bits (previously a dead hook — no live caller). Vendors
+        // that publish no meaning surface the raw value; none of this fabricates
+        // semantics for a manufacturer that hasn't documented them.
+        let mfr = id_to_manufacturer(frame.manufacturer_id);
+        if let Ok(Some(vars)) = dispatch_status_hook(vendor_registry(), &mfr, sts) {
+            let sv = vendor_status_to_json(&vars);
+            if sv.as_object().is_some_and(|m| !m.is_empty()) {
+                obj.insert("status_vendor".into(), sv);
+            }
+        }
     }
     obj.insert("mode".into(), json!(mode));
     let body = &after_ci[addr_prefix + 4..];
@@ -697,5 +841,95 @@ mod tests {
         assert_eq!(jv["quantity"], json!("Volume"));
         assert!(jv.get("value").is_some());
         assert!(jv.get("unknown_vif").is_none());
+    }
+
+    // ---- Techem end-to-end golden frames -----------------------------------
+    //
+    // Real reference telegrams from the wmbusmeters GPL test corpus, decoded
+    // through the full path. wmbusmeters telegrams are *logical* frames (no block
+    // CRCs); `frame_a` re-blocks them into a Type-A mode-C frame with correct CRCs
+    // so `decode_mode_c` accepts them and `crc_ok` is true.
+
+    /// Re-block a logical telegram (L C M A V T CI …) into a Type-A mode-C frame:
+    /// sync 0xCD, 10-byte header + CRC, then 16-byte app blocks each + CRC.
+    fn frame_a(logical: &[u8]) -> Vec<u8> {
+        use mbus_rs::wmbus::crc::calculate_wmbus_crc;
+        let mut out = vec![0xCDu8];
+        let (hdr, app) = logical.split_at(10);
+        out.extend_from_slice(hdr);
+        out.extend_from_slice(&calculate_wmbus_crc(hdr).to_be_bytes());
+        for chunk in app.chunks(16) {
+            out.extend_from_slice(chunk);
+            out.extend_from_slice(&calculate_wmbus_crc(chunk).to_be_bytes());
+        }
+        out
+    }
+
+    fn has_value(v: &Value, target: f64) -> bool {
+        v["records"]
+            .as_array()
+            .map(|a| {
+                a.iter().any(|r| {
+                    r.get("value")
+                        .and_then(|x| x.as_f64())
+                        .is_some_and(|x| (x - target).abs() < 1e-6)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn e2e_fhkvdataiii_positional_via_ci_seam() {
+        // Positional HCA (CI 0xA0) routed through the 0xA0-0xB7 seam -> normalized
+        // records + vendor naming. Values come from our own decoder.
+        let logical = hex::decode(
+            "34446850226677116980A0119F27020480048300C408F709143C003D341A2B0B2A0707000000000000062D114457563D71A1850000",
+        )
+        .unwrap();
+        let v = decode_frame(&frame_a(&logical), &empty_cfg(), &KeyStore::new());
+        assert_eq!(v["crc_ok"], true);
+        assert_eq!(v["manufacturer"], "TCH");
+        assert_eq!(v["model"], "Techem FHKV data III");
+        assert_eq!(v["media"], "heat cost allocator");
+        assert_eq!(v["reading_source"], "manufacturer_specific");
+        assert!(has_value(&v, 131.0), "current_hca 131");
+        assert!(has_value(&v, 1026.0), "previous_hca 1026");
+    }
+
+    #[test]
+    fn e2e_fhkvdataiv_encrypted_oms() {
+        // Encrypted (TPL mode-5) HCA: decrypts to standard DIF/VIF via the generic
+        // path; the extension only names it. Key from the wmbusmeters corpus.
+        let logical = hex::decode(
+            "4E4468507620541494087AAD004005089D86B62A329B3439873999738F82461ABDE3C7AC78692B363F3B41EB68607F9C9160F550769B065B6EA00A2E44346E29FF5DC5CB86283C69324AD33D137F6F",
+        )
+        .unwrap();
+        let mut keys = KeyStore::new();
+        keys.install(14_542_076, "FCF41938F63432975B52505F547FCEDF".into());
+        let v = decode_frame(&frame_a(&logical), &empty_cfg(), &keys);
+        assert_eq!(v["model"], "Techem FHKV data IV");
+        assert_eq!(v["reading_source"], "oms");
+        assert_eq!(v["decrypted"], true, "mode-5 decrypt succeeded");
+        assert!(v.get("record_error").is_none(), "records decoded cleanly");
+        assert!(
+            v["records"].as_array().is_some_and(|a| !a.is_empty()),
+            "decrypted payload yielded records"
+        );
+    }
+
+    #[test]
+    fn e2e_vario451mid_ell_oms() {
+        // ELL-wrapped (CI 0x8C), unencrypted OMS heat meter: validates the ELL ->
+        // DIF/VIF path for a Techem device + naming.
+        let logical = hex::decode(
+            "734468501204439417048c0084900f002c2536700000B767B64527c50ac67a33005007102f2f8404062846000082046c9f2c8d04861f1e72fe00000000000000000000000000000000000000000000000000000000440600000000426cffff0406c94700002f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+        )
+        .unwrap();
+        let v = decode_frame(&frame_a(&logical), &empty_cfg(), &KeyStore::new());
+        assert_eq!(v["model"], "Techem vario 451 MID");
+        assert!(
+            v["records"].as_array().is_some_and(|a| !a.is_empty()),
+            "ELL payload yielded records"
+        );
     }
 }
