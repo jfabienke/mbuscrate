@@ -27,6 +27,30 @@ jobs:
       with:
         args: --ignore-tests --out Lcov
 
+  # metermon-rs is a standalone (non-workspace) crate: the root `test` matrix runs at
+  # the repo root and never formats, builds, or tests it — and its live gateway code
+  # sits behind `--features radio` (rppal → Linux/aarch64 only, so it cannot build on
+  # the macos/windows legs). This Ubuntu job is the only place metermon-rs, and the
+  # root crate's Linux radio backends, are checked. It is what would have caught the
+  # `JoinAdmission` import miss and the LoRa-rotation panic before they reached the Pi.
+  radio-feature:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+    # Root crate's Linux-only radio backends (RFM69 driver + Raspberry Pi HAL).
+    - run: cargo clippy --features rfm69,raspberry-pi --all-targets -- -D warnings
+    # The standalone metermon-rs gateway: format, lint, and test with the radio path
+    # (monitor loop, SX1262/RFM69 sources, LoRaWAN responder) that only compiles here.
+    - name: metermon-rs (fmt + radio clippy + test)
+      working-directory: metermon-rs
+      run: |
+        cargo fmt --all -- --check
+        cargo clippy --features radio --all-targets -- -D warnings
+        cargo test   --features radio --verbose
+
   audit:
     runs-on: ubuntu-latest
     steps:
