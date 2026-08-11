@@ -1,0 +1,44 @@
+#!/bin/sh
+# Reject unformatted Rust before it reaches CI.
+#
+# CI's `test` job gates on `cargo fmt --all -- --check` (and the radio-feature job
+# checks metermon-rs the same way). A fmt slip fails the whole matrix and blocks a
+# green master, so catch it at commit time instead.
+#
+# Enable once per clone (the hook is tracked; the config that points at it is not):
+#     git config core.hooksPath .githooks
+#
+# Bypass for an intentional WIP commit: `git commit --no-verify`.
+
+# Only run when Rust sources are staged — doc/config-only commits skip the check.
+if ! git diff --cached --name-only --diff-filter=ACM | grep -q '\.rs$'; then
+    exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo not found on PATH — skipping fmt check." >&2
+    exit 0
+fi
+
+fail=0
+
+# Note: checks the working tree (the standard rustfmt pre-commit pattern), not the
+# staged blobs. Keep the tree fmt-clean and this only ever flags what you're about to
+# commit. The root crate and the standalone metermon-rs are separate `cargo fmt` roots.
+echo "pre-commit: cargo fmt --check (root crate)…"
+cargo fmt --all -- --check || fail=1
+
+if [ -f metermon-rs/Cargo.toml ]; then
+    echo "pre-commit: cargo fmt --check (metermon-rs)…"
+    ( cd metermon-rs && cargo fmt --all -- --check ) || fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo
+    echo "✗ pre-commit: formatting check failed. Fix with:" >&2
+    echo "      cargo fmt --all && ( cd metermon-rs && cargo fmt --all )" >&2
+    echo "  then re-stage and commit (or 'git commit --no-verify' to bypass)." >&2
+    exit 1
+fi
+
+exit 0
