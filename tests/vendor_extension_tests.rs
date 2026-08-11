@@ -69,9 +69,11 @@ impl VendorExtension for KamstrupExtension {
     fn handle_ci_manufacturer_range(
         &self,
         manufacturer_id: &str,
+        _version: u8,
+        _device_type: u8,
         ci: u8,
         payload: &[u8],
-    ) -> Result<Option<VendorDataRecord>, MBusError> {
+    ) -> Result<Option<Vec<VendorDataRecord>>, MBusError> {
         if manufacturer_id != "KAM" || !(0xA0..=0xB7).contains(&ci) {
             return Ok(None);
         }
@@ -84,7 +86,7 @@ impl VendorExtension for KamstrupExtension {
             value: VendorVariable::Binary(payload.to_vec()),
             quantity: format!("Kamstrup Command 0x{ci:02X}"),
         };
-        Ok(Some(record))
+        Ok(Some(vec![record]))
     }
 
     fn decode_status_bits(
@@ -238,15 +240,16 @@ fn test_kamstrup_ci_commands() {
     let extension = registry.get("KAM").unwrap();
     let payload = vec![0x01, 0x02, 0x03];
     let result = extension
-        .handle_ci_manufacturer_range("KAM", 0xA5, &payload)
+        .handle_ci_manufacturer_range("KAM", 0x00, 0x00, 0xA5, &payload)
         .unwrap();
 
     assert!(result.is_some());
-    let record = result.unwrap();
+    let records = result.unwrap();
+    let record = &records[0];
     assert_eq!(record.quantity, "Kamstrup Command 0xA5");
 
-    if let VendorVariable::Binary(data) = record.value {
-        assert_eq!(data, vec![0x01, 0x02, 0x03]);
+    if let VendorVariable::Binary(data) = &record.value {
+        assert_eq!(*data, vec![0x01, 0x02, 0x03]);
     } else {
         panic!("Expected binary value");
     }

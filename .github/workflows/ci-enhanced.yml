@@ -117,14 +117,11 @@ jobs:
     
     - name: Check performance targets
       run: |
-        # Extract benchmark results and check against targets
-        cargo bench --bench parsing_benchmark -- --load-baseline current --baseline main 2>&1 | tee bench_output.txt
-        
-        # Fail if regression detected (>10% slower)
-        if grep -q "Performance has regressed" bench_output.txt; then
-          echo "Performance regression detected!"
-          exit 1
-        fi
+        # Regression gating needs a baseline persisted across runs (cache/artifact).
+        # CI stores no "main" baseline, so `criterion --baseline main` errored and
+        # hard-failed this job on every run. Until a baseline is persisted, record
+        # results (see the benchmark-results artifact) without a false gate.
+        echo "Benchmarks recorded; no persisted baseline available — regression gate skipped."
 
   # E2E tests with mocks
   e2e:
@@ -209,7 +206,8 @@ jobs:
     
     - uses: dtolnay/rust-toolchain@stable
     
-    - uses: EmbarkStudios/cargo-deny-action@v1
+    # v2 bundles a current Cargo; v1 could not parse the v4 Cargo.lock and hard-failed.
+    - uses: EmbarkStudios/cargo-deny-action@v2
       with:
         command: check
         arguments: --all-features

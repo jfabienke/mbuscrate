@@ -107,7 +107,7 @@ impl MBusDeviceManager {
         let mut records = Vec::new();
 
         // Send the request to all connected M-Bus devices
-        for (_, handle) in self.mbus_handles.iter_mut() {
+        for handle in self.mbus_handles.values_mut() {
             records.extend(handle.send_request(address).await?);
         }
 
@@ -123,12 +123,12 @@ impl MBusDeviceManager {
         let mut addresses = Vec::new();
 
         // Scan for available M-Bus devices
-        for (_, handle) in self.mbus_handles.iter_mut() {
+        for handle in self.mbus_handles.values_mut() {
             addresses.extend(handle.scan_devices().await?);
         }
 
         // Scan for available wM-Bus devices
-        for (_, handle) in self.wmbus_handles.iter_mut() {
+        for handle in self.wmbus_handles.values_mut() {
             let wmbus_devices = handle.scan_devices().await.map_err(MBusError::from)?;
             // Convert DeviceInfo to String addresses
             addresses.extend(
@@ -144,12 +144,12 @@ impl MBusDeviceManager {
     /// Disconnects from all connected M-Bus and wM-Bus devices.
     pub async fn disconnect_all(&mut self) -> Result<(), MBusError> {
         // Disconnect from all M-Bus devices
-        for (_, handle) in self.mbus_handles.iter_mut() {
+        for handle in self.mbus_handles.values_mut() {
             handle.disconnect().await?;
         }
 
         // Disconnect from all wM-Bus devices
-        for (_, handle) in self.wmbus_handles.iter_mut() {
+        for handle in self.wmbus_handles.values_mut() {
             handle.stop_receiver().await;
         }
 

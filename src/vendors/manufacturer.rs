@@ -626,7 +626,11 @@ mod tests {
             .filter(|(_, info)| info.has_quirks)
             .map(|(_, info)| info.code)
             .collect();
-        assert_eq!(quirky.len(), 2, "expected QDS + TCH to have quirks, got {quirky:?}");
+        assert_eq!(
+            quirky.len(),
+            2,
+            "expected QDS + TCH to have quirks, got {quirky:?}"
+        );
         assert!(quirky.contains(&"QDS"));
         assert!(quirky.contains(&"TCH"));
     }
