@@ -924,7 +924,7 @@ pub fn new_rfm69_spi(
     let reset_pin = if let Some(reset_num) = pins.reset {
         let mut pin = gpio
             .get(reset_num)
-            .map_err(|e| RpiHalError::GpioInit(e))?
+            .map_err(RpiHalError::GpioInit)?
             .into_output();
         pin.set_low(); // RFM69 reset is active high, start low (not in reset)
         log::info!("RFM69 reset pin configured: GPIO {}", reset_num);
@@ -938,7 +938,7 @@ pub fn new_rfm69_spi(
     let interrupt_pin = if let Some(intr_num) = pins.interrupt {
         let pin = gpio
             .get(intr_num)
-            .map_err(|e| RpiHalError::GpioInit(e))?
+            .map_err(RpiHalError::GpioInit)?
             .into_input();
         log::info!("RFM69 interrupt pin configured: GPIO {}", intr_num);
         Some(pin)
@@ -1006,7 +1006,7 @@ impl Rfm69HalBuilder {
 
     /// Build the RFM69 HAL components
     pub fn build(self) -> Result<(Spi, Option<OutputPin>, Option<InputPin>), RpiHalError> {
-        let gpio = Gpio::new().map_err(|e| RpiHalError::GpioInit(e))?;
+        let gpio = Gpio::new().map_err(RpiHalError::GpioInit)?;
         new_rfm69_spi(&gpio, self.spi_device.as_deref(), &self.gpio_pins)
     }
 }

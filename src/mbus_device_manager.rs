@@ -73,7 +73,7 @@ impl MBusDeviceManager {
     ) -> Result<(), MBusError> {
         let handle = WMBusHandleFactory::create_raspberry_pi()
             .await
-            .map_err(|e| MBusError::from(e))?;
+            .map_err(MBusError::from)?;
         self.wmbus_handles.insert(device_id.to_string(), handle);
         Ok(())
     }
@@ -94,7 +94,7 @@ impl MBusDeviceManager {
             spi_bus, spi_speed, busy_pin, dio1_pin, dio2_pin, reset_pin,
         )
         .await
-        .map_err(|e| MBusError::from(e))?;
+        .map_err(MBusError::from)?;
         self.wmbus_handles.insert(device_id.to_string(), handle);
         Ok(())
     }
