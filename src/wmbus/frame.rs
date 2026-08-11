@@ -360,8 +360,7 @@ pub fn parse_wmbus_frame_with_vendor(
                 frame.device_type,
                 frame.control_info,
                 &frame.payload,
-            )
-            {
+            ) {
                 // For now, just mark in payload that vendor handling occurred
                 // In a full implementation, we'd convert vendor_record to appropriate format
                 let mut modified_payload = vec![0xFF]; // Vendor marker

@@ -246,7 +246,7 @@ fn iso(y: u16, m: u8, d: u8) -> String {
 /// FHKV data III HCA: `[tag] PrevDate PrevHca CurrDate CurrHca [extra] TempRoom TempRad`.
 /// Tag `01`/`11` have no extra byte; `0F` inserts one before the temperatures.
 fn decode_fhkv_iii(d: &[u8]) -> Option<Vec<VendorDataRecord>> {
-    let extra = match *d.get(0)? {
+    let extra = match *d.first()? {
         0x01 | 0x11 => 0usize,
         0x0F => 1usize,
         _ => return None,
@@ -309,7 +309,7 @@ fn decode_mkradio3(d: &[u8]) -> Option<Vec<VendorDataRecord>> {
 /// Status byte `00` = OK, `01` = SMOKE, anything else is surfaced raw (`STATUS_xx`);
 /// the date is the previous/last-reading date in the standard `date_prev` packing.
 fn decode_smoke(d: &[u8]) -> Option<Vec<VendorDataRecord>> {
-    let status = match *d.get(0)? {
+    let status = match *d.first()? {
         0x00 => "OK".to_string(),
         0x01 => "SMOKE".to_string(),
         other => format!("STATUS_{other:02X}"),
@@ -386,7 +386,8 @@ mod tests {
             .expect("TCH handler returns records");
         assert!(recs.iter().any(|r| r.quantity == "current_hca"));
         // A newer OMS cell (device_type 0x08) returns None so the generic path takes it.
-        let oms = crate::vendors::dispatch_ci_hook(&reg, "TCH", 0x69, 0x08, 0xA0, &payload).unwrap();
+        let oms =
+            crate::vendors::dispatch_ci_hook(&reg, "TCH", 0x69, 0x08, 0xA0, &payload).unwrap();
         assert!(oms.is_none());
     }
 
@@ -527,19 +528,25 @@ mod tests {
     #[test]
     fn smoke_detector_golden() {
         // wmbusmeters tsd2 (version 0x76, type 0xF0): status byte + last-reading date.
-        let ok =
-            app("294468506935639176F0A0009F2782290060822900000401D6311AF93E1BF93E008DC3009ED4000FE500");
+        let ok = app(
+            "294468506935639176F0A0009F2782290060822900000401D6311AF93E1BF93E008DC3009ED4000FE500",
+        );
         let r = Variant::SmokeDetector.decode(&ok).unwrap();
         assert_eq!(s(&r, "status"), "OK");
         assert_eq!(s(&r, "previous_date"), "2019-12-31");
 
-        let smoke =
-            app("294468506935639176F0A0019F2782290060822900000401D6311AF93E1BF93E008DC3009ED4000FE500");
-        assert_eq!(s(&Variant::SmokeDetector.decode(&smoke).unwrap(), "status"), "SMOKE");
+        let smoke = app(
+            "294468506935639176F0A0019F2782290060822900000401D6311AF93E1BF93E008DC3009ED4000FE500",
+        );
+        assert_eq!(
+            s(&Variant::SmokeDetector.decode(&smoke).unwrap(), "status"),
+            "SMOKE"
+        );
 
         // Unknown status byte is surfaced raw, never guessed.
-        let weird =
-            app("294468506935639176F0A0719F2782290060822900000401D6311AF93E1BF93E008DC3009ED4000FE500");
+        let weird = app(
+            "294468506935639176F0A0719F2782290060822900000401D6311AF93E1BF93E008DC3009ED4000FE500",
+        );
         assert_eq!(
             s(&Variant::SmokeDetector.decode(&weird).unwrap(), "status"),
             "STATUS_71"
@@ -570,7 +577,10 @@ mod tests {
         let ext = TechemExtension;
         // Only standard bits set (bit 2 = low battery) -> nothing added; those are
         // decoded generically, not by the vendor hook.
-        assert!(ext.decode_status_bits("TCH", 0b0000_0100).unwrap().is_none());
+        assert!(ext
+            .decode_status_bits("TCH", 0b0000_0100)
+            .unwrap()
+            .is_none());
         // A manufacturer bit set (bit 7) -> surfaced raw, unnamed.
         let vars = ext.decode_status_bits("TCH", 0b1010_0000).unwrap().unwrap();
         match &vars[0] {
@@ -581,6 +591,9 @@ mod tests {
             _ => panic!("expected a custom status variable"),
         }
         // Wrong manufacturer -> None even with bits set.
-        assert!(ext.decode_status_bits("KAM", 0b1110_0000).unwrap().is_none());
+        assert!(ext
+            .decode_status_bits("KAM", 0b1110_0000)
+            .unwrap()
+            .is_none());
     }
 }
