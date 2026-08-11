@@ -86,10 +86,7 @@ impl SerialTransport {
     }
 }
 
-fn build_port(
-    port_name: &str,
-    baud: MBusBaudRate,
-) -> Result<serial2_tokio::SerialPort, MBusError> {
+fn build_port(port_name: &str, baud: MBusBaudRate) -> Result<serial2_tokio::SerialPort, MBusError> {
     // M-Bus line settings: 8 data bits, even parity, 1 stop bit (8E1), no flow control.
     // serial2 configures via a `Settings` closure (vs tokio-serial's builder). The read
     // timeout tokio-serial set here was a no-op on an async port — read deadlines are
