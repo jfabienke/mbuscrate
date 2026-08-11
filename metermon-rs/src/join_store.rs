@@ -114,7 +114,11 @@ impl JoinStore for RedbJoinStore {
             rec.recent_nonces.push(rec.last_dev_nonce);
         }
 
-        let last_hi = if rec.seen { Some(rec.last_dev_nonce) } else { None };
+        let last_hi = if rec.seen {
+            Some(rec.last_dev_nonce)
+        } else {
+            None
+        };
         let verdict = match self.policy {
             DevNoncePolicy::Counter => admit_dev_nonce(last_hi, dev_nonce),
             DevNoncePolicy::RandomWindow { .. } => {
