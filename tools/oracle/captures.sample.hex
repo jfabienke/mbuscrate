@@ -1,0 +1,3 @@
+# Synthetic plaintext wM-Bus frame for the oracle harness (no real meter data, no key needed).
+# id 12345678, KAM water, volume 1.000 m3. Real captures go in captures.local.hex (gitignored).
+3d12442d2c785634121b16780413e80300009a1f

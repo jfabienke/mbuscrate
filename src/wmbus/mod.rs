@@ -6,9 +6,12 @@
 //!
 pub mod block;
 pub mod compact_cache;
+pub mod compact_frame;
 pub mod crc;
+#[cfg(feature = "crypto")]
 pub mod crypto;
-pub mod crypto_hardware;
+#[cfg(feature = "crypto")]
+pub mod ell;
 pub mod encryption;
 pub mod frame;
 pub mod frame_decode;
@@ -16,8 +19,11 @@ pub mod handle;
 pub mod mode_c;
 pub mod mode_switching;
 pub mod network;
+#[cfg(feature = "crypto")]
+pub mod oms;
+pub mod weak_key_audit;
 pub mod radio;
-pub mod sha_hardware;
+pub mod status;
 
 pub use radio::{
     driver::Sx126xDriver,
@@ -36,7 +42,11 @@ pub use radio::rfm69::{Rfm69Config, Rfm69Driver, Rfm69Error, Rfm69Mode};
 
 // Re-export the necessary types and functions from the submodules
 pub use compact_cache::{CacheStats, CachedDeviceInfo, CompactFrameCache};
-pub use crypto::{AesKey, CryptoError, DeviceInfo, EncryptionMode, WMBusCrypto};
+pub use compact_frame::{CompactError, CompactLayoutCache, RecordLayout};
+#[cfg(feature = "crypto")]
+pub use crypto::{AesKey, CryptoError, DeviceInfo, EncryptionMode, KeyMode, WMBusCrypto};
+#[cfg(feature = "crypto")]
+pub use ell::{decrypt_ell_payload, DecryptedEll, EllError, EllHeader, EllSecurity};
 pub use encryption::WMBusEncryption;
 pub use frame::WMBusFrame;
 pub use frame_decode::{

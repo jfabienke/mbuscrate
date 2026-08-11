@@ -14,14 +14,28 @@
 // legitimately doesn't read them — silence dead-code noise rather than the real signal.
 #![cfg_attr(not(feature = "radio"), allow(dead_code))]
 
+mod capture_dedup;
 mod config;
 mod decode;
 mod devices;
+mod gps;
 mod health;
+#[cfg(feature = "radio")]
+mod join_responder;
+mod join_store;
 mod keystore;
+#[cfg(feature = "radio")]
+mod lora_rx;
+mod mock_backend;
+mod profiles;
 mod publish;
 mod source;
 mod sweep;
+#[cfg(feature = "radio")]
+mod sx1262_probe;
+#[cfg(feature = "radio")]
+mod sx1262_rx;
+mod upsync;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -69,9 +83,14 @@ enum Cmd {
         /// Stop after this many seconds.
         #[arg(long, default_value_t = 120)]
         seconds: u64,
-        /// Stop after this many frames (whichever limit is hit first).
+        /// Stop after this many *matching* frames (whichever limit is hit first).
         #[arg(long, default_value_t = 50)]
         count: usize,
+        /// Only capture frames from this meter id. Without it a frame budget is a
+        /// race against whichever neighbours are chattiest: fifty frames can pass in
+        /// seconds while a three-minute meter has not spoken once.
+        #[arg(long)]
+        device: Option<u32>,
     },
     /// Read-only RFM69 register dump (requires `radio` feature).
     ///
@@ -122,6 +141,10 @@ enum Cmd {
         /// Each sweep pauses C reception for ~2 min and records a `discovery` event.
         #[arg(long, default_value_t = 12)]
         sweep_hours: u64,
+        /// Publish decoded frames to `<data-topic>-rust` instead of the live data
+        /// topic, for running alongside another gateway without disturbing it.
+        #[arg(long)]
+        shadow: bool,
     },
     /// Show the device manager's stored device table and recent events (no radio).
     Devices {
@@ -171,6 +194,203 @@ enum Cmd {
         #[arg(long)]
         from_config: String,
     },
+    /// First-light probe for an SX1262 board: prove power, SPI, the BUSY handshake
+    /// and the oscillator answer before trusting anything above them. Read-mostly;
+    /// never transmits. Run with the monitor stopped if it shares the SPI bus.
+    Sx1262Probe {
+        /// SPI device the SX1262's chip-select is on (the RFM69 uses spidev0.1).
+        #[arg(long, default_value = "/dev/spidev0.0")]
+        spidev: String,
+        /// BCM GPIO driving NSS/chip-select, when the board uses a plain GPIO rather
+        /// than a hardware SPI chip-select. Omit for hardware CS.
+        #[arg(long)]
+        nss: Option<u8>,
+        /// BCM GPIO for BUSY.
+        #[arg(long, default_value_t = 25)]
+        busy: u8,
+        /// BCM GPIO for DIO1 (RxDone and friends).
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        /// BCM GPIO for DIO2, if broken out.
+        #[arg(long)]
+        dio2: Option<u8>,
+        /// BCM GPIO for NRST.
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        /// TCXO supply voltage in mV, if the board has one (1600/1700/1800/2200/
+        /// 2400/2700/3000/3300). The probe detects the need automatically; this only
+        /// sets the voltage used when it does.
+        #[arg(long)]
+        tcxo_mv: Option<u32>,
+    },
+    /// Receive LoRa on an SX1262 (requires `radio` feature). Parks on one
+    /// (frequency, SF) or sweeps the EU868 join channels across the SF ladder,
+    /// decoding LoRaWAN headers for identification.
+    LoraRx {
+        #[arg(long, default_value = "/dev/spidev0.1")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        /// Carrier frequency in Hz (ignored with --sweep).
+        #[arg(long, default_value_t = 868_100_000)]
+        freq_hz: u32,
+        /// Spreading factor 5..=12 (ignored with --sweep).
+        #[arg(long, default_value_t = 12)]
+        sf: u8,
+        /// Bandwidth in kHz (125, 250 or 500).
+        #[arg(long, default_value_t = 125)]
+        bw: u32,
+        /// Sweep the EU868 join channels (868.1/.3/.5) across SF12/9/7/10/8/11.
+        #[arg(long)]
+        sweep: bool,
+        /// Hunt an E22 test transmitter: sweep SF x BW x sync at --freq-hz.
+        #[arg(long)]
+        hunt_e22: bool,
+        /// Seconds to dwell per sweep point.
+        #[arg(long, default_value_t = 20)]
+        dwell: u64,
+        /// Use the private-network sync word (0x1424) instead of public LoRaWAN.
+        #[arg(long)]
+        private_sync: bool,
+        /// Disable RX boosted gain — for a transmitter close enough to compress
+        /// the front end.
+        #[arg(long)]
+        no_rx_boost: bool,
+        /// Write received frames as hex lines to this file.
+        #[arg(long)]
+        capture: Option<String>,
+        /// Stop after this many seconds.
+        #[arg(long, default_value_t = 300)]
+        seconds: u64,
+    },
+    /// Answer LoRaWAN OTAA joins and decode the uplinks that follow (requires
+    /// `radio` feature). A join responder, not a network server.
+    LorawanJoin {
+        #[arg(long, default_value = "/dev/spidev0.1")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        #[arg(long, default_value_t = 868_100_000)]
+        freq_hz: u32,
+        /// Spreading factor. EU868 joins at DR3 = SF9 on each join channel, so that
+        /// is the default; a listener on the wrong SF hears nothing at all.
+        #[arg(long, default_value_t = 9)]
+        sf: u8,
+        /// JSON file of provisioned devices: {"<DevEUI big-endian hex>": "<32-hex AppKey>"}.
+        /// Keep it out of the repo; it holds real credentials.
+        #[arg(long)]
+        creds: String,
+        /// redb file holding durable join state (window of used DevNonces — the
+        /// 1.0.2 fleet draws them randomly — and the next JoinNonce). Persisting it
+        /// is what stops replays and JoinNonce regression across restarts.
+        #[arg(long, default_value = "lorawan-join.redb")]
+        join_db: String,
+        /// Write every received frame to this file as JSONL (ciphertext, decrypted
+        /// payload and metadata) for offline vendor-payload work.
+        #[arg(long)]
+        capture: Option<String>,
+        #[arg(long, default_value_t = 300)]
+        seconds: u64,
+    },
+    /// Transmit LoRa frames from the SX1262 (requires `radio` feature) — proves the
+    /// gateway's transmit path against an independent receiver.
+    LoraTx {
+        #[arg(long, default_value = "/dev/spidev0.1")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        #[arg(long, default_value_t = 868_100_000)]
+        freq_hz: u32,
+        #[arg(long, default_value_t = 7)]
+        sf: u8,
+        #[arg(long, default_value_t = 125)]
+        bw: u32,
+        /// Use the private-network sync word (0x1424) instead of public LoRaWAN.
+        #[arg(long)]
+        private_sync: bool,
+        /// Output power in dBm.
+        #[arg(long, default_value_t = 2)]
+        power: i8,
+        #[arg(long, default_value_t = 10)]
+        count: u32,
+        #[arg(long, default_value_t = 2000)]
+        interval_ms: u64,
+    },
+    /// Receive wM-Bus mode C on an SX1262, with the full receive chain instrumented
+    /// (preamble/sync/RxDone counters, decoded device errors, noise-floor heartbeat).
+    Sx1262Rx {
+        #[arg(long, default_value = "/dev/spidev0.0")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        /// GPIO holding the antenna switch in receive (Waveshare HAT: BCM6, HIGH=RX).
+        #[arg(long, default_value_t = 6)]
+        rf_switch: u8,
+        /// Drive the RF-switch GPIO low instead of high.
+        #[arg(long)]
+        rf_switch_low: bool,
+        /// Do not let the chip drive DIO2 as the antenna-switch control.
+        #[arg(long)]
+        no_dio2_rf_switch: bool,
+        /// Sync word bytes to match (3 = 54 3D 54, 2 = 54 3D).
+        #[arg(long, default_value_t = 3)]
+        sync_bytes: u8,
+        /// Preamble bits required before sync is sought; 0 disables the gate.
+        #[arg(long, default_value_t = 8)]
+        preamble_detect_bits: u8,
+        /// Override the sync word, as hex (e.g. 5555 to lock on the raw preamble).
+        #[arg(long)]
+        sync_hex: Option<String>,
+        /// Carrier frequency in Hz.
+        #[arg(long, default_value_t = 868_950_000)]
+        freq_hz: u32,
+        /// Write received frames as hex lines to this file (replay-compatible).
+        #[arg(long)]
+        capture: Option<String>,
+        #[arg(long, default_value_t = 120)]
+        seconds: u64,
+    },
+    /// Run the mock backend Device Manager: watch the gateway's data topic and answer
+    /// op:startup / op:profile_request with op:profile messages from a catalog file.
+    /// Stand-in for the real Device Manager (vendor-layers §7.2); serves model names
+    /// only, never key material.
+    MockBackend {
+        #[arg(long, default_value = "metermon.conf")]
+        config: String,
+        /// Device catalog: JSON {"<meterid>": {"model": "...", "firmware": null}}.
+        #[arg(long)]
+        catalog: String,
+        /// Optional AES key file (JSON map or op:key lines) to serve on op:startup,
+        /// restoring the provisioning chain the retired backend provided. Keep it
+        /// gitignored; keys cross the broker in cleartext, so use a trusted broker.
+        /// Omitted, the mock serves no key material.
+        #[arg(long)]
+        keys: Option<String>,
+    },
     /// Remove a persisted AES key from the redb store (e.g. one bound to the wrong
     /// meter id). Run with the monitor stopped (redb is single-writer).
     RemoveKey {
@@ -198,7 +418,8 @@ fn main() -> Result<()> {
             config,
             seconds,
             count,
-        } => run_capture(&config, &out, seconds, count),
+            device,
+        } => run_capture(&config, &out, seconds, count, device),
         Cmd::DumpRegs { config } => run_dumpregs(&config),
         Cmd::ProbeRaw {
             out,
@@ -213,7 +434,8 @@ fn main() -> Result<()> {
             keys,
             db,
             sweep_hours,
-        } => run_monitor(&config, report, keys.as_deref(), &db, sweep_hours),
+            shadow,
+        } => run_monitor(&config, report, keys.as_deref(), &db, sweep_hours, shadow),
         Cmd::Devices {
             db,
             events,
@@ -226,6 +448,136 @@ fn main() -> Result<()> {
         } => run_sweep(&config, &db, seconds),
         Cmd::Import { db, from } => run_import(&db, &from),
         Cmd::ImportKeys { db, from_config } => run_import_keys(&db, &from_config),
+        Cmd::Sx1262Probe {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            dio2,
+            reset,
+            tcxo_mv,
+        } => run_sx1262_probe(&spidev, nss, busy, dio1, dio2, reset, tcxo_mv),
+        Cmd::LorawanJoin {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            creds,
+            join_db,
+            capture,
+            seconds,
+        } => run_lorawan_join(
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            &creds,
+            &join_db,
+            capture.as_deref(),
+            seconds,
+        ),
+        Cmd::LoraTx {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            bw,
+            private_sync,
+            power,
+            count,
+            interval_ms,
+        } => run_lora_tx(
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            bw,
+            private_sync,
+            power,
+            count,
+            interval_ms,
+        ),
+        Cmd::LoraRx {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            bw,
+            sweep,
+            hunt_e22,
+            dwell,
+            private_sync,
+            no_rx_boost,
+            capture,
+            seconds,
+        } => run_lora_rx(
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            freq_hz,
+            sf,
+            bw,
+            sweep,
+            hunt_e22,
+            dwell,
+            private_sync,
+            !no_rx_boost,
+            capture,
+            seconds,
+        ),
+        Cmd::Sx1262Rx {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            rf_switch,
+            rf_switch_low,
+            no_dio2_rf_switch,
+            sync_bytes,
+            preamble_detect_bits,
+            sync_hex,
+            freq_hz,
+            capture,
+            seconds,
+        } => run_sx1262_rx(
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            rf_switch,
+            !rf_switch_low,
+            !no_dio2_rf_switch,
+            sync_bytes,
+            preamble_detect_bits,
+            sync_hex,
+            freq_hz,
+            capture,
+            seconds,
+        ),
+        Cmd::MockBackend {
+            config,
+            catalog,
+            keys,
+        } => mock_backend::run(&config, &catalog, keys.as_deref()),
         Cmd::RemoveKey { db, meterid } => {
             let dm = devices::DeviceManager::open(&db, 20, 600)?;
             if dm.remove_key(meterid)? {
@@ -376,6 +728,7 @@ fn run_monitor(
     keys_path: Option<&str>,
     db_path: &str,
     sweep_hours: u64,
+    shadow: bool,
 ) -> Result<()> {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -389,6 +742,16 @@ fn run_monitor(
         .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
         .and_then(|d| d.spidev.clone())
         .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
+    let radio_driver = cfg
+        .devices
+        .values()
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
+        .and_then(|d| d.driver.clone());
+    let lora_listen = cfg
+        .devices
+        .values()
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
+        .and_then(|d| d.lora_listen.clone());
 
     // Shared keystore: seeded from config + optional `--keys` file, then fed live
     // from the MQTT control topic exactly as the C++ metermon is.
@@ -416,6 +779,26 @@ fn run_monitor(
         let dm = Arc::new(devices::DeviceManager::open(db_path, 20, 600)?);
         log::info!("device store: {db_path}");
 
+        // Device profiles: same durable-before-live discipline as keys. Load from redb
+        // before broker contact so the gateway decodes with its device knowledge even
+        // when the backend is unreachable.
+        let profile_store = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::profiles::ProfileStore::new(),
+        ));
+        match dm.load_profiles() {
+            Ok(rows) => {
+                let mut ps = profile_store.lock().unwrap();
+                for (id, model, firmware) in rows {
+                    ps.install(
+                        id,
+                        mbus_rs::vendors::DeviceProfile { model, firmware },
+                    );
+                }
+                log::info!("profile store holds {} device profile(s) from redb", ps.len());
+            }
+            Err(e) => anyhow::bail!("failed to load persisted device profiles from redb: {e}"),
+        }
+
         // Load durably-persisted AES keys locally, before MQTT/radio init, so the gateway has
         // credentials immediately and never blocks on the control-topic pull for them. Fail
         // startup clearly if the persisted keys cannot be read or installed.
@@ -441,9 +824,15 @@ fn run_monitor(
 
         // AES key pull + gateway status. Non-fatal if the broker is unreachable — the radio
         // monitor keeps running on whatever keys were seeded (store-and-forward via redb).
+        // Shadow publishing sends decoded frames to `<data-topic>-rust`, so the
+        // gateway can run beside another publisher without disturbing the live feed.
+        let shadow_topic = shadow.then(|| format!("{}-rust", cfg.mqtt.data_topic));
+        if let Some(t) = &shadow_topic {
+            log::info!("shadow mode: publishing decoded frames to {t}");
+        }
         let mut publisher = match publish::Publisher::connect(
             &cfg.mqtt,
-            None,
+            shadow_topic.as_deref(),
             Some((status_topic.clone(), offline_payload)),
         ) {
             Ok(mut p) => {
@@ -456,10 +845,34 @@ fn run_monitor(
                 }
                 match &cfg.mqtt.control_topic {
                     Some(control) => {
-                        match p.subscribe_control(
-                            control,
-                            key_install_handler(keys.clone(), dm.clone()),
-                        ) {
+                        let key_handler = key_install_handler(keys.clone(), dm.clone());
+                        let ps_cb = profile_store.clone();
+                        let dm_profile = dm.clone();
+                        match p.subscribe_control(control, move |msg| {
+                            key_handler(msg);
+                            if let Some((id, profile)) =
+                                crate::profiles::ProfileStore::parse_profile_message(msg)
+                            {
+                                // Durable first, live second — a profile is never in
+                                // use before it would survive a restart.
+                                match dm_profile.store_profile(
+                                    id,
+                                    &profile.model,
+                                    profile.firmware.as_deref(),
+                                ) {
+                                    Ok(()) => {
+                                        log::info!(
+                                            "installed + persisted profile for meter {id}: {}",
+                                            profile.model
+                                        );
+                                        ps_cb.lock().unwrap().install(id, profile);
+                                    }
+                                    Err(e) => {
+                                        log::warn!("rejected profile for meter {id}: {e}")
+                                    }
+                                }
+                            }
+                        }) {
                             Ok(()) => log::info!("pulling AES keys from control topic {control}"),
                             Err(e) => log::warn!("control-topic subscribe failed: {e}"),
                         }
@@ -475,6 +888,23 @@ fn run_monitor(
                     cfg.mqtt.control_topic.as_deref(),
                 )) {
                     log::warn!("startup announce failed: {e}");
+                }
+                // Ask the Device Manager for profiles covering the fleet we actually
+                // track (vendor-layers §7.2). Answers arrive as op:profile messages.
+                match dm.device_ids() {
+                    Ok(meters) => {
+                        let req = serde_json::json!({
+                            "op": "profile_request", "gw": cfg.gwid, "meters": meters,
+                        });
+                        match p.publish_json(&req) {
+                            Ok(()) => log::info!(
+                                "requested device profiles for {} meter(s)",
+                                req["meters"].as_array().map_or(0, |m| m.len())
+                            ),
+                            Err(e) => log::warn!("profile request failed: {e}"),
+                        }
+                    }
+                    Err(e) => log::warn!("could not enumerate devices for profile request: {e}"),
                 }
                 log::info!("gateway status → {status_topic}, health → {health_topic}");
                 Some(p)
@@ -558,8 +988,18 @@ fn run_monitor(
             });
         }
 
-        let mut radio = source::Rfm69Source::open(&spidev).await?;
+        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
+        radio.set_lora_listen(lora_listen.clone());
         radio.start().await?;
+        if let Some(l) = &lora_listen {
+            log::info!(
+                "lora-listen: {}s window every {}s over {} channels x {} SFs",
+                l.window_secs,
+                l.period_secs,
+                l.freqs_hz.len(),
+                l.sfs.len()
+            );
+        }
         log::info!("metermon-rs monitor on {spidev} — reporting every {report_secs}s");
 
         let mut stats: BTreeMap<u32, MeterStat> = BTreeMap::new();
@@ -572,6 +1012,15 @@ fn run_monitor(
             log::info!("airwave discovery sweep enabled: every {sweep_hours}h");
         }
 
+        // op:observed up-sync: report the fleet we hear (+ GPS position) upstream.
+        // See docs/OP_OBSERVED_UPSYNC.md.
+        let gps = cfg.gps.as_deref().map(|addr| {
+            log::info!("GPS: streaming fixes from gpsd {addr}");
+            gps::spawn(addr)
+        });
+        let upsync_interval = Duration::from_secs(60);
+        let mut last_upsync = Instant::now();
+
         // Gateway watchdog: recover the radio if no frame arrives within the stall window
         // (5 min vs the normal sub-minute cadence), escalating to a process restart after
         // 3 failed in-process recoveries (systemd relaunches).
@@ -580,16 +1029,60 @@ fn run_monitor(
         let mut radio_recoveries: u32 = 0;
         // CRC-failed frames with unknown (untrustworthy) ids, contained by the store.
         let mut contained: u64 = 0;
+        // Record layouts learned from full frames, so the compact frames that make up
+        // most of a Kamstrup meter's traffic decode to readings rather than blobs.
+        let mut layouts = mbus_rs::wmbus::compact_frame::CompactLayoutCache::new();
 
         loop {
             if shutdown.load(Ordering::SeqCst) {
                 break;
             }
-            if let Some((frame, rssi, freq_offset)) = radio.poll().await? {
+            if let Some(sf) = radio.poll().await? {
                 last_frame_at = Some(Instant::now()); // any received frame proves RX is alive
+                let (frame, rssi, freq_offset) = match sf {
+                    source::SourceFrame::Wmbus {
+                        bytes,
+                        rssi_dbm,
+                        freq_off_hz,
+                    } => (bytes, rssi_dbm, freq_off_hz),
+                    source::SourceFrame::Lora {
+                        bytes,
+                        rssi_dbm,
+                        snr_db,
+                        freq_hz,
+                        sf,
+                    } => {
+                        // LoRa frames are not wM-Bus: log + publish raw, skip the
+                        // wM-Bus decode path entirely.
+                        log::info!(
+                            "LORA frame {}B rssi={rssi_dbm}dBm snr={snr_db:.1}dB {:.3}MHz SF{sf}: {}",
+                            bytes.len(),
+                            freq_hz as f64 / 1e6,
+                            hex::encode(&bytes)
+                        );
+                        let msg = serde_json::json!({
+                            "gwid": cfg.gwid,
+                            "mode": "lora",
+                            "freq_hz": freq_hz,
+                            "sf": sf,
+                            "rssi_dbm": rssi_dbm,
+                            "snr_db": snr_db,
+                            "raw_hex": hex::encode(&bytes),
+                        });
+                        if let Some(p) = publisher.as_mut() {
+                            if let Err(e) = p.publish_lora(&msg) {
+                                log::warn!("lora publish failed: {e}");
+                            }
+                        }
+                        continue;
+                    }
+                };
                 let (v, has_key) = {
                     let k = keys.lock().unwrap();
-                    let v = decode::decode_frame(&frame, &cfg, &k);
+                    let v = {
+                        let ps = profile_store.lock().unwrap();
+                        decode::decode_frame_with_cache(&frame, &cfg, &k, &mut layouts, &ps)
+                    };
                     let meter = v["meterid"].as_u64().unwrap_or(0) as u32;
                     (v, k.get(meter).is_some())
                 };
@@ -597,6 +1090,10 @@ fn run_monitor(
                 let crc_ok = v["crc_ok"].as_bool().unwrap_or(false);
                 let ft = v["frame_type"].as_str().unwrap_or("?").to_string();
                 let ci = v["ci"].as_str().unwrap_or("-").to_string();
+                // Human-readable summary of the decoded records (e.g. "25.555 m^3,
+                // 18 C"). Only from a CRC-valid frame: a corrupted frame's values are
+                // not a reading, however cleanly they happen to parse.
+                let reading = crc_ok.then(|| summarize_records(&v)).flatten();
 
                 // Persist to the device manager (info + significant/sampled events). The
                 // store decides attribution: a CRC-failed frame with an unknown id is
@@ -615,9 +1112,17 @@ fn run_monitor(
                     crc_ok,
                     rssi,
                     has_key,
-                    reading: None, // populated once ELL decrypt lands (Phase 1.4b)
+                    reading: reading.clone(),
                     mode: radio.mode().to_string(),
                     freq_offset_hz: freq_offset,
+                    applied_quirks: v["applied_quirks"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|q| q.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                 };
                 let attributed = match dm.record_frame(&obs) {
                     Ok(a) => a,
@@ -641,9 +1146,30 @@ fn run_monitor(
                     contained += 1;
                 }
 
-                log::info!(
-                    "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz"
-                );
+                // Publish upstream. Only CRC-valid frames: a corrupted frame's fields
+                // are not a measurement, and emitting them would put values into the
+                // backend that the gateway itself does not believe.
+                if crc_ok {
+                    if let Some(p) = publisher.as_mut() {
+                        let mut msg = v.clone();
+                        if let Some(obj) = msg.as_object_mut() {
+                            obj.insert("ts".into(), serde_json::json!(devices::now_unix()));
+                            obj.insert("rssi".into(), serde_json::json!(rssi));
+                        }
+                        if let Err(e) = p.publish_json(&msg) {
+                            log::warn!("publish failed for meter {meter}: {e}");
+                        }
+                    }
+                }
+
+                match &reading {
+                    Some(r) => log::info!(
+                        "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz reading=[{r}]"
+                    ),
+                    None => log::info!(
+                        "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz"
+                    ),
+                }
             } else {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -676,7 +1202,7 @@ fn run_monitor(
                     uptime_secs: uptime,
                     radio_opmode: opmode,
                     radio_state: opmode
-                        .map(|o| health::RadioState::from_opmode(o).as_str())
+                        .map(|o| radio.decode_state(o).as_str())
                         .unwrap_or("unknown"),
                     frames_per_min: if uptime > 0 {
                         total as f64 * 60.0 / uptime as f64
@@ -751,9 +1277,51 @@ fn run_monitor(
                     Err(e) => log::warn!("airwave sweep failed: {e}"),
                 }
                 // Always restore C reception.
-                radio = source::Rfm69Source::open(&spidev).await?;
+                radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
+                radio.set_lora_listen(lora_listen.clone());
                 radio.start().await?;
                 last_sweep = Instant::now();
+            }
+
+            // Periodic op:observed up-sync of the geo-tagged fleet inventory.
+            if last_upsync.elapsed() >= upsync_interval {
+                if let Some(pub_) = publisher.as_mut() {
+                    let hwm = dm.observed_watermark().unwrap_or(0);
+                    match dm.observed_since(hwm) {
+                        Ok(recs) if !recs.is_empty() => {
+                            let seq = dm.observed_seq().unwrap_or(0) + 1;
+                            let fix = gps.as_ref().and_then(|h| h.latest());
+                            let (msg, new_hwm) = upsync::build_observed(
+                                &cfg.gwid,
+                                fix.as_ref(),
+                                &recs,
+                                seq,
+                                hwm,
+                                devices::now_unix(),
+                            );
+                            // QoS AtLeastOnce: a successful publish means the broker
+                            // accepted the batch, so advance. Until then the same
+                            // records re-select next tick, so an outage drains rather
+                            // than drops. (An op:observed_ack-driven advance is a
+                            // future refinement.)
+                            match pub_.publish_json(&msg) {
+                                Ok(()) => match dm.advance_observed(new_hwm, seq) {
+                                    Ok(()) => log::info!(
+                                        "op:observed: synced {} meter(s) (seq {seq})",
+                                        recs.len()
+                                    ),
+                                    Err(e) => log::warn!("advance observed watermark: {e}"),
+                                },
+                                Err(e) => {
+                                    log::warn!("op:observed publish failed (will retry): {e}")
+                                }
+                            }
+                        }
+                        Ok(_) => {} // nothing new since the last sync
+                        Err(e) => log::warn!("observed_since: {e}"),
+                    }
+                }
+                last_upsync = Instant::now();
             }
         }
 
@@ -773,6 +1341,377 @@ fn run_monitor(
         log::info!("metermon-rs monitor stopped cleanly");
         Ok(())
     })
+}
+
+/// Load provisioned join credentials: DevEUI (display order) -> AppKey hex.
+#[cfg(feature = "radio")]
+fn load_join_creds(path: &str) -> Result<Vec<join_responder::JoinCredential>> {
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+    let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&text)?;
+    let mut out = Vec::new();
+    for (eui, key) in map {
+        // DevEUIs are written the way people read them (big-endian) and transmitted
+        // reversed, so convert once here rather than at every comparison.
+        let eui_bytes = hex::decode(eui.replace([':', '-'], ""))
+            .map_err(|e| anyhow::anyhow!("DevEUI {eui}: {e}"))?;
+        let key_bytes = hex::decode(&key).map_err(|e| anyhow::anyhow!("AppKey for {eui}: {e}"))?;
+        if eui_bytes.len() != 8 || key_bytes.len() != 16 {
+            anyhow::bail!("{eui}: DevEUI must be 8 bytes and AppKey 16");
+        }
+        let mut dev_eui_le = [0u8; 8];
+        for (i, b) in eui_bytes.iter().rev().enumerate() {
+            dev_eui_le[i] = *b;
+        }
+        let mut app_key = [0u8; 16];
+        app_key.copy_from_slice(&key_bytes);
+        out.push(join_responder::JoinCredential {
+            dev_eui_le,
+            app_key,
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_lorawan_join(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    freq_hz: u32,
+    sf: u8,
+    creds_path: &str,
+    join_db: &str,
+    capture: Option<&str>,
+    seconds: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    let creds = load_join_creds(creds_path)?;
+    let store = join_store::RedbJoinStore::open(join_db)
+        .map_err(|e| anyhow::anyhow!("opening join store {join_db}: {e}"))?;
+    println!("join state persisted to {join_db}");
+    let mut responder = join_responder::JoinResponder::new(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        freq_hz,
+        sf,
+        creds,
+        Box::new(store),
+    )?;
+    if let Some(path) = capture {
+        responder.set_capture(path)?;
+        println!("capturing frames to {path}");
+    }
+    responder.run(
+        seconds,
+        |j| {
+            println!(
+                "  provisioning chain: {} joined as {:08X}",
+                j.dev_eui, j.dev_addr
+            );
+        },
+        |dev_addr, fcnt, payload, rssi, snr| {
+            println!(
+                "uplink {dev_addr:08X} fcnt {fcnt} rssi {rssi} dBm snr {snr:.1} dB: {}",
+                hex::encode(payload)
+            );
+            // The payload is OMS/wM-Bus records, so it goes through the same record
+            // parser as wired and wireless M-Bus — the transport changes, the decode
+            // path does not.
+            let mut rest = payload;
+            while !rest.is_empty() {
+                match mbus_rs::payload::record::parse_variable_record_consumed(rest) {
+                    Ok((rec, used)) if used > 0 => {
+                        println!(
+                            "    {} = {} {}",
+                            rec.quantity,
+                            match &rec.value {
+                                mbus_rs::payload::record::MBusRecordValue::Numeric(n) =>
+                                    format!("{n}"),
+                                mbus_rs::payload::record::MBusRecordValue::String(s) => s.clone(),
+                            },
+                            rec.unit
+                        );
+                        rest = &rest[used..];
+                    }
+                    Ok(_) => break,
+                    Err(e) => {
+                        println!("    record parse stopped: {e}");
+                        break;
+                    }
+                }
+            }
+        },
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_lorawan_join(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _freq_hz: u32,
+    _sf: u8,
+    _creds_path: &str,
+    _join_db: &str,
+    _capture: Option<&str>,
+    _seconds: u64,
+) -> Result<()> {
+    bail_no_radio("lorawan-join")
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_lora_tx(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    freq_hz: u32,
+    sf: u8,
+    bw: u32,
+    private_sync: bool,
+    power: i8,
+    count: u32,
+    interval_ms: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    lora_rx::transmit(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        freq_hz,
+        sf,
+        bw,
+        private_sync,
+        power,
+        count,
+        interval_ms,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_lora_tx(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _freq_hz: u32,
+    _sf: u8,
+    _bw: u32,
+    _private_sync: bool,
+    _power: i8,
+    _count: u32,
+    _interval_ms: u64,
+) -> Result<()> {
+    bail_no_radio("lora-tx")
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_lora_rx(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    freq_hz: u32,
+    sf: u8,
+    bw: u32,
+    sweep: bool,
+    hunt_e22: bool,
+    dwell: u64,
+    private_sync: bool,
+    rx_boost: bool,
+    capture: Option<String>,
+    seconds: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    lora_rx::run(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        freq_hz,
+        sf,
+        bw,
+        sweep,
+        hunt_e22,
+        dwell,
+        private_sync,
+        rx_boost,
+        capture,
+        seconds,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_lora_rx(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _freq_hz: u32,
+    _sf: u8,
+    _bw: u32,
+    _sweep: bool,
+    _hunt_e22: bool,
+    _dwell: u64,
+    _private_sync: bool,
+    _rx_boost: bool,
+    _capture: Option<String>,
+    _seconds: u64,
+) -> Result<()> {
+    bail_no_radio("lora-rx")
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_sx1262_rx(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    rf_switch: u8,
+    rf_switch_high: bool,
+    dio2_rf_switch: bool,
+    sync_bytes: u8,
+    preamble_detect_bits: u8,
+    sync_hex: Option<String>,
+    freq_hz: u32,
+    capture: Option<String>,
+    seconds: u64,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    sx1262_rx::run(
+        spidev,
+        GpioPins {
+            nss: Some(nss),
+            busy,
+            dio1,
+            dio2: None,
+            reset: Some(reset),
+        },
+        Some(rf_switch),
+        rf_switch_high,
+        dio2_rf_switch,
+        sync_bytes,
+        preamble_detect_bits,
+        sync_hex,
+        freq_hz,
+        capture,
+        seconds,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_sx1262_rx(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _rf_switch: u8,
+    _rf_switch_high: bool,
+    _dio2_rf_switch: bool,
+    _sync_bytes: u8,
+    _preamble_detect_bits: u8,
+    _sync_hex: Option<String>,
+    _freq_hz: u32,
+    _capture: Option<String>,
+    _seconds: u64,
+) -> Result<()> {
+    bail_no_radio("sx1262-rx")
+}
+
+#[cfg(feature = "radio")]
+fn run_sx1262_probe(
+    spidev: &str,
+    nss: Option<u8>,
+    busy: u8,
+    dio1: u8,
+    dio2: Option<u8>,
+    reset: u8,
+    tcxo_mv: Option<u32>,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    sx1262_probe::run(
+        spidev,
+        GpioPins {
+            nss,
+            busy,
+            dio1,
+            dio2,
+            reset: Some(reset),
+        },
+        tcxo_mv,
+    )
+}
+
+#[cfg(not(feature = "radio"))]
+fn run_sx1262_probe(
+    _spidev: &str,
+    _nss: Option<u8>,
+    _busy: u8,
+    _dio1: u8,
+    _dio2: Option<u8>,
+    _reset: u8,
+    _tcxo_mv: Option<u32>,
+) -> Result<()> {
+    bail_no_radio("sx1262-probe")
+}
+
+/// Condense a decoded frame's records into a short human-readable reading, e.g.
+/// `"25.555 m^3, 18 C"`. Returns `None` when the frame carried no decoded records
+/// (not plaintext, or encrypted without a usable key).
+#[cfg(feature = "radio")]
+fn summarize_records(v: &serde_json::Value) -> Option<String> {
+    let records = v["records"].as_array()?;
+    let parts: Vec<String> = records
+        .iter()
+        .filter_map(|r| {
+            let value = r.get("value")?;
+            let unit = r.get("unit").and_then(|u| u.as_str()).unwrap_or("");
+            let text = match value {
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::String(s) => s.clone(),
+                _ => return None,
+            };
+            Some(if unit.is_empty() {
+                text
+            } else {
+                format!("{text} {unit}")
+            })
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 #[cfg(feature = "radio")]
@@ -830,6 +1769,7 @@ fn run_monitor(
     _keys_path: Option<&str>,
     _db_path: &str,
     _sweep_hours: u64,
+    _shadow: bool,
 ) -> Result<()> {
     bail_no_radio("monitor")
 }
@@ -985,8 +1925,17 @@ fn run_replay(capture: &str, config_path: &str, keys_path: Option<&str>) -> Resu
     }
 
     let mut src = FileReplaySource::from_path(capture)?;
+    // A capture file is a time-ordered stream, so layouts learned from full frames
+    // apply to the compact frames that follow — same as live.
+    let mut layouts = mbus_rs::wmbus::compact_frame::CompactLayoutCache::new();
     while let Some(frame) = src.next_frame()? {
-        let decoded = decode::decode_frame(&frame, &cfg, &keys);
+        let decoded = decode::decode_frame_with_cache(
+            &frame,
+            &cfg,
+            &keys,
+            &mut layouts,
+            &crate::profiles::ProfileStore::new(),
+        );
         println!("{}", serde_json::to_string(&decoded)?);
     }
     Ok(())
@@ -1011,6 +1960,8 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
         .spidev
         .clone()
         .ok_or_else(|| anyhow::anyhow!("WMBUS device has no spidev"))?;
+    let radio_driver = device.driver.clone();
+    let lora_listen = device.lora_listen.clone();
 
     let shadow_topic = shadow.then(|| format!("{}-rust", cfg.mqtt.data_topic));
     // Shared keystore: fed live from the control topic exactly as metermon is.
@@ -1022,7 +1973,8 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        let mut radio = source::Rfm69Source::open(&spidev).await?;
+        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
+        radio.set_lora_listen(lora_listen.clone());
         let mut pub_ = publish::Publisher::connect(&cfg.mqtt, shadow_topic.as_deref(), None)?;
 
         // Subscribe to meter/control/<gwid> and install keys from op:key messages.
@@ -1042,7 +1994,23 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
         );
         radio.start().await?;
         loop {
-            if let Some((frame, _rssi, _off)) = radio.poll().await? {
+            if let Some(sf) = radio.poll().await? {
+                let frame = match sf {
+                    source::SourceFrame::Wmbus { bytes, .. } => bytes,
+                    source::SourceFrame::Lora {
+                        bytes,
+                        rssi_dbm,
+                        snr_db,
+                        ..
+                    } => {
+                        log::info!(
+                            "LORA frame {}B rssi={rssi_dbm}dBm snr={snr_db:.1}dB: {}",
+                            bytes.len(),
+                            hex::encode(&bytes)
+                        );
+                        continue;
+                    }
+                };
                 let decoded = {
                     let k = keys.lock().unwrap();
                     decode::decode_frame(&frame, &cfg, &k)
@@ -1064,7 +2032,13 @@ fn run_live(_config_path: &str, _shadow: bool) -> Result<()> {
 
 /// Capture raw frames from the radio to a hex file (no decode, no MQTT).
 #[cfg(feature = "radio")]
-fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Result<()> {
+fn run_capture(
+    config_path: &str,
+    out: &str,
+    seconds: u64,
+    count: usize,
+    device: Option<u32>,
+) -> Result<()> {
     use std::io::Write;
 
     let cfg = Config::load(config_path)?;
@@ -1074,10 +2048,45 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
         .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
         .and_then(|d| d.spidev.clone())
         .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
+    let radio_driver = cfg
+        .devices
+        .values()
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
+        .and_then(|d| d.driver.clone());
+
+    // Hard watchdog. The per-poll `timeout` below cannot cancel a radio SPI
+    // transaction that has blocked its runtime thread in-kernel (a `D`-state
+    // wedge, which once stranded the gateway for hours). This independent OS
+    // thread force-exits the process `grace` seconds past the deadline no matter
+    // what, so the command always returns and whatever supervises it can recover.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        use std::sync::atomic::Ordering;
+        let done = done.clone();
+        let grace = seconds.saturating_add(30);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(grace);
+            while std::time::Instant::now() < deadline {
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            if !done.load(Ordering::Relaxed) {
+                log::error!(
+                    "capture watchdog: {grace}s elapsed without completing — the radio is \
+                     likely wedged; force-exiting so the caller can recover"
+                );
+                std::process::exit(2);
+            }
+        });
+    }
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async move {
-        let mut radio = source::Rfm69Source::open(&spidev).await?;
+    let result = rt.block_on(async move {
+        use capture_dedup::{DupGuard, DupVerdict};
+
+        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
         radio.start().await?;
         let mut file = std::fs::File::create(out)?;
         writeln!(
@@ -1088,15 +2097,59 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
         log::info!("capturing up to {count} frames / {seconds}s from {spidev} -> {out}");
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
         let mut n = 0usize;
-        while n < count && tokio::time::Instant::now() < deadline {
-            let remaining = deadline - tokio::time::Instant::now();
+        // 30 identical frames in a row => the receiver is re-reading a stale buffer.
+        let mut dedup = DupGuard::new(30);
+
+        let outcome: Result<&str> = loop {
+            if n >= count {
+                break Ok("count reached");
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break Ok("time limit");
+            }
+            let remaining = deadline - now;
             match tokio::time::timeout(remaining, radio.poll()).await {
-                Ok(Ok(Some((frame, rssi, off)))) => {
+                Ok(Ok(Some(source::SourceFrame::Lora { bytes, .. }))) => {
+                    log::info!(
+                        "LORA frame ({}B) — not written to a wM-Bus capture",
+                        bytes.len()
+                    );
+                }
+                Ok(Ok(Some(source::SourceFrame::Wmbus {
+                    bytes: frame,
+                    rssi_dbm: rssi,
+                    freq_off_hz: off,
+                }))) => {
+                    // Stale-buffer / stuck-receiver guard, before the device filter
+                    // so it sees the raw radio output.
+                    match dedup.check(&frame) {
+                        DupVerdict::Duplicate => continue,
+                        DupVerdict::Stuck => {
+                            break Err(anyhow::anyhow!(
+                                "receiver stuck: 30 byte-identical frames in a row \
+                                 (radio re-reading a stale buffer) — stopping before it wedges"
+                            ));
+                        }
+                        DupVerdict::New => {}
+                    }
+
+                    // Filter before counting, so --count bounds the frames actually
+                    // wanted rather than whatever the band happened to be doing.
+                    let addr = mbus_rs::wmbus::mode_c::decode_mode_c(&frame)
+                        .ok()
+                        .map(|f| f.device_address);
+                    if let Some(want) = device {
+                        if addr != Some(want) {
+                            continue;
+                        }
+                    }
                     writeln!(file, "{}", hex::encode(&frame))?;
                     file.flush()?;
                     n += 1;
                     log::info!(
-                        "frame {n}: {} bytes rssi={rssi}dBm off={off}Hz  {}",
+                        "frame {n}: meter={} {} bytes rssi={rssi}dBm off={off}Hz  {}",
+                        addr.map(|a| a.to_string()).unwrap_or("?".into()),
                         frame.len(),
                         hex::encode(&frame)
                     );
@@ -1105,16 +2158,38 @@ fn run_capture(config_path: &str, out: &str, seconds: u64, count: usize) -> Resu
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
                 Ok(Err(e)) => log::warn!("recv error: {e}"),
-                Err(_) => break, // deadline
+                Err(_) => break Ok("time limit"),
             }
+        };
+
+        // Always return the radio to standby so the monitor can reopen it. This
+        // runs on every exit path except the watchdog force-exit (a wedge that
+        // stop() itself could not complete anyway).
+        if let Err(e) = radio.stop().await {
+            log::warn!("returning radio to standby after capture failed: {e}");
         }
-        log::info!("captured {n} frames to {out}");
-        Ok(())
-    })
+
+        match &outcome {
+            Ok(reason) => log::info!("captured {n} frames to {out} ({reason})"),
+            Err(e) => log::error!("capture aborted after {n} frames: {e}"),
+        }
+        outcome.map(|_| ())
+    });
+
+    // Stand the watchdog down: the work returned (cleanly or with an error), so no
+    // force-exit is needed.
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    result
 }
 
 #[cfg(not(feature = "radio"))]
-fn run_capture(_config_path: &str, _out: &str, _seconds: u64, _count: usize) -> Result<()> {
+fn run_capture(
+    _config_path: &str,
+    _out: &str,
+    _seconds: u64,
+    _count: usize,
+    _device: Option<u32>,
+) -> Result<()> {
     bail_no_radio("capture")
 }
 

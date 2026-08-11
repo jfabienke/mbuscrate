@@ -10,7 +10,8 @@ fn test_lookup_vif() {
     let info = vif_info.unwrap();
     assert_eq!(info.unit, "Wh");
     assert_eq!(info.quantity, "Energy");
-    assert_eq!(info.exponent, 1.0);
+    // EN 13757-3: VIF 0b0000_0nnn is energy in 10^(nnn-3) Wh, so 0x00 is 10^-3 Wh.
+    assert_eq!(info.exponent, 0.001);
 }
 
 /// Tests that the VIFE information is correctly looked up.

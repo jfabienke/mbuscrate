@@ -448,6 +448,7 @@ fn test_crypto_with_simulated_encrypted_frame() {
     }
 
     // Test key derivation
+    #[allow(deprecated)]
     let device_key = master_key.derive_device_key(device_info.device_id, device_info.manufacturer);
     assert_ne!(
         device_key.as_bytes(),

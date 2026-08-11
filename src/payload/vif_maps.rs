@@ -8,38 +8,38 @@ use crate::payload::vif::VifInfo;
 /// Primary VIF codes (0x00–0xFF) as defined in EN 13757-3 standard.
 /// Validated against reference implementations for correctness.
 pub const VIF_CODES: &[(u8, &str, f64, &str)] = &[
-    (0x00, "Wh", 1.0, "Energy"),
-    (0x01, "10^1 Wh", 10.0, "Energy"),
-    (0x02, "10^2 Wh", 100.0, "Energy"),
-    (0x03, "kWh", 1000.0, "Energy"),
-    (0x04, "10^1 kWh", 10000.0, "Energy"),
-    (0x05, "10^2 kWh", 100000.0, "Energy"),
-    (0x06, "MWh", 1000000.0, "Energy"),
-    (0x07, "10^1 MWh", 10000000.0, "Energy"),
+    (0x00, "Wh", 0.001, "Energy"),
+    (0x01, "Wh", 0.01, "Energy"),
+    (0x02, "Wh", 0.1, "Energy"),
+    (0x03, "Wh", 1.0, "Energy"),
+    (0x04, "Wh", 10.0, "Energy"),
+    (0x05, "Wh", 100.0, "Energy"),
+    (0x06, "Wh", 1000.0, "Energy"),
+    (0x07, "Wh", 1e4, "Energy"),
     (0x08, "J", 1.0, "Energy"),
-    (0x09, "10^1 J", 10.0, "Energy"),
-    (0x0A, "10^2 J", 100.0, "Energy"),
-    (0x0B, "kJ", 1000.0, "Energy"),
-    (0x0C, "10^1 kJ", 10000.0, "Energy"),
-    (0x0D, "10^2 kJ", 100000.0, "Energy"),
-    (0x0E, "MJ", 1000000.0, "Energy"),
-    (0x0F, "10^1 MJ", 10000000.0, "Energy"),
-    (0x10, "l", 0.001, "Volume"),
-    (0x11, "10^1 l", 0.01, "Volume"),
-    (0x12, "10^2 l", 0.1, "Volume"),
-    (0x13, "m^3", 1.0, "Volume"),
-    (0x14, "10^1 m^3", 10.0, "Volume"),
-    (0x15, "10^2 m^3", 100.0, "Volume"),
-    (0x16, "10^3 m^3", 1000.0, "Volume"),
-    (0x17, "10^4 m^3", 10000.0, "Volume"),
-    (0x18, "g", 0.001, "Mass"),
-    (0x19, "10^1 g", 0.01, "Mass"),
-    (0x1A, "10^2 g", 0.1, "Mass"),
+    (0x09, "J", 10.0, "Energy"),
+    (0x0A, "J", 100.0, "Energy"),
+    (0x0B, "J", 1000.0, "Energy"),
+    (0x0C, "J", 1e4, "Energy"),
+    (0x0D, "J", 1e5, "Energy"),
+    (0x0E, "J", 1e6, "Energy"),
+    (0x0F, "J", 1e7, "Energy"),
+    (0x10, "m^3", 1e-6, "Volume"),
+    (0x11, "m^3", 1e-5, "Volume"),
+    (0x12, "m^3", 1e-4, "Volume"),
+    (0x13, "m^3", 0.001, "Volume"),
+    (0x14, "m^3", 0.01, "Volume"),
+    (0x15, "m^3", 0.1, "Volume"),
+    (0x16, "m^3", 1.0, "Volume"),
+    (0x17, "m^3", 10.0, "Volume"),
+    (0x18, "kg", 0.001, "Mass"),
+    (0x19, "kg", 0.01, "Mass"),
+    (0x1A, "kg", 0.1, "Mass"),
     (0x1B, "kg", 1.0, "Mass"),
-    (0x1C, "10^1 kg", 10.0, "Mass"),
-    (0x1D, "10^2 kg", 100.0, "Mass"),
-    (0x1E, "t", 1000.0, "Mass"),
-    (0x1F, "10^1 t", 10000.0, "Mass"),
+    (0x1C, "kg", 10.0, "Mass"),
+    (0x1D, "kg", 100.0, "Mass"),
+    (0x1E, "kg", 1000.0, "Mass"),
+    (0x1F, "kg", 1e4, "Mass"),
     (0x20, "s", 1.0, "On time"),
     (0x21, "10^-1 s", 1e-1, "On time"),
     (0x22, "10^-2 s", 1e-2, "On time"),
@@ -48,73 +48,73 @@ pub const VIF_CODES: &[(u8, &str, f64, &str)] = &[
     (0x25, "10^-1 s", 1e-1, "Operating time"),
     (0x26, "10^-2 s", 1e-2, "Operating time"),
     (0x27, "10^-3 s", 1e-3, "Operating time"),
-    (0x28, "W", 1.0, "Power"),
-    (0x29, "10^1 W", 10.0, "Power"),
-    (0x2A, "10^2 W", 100.0, "Power"),
-    (0x2B, "kW", 1000.0, "Power"),
-    (0x2C, "10^1 kW", 10000.0, "Power"),
-    (0x2D, "10^2 kW", 100000.0, "Power"),
-    (0x2E, "MW", 1000000.0, "Power"),
-    (0x2F, "10^1 MW", 10000000.0, "Power"),
-    (0x30, "J/h", 1e0, "Power"),
-    (0x31, "10^-1 J/h", 1e-1, "Power"),
-    (0x32, "10^-2 J/h", 1e-2, "Power"),
-    (0x33, "10^-3 J/h", 1e-3, "Power"),
-    (0x34, "10^-4 J/h", 1e-4, "Power"),
-    (0x35, "10^-5 J/h", 1e-5, "Power"),
-    (0x36, "10^-6 J/h", 1e-6, "Power"),
-    (0x37, "10^-7 J/h", 1e-7, "Power"),
-    (0x38, "l/h", 0.001, "Volume flow"),
-    (0x39, "10^1 l/h", 0.01, "Volume flow"),
-    (0x3A, "10^2 l/h", 0.1, "Volume flow"),
-    (0x3B, "m^3/h", 1.0, "Volume flow"),
-    (0x3C, "10^1 m^3/h", 10.0, "Volume flow"),
-    (0x3D, "10^2 m^3/h", 100.0, "Volume flow"),
-    (0x3E, "10^3 m^3/h", 1000.0, "Volume flow"),
-    (0x3F, "10^4 m^3/h", 10000.0, "Volume flow"),
-    (0x40, "10^-5 m^3/min", 0.00001, "Volume flow"),
-    (0x41, "10^-4 m^3/min", 0.0001, "Volume flow"),
-    (0x42, "10^-3 m^3/min", 0.001, "Volume flow"),
-    (0x43, "10^-2 m^3/min", 0.01, "Volume flow"),
-    (0x44, "10^-1 m^3/min", 0.1, "Volume flow"),
-    (0x45, "m^3/min", 1.0, "Volume flow"),
-    (0x46, "10^1 m^3/min", 10.0, "Volume flow"),
-    (0x47, "10^2 m^3/min", 100.0, "Volume flow"),
-    (0x48, "10^-7 m^3/s", 0.0000001, "Volume flow"),
-    (0x49, "10^-6 m^3/s", 0.000001, "Volume flow"),
-    (0x4A, "10^-5 m^3/s", 0.00001, "Volume flow"),
-    (0x4B, "10^-4 m^3/s", 0.0001, "Volume flow"),
-    (0x4C, "10^-3 m^3/s", 0.001, "Volume flow"),
-    (0x4D, "10^-2 m^3/s", 0.01, "Volume flow"),
-    (0x4E, "10^-1 m^3/s", 0.1, "Volume flow"),
-    (0x4F, "m^3/s", 1.0, "Volume flow"),
-    (0x50, "g/h", 0.001, "Mass flow"),
-    (0x51, "10^1 g/h", 0.01, "Mass flow"),
-    (0x52, "10^2 g/h", 0.1, "Mass flow"),
+    (0x28, "W", 0.001, "Power"),
+    (0x29, "W", 0.01, "Power"),
+    (0x2A, "W", 0.1, "Power"),
+    (0x2B, "W", 1.0, "Power"),
+    (0x2C, "W", 10.0, "Power"),
+    (0x2D, "W", 100.0, "Power"),
+    (0x2E, "W", 1000.0, "Power"),
+    (0x2F, "W", 1e4, "Power"),
+    (0x30, "J/h", 1.0, "Power"),
+    (0x31, "J/h", 10.0, "Power"),
+    (0x32, "J/h", 100.0, "Power"),
+    (0x33, "J/h", 1000.0, "Power"),
+    (0x34, "J/h", 1e4, "Power"),
+    (0x35, "J/h", 1e5, "Power"),
+    (0x36, "J/h", 1e6, "Power"),
+    (0x37, "J/h", 1e7, "Power"),
+    (0x38, "m^3/h", 1e-6, "Volume flow"),
+    (0x39, "m^3/h", 1e-5, "Volume flow"),
+    (0x3A, "m^3/h", 1e-4, "Volume flow"),
+    (0x3B, "m^3/h", 0.001, "Volume flow"),
+    (0x3C, "m^3/h", 0.01, "Volume flow"),
+    (0x3D, "m^3/h", 0.1, "Volume flow"),
+    (0x3E, "m^3/h", 1.0, "Volume flow"),
+    (0x3F, "m^3/h", 10.0, "Volume flow"),
+    (0x40, "m^3/min", 1e-7, "Volume flow"),
+    (0x41, "m^3/min", 1e-6, "Volume flow"),
+    (0x42, "m^3/min", 1e-5, "Volume flow"),
+    (0x43, "m^3/min", 1e-4, "Volume flow"),
+    (0x44, "m^3/min", 0.001, "Volume flow"),
+    (0x45, "m^3/min", 0.01, "Volume flow"),
+    (0x46, "m^3/min", 0.1, "Volume flow"),
+    (0x47, "m^3/min", 1.0, "Volume flow"),
+    (0x48, "m^3/s", 1e-9, "Volume flow"),
+    (0x49, "m^3/s", 1e-8, "Volume flow"),
+    (0x4A, "m^3/s", 1e-7, "Volume flow"),
+    (0x4B, "m^3/s", 1e-6, "Volume flow"),
+    (0x4C, "m^3/s", 1e-5, "Volume flow"),
+    (0x4D, "m^3/s", 1e-4, "Volume flow"),
+    (0x4E, "m^3/s", 0.001, "Volume flow"),
+    (0x4F, "m^3/s", 0.01, "Volume flow"),
+    (0x50, "kg/h", 0.001, "Mass flow"),
+    (0x51, "kg/h", 0.01, "Mass flow"),
+    (0x52, "kg/h", 0.1, "Mass flow"),
     (0x53, "kg/h", 1.0, "Mass flow"),
-    (0x54, "10^1 kg/h", 10.0, "Mass flow"),
-    (0x55, "10^2 kg/h", 100.0, "Mass flow"),
-    (0x56, "t/h", 1000.0, "Mass flow"),
-    (0x57, "10^1 t/h", 10000.0, "Mass flow"),
-    (0x58, "10^-3 °C", 0.001, "Flow temperature"),
-    (0x59, "10^-2 °C", 0.01, "Flow temperature"),
-    (0x5A, "10^-1 °C", 0.1, "Flow temperature"),
-    (0x5B, "°C", 1.0, "Flow temperature"),
-    (0x5C, "10^-3 °C", 0.001, "Return temperature"),
-    (0x5D, "10^-2 °C", 0.01, "Return temperature"),
-    (0x5E, "10^-1 °C", 0.1, "Return temperature"),
-    (0x5F, "°C", 1.0, "Return temperature"),
-    (0x60, "10^-3 K", 0.001, "Temperature difference"),
-    (0x61, "10^-2 K", 0.01, "Temperature difference"),
-    (0x62, "10^-1 K", 0.1, "Temperature difference"),
+    (0x54, "kg/h", 10.0, "Mass flow"),
+    (0x55, "kg/h", 100.0, "Mass flow"),
+    (0x56, "kg/h", 1000.0, "Mass flow"),
+    (0x57, "kg/h", 1e4, "Mass flow"),
+    (0x58, "C", 0.001, "Flow temperature"),
+    (0x59, "C", 0.01, "Flow temperature"),
+    (0x5A, "C", 0.1, "Flow temperature"),
+    (0x5B, "C", 1.0, "Flow temperature"),
+    (0x5C, "C", 0.001, "Return temperature"),
+    (0x5D, "C", 0.01, "Return temperature"),
+    (0x5E, "C", 0.1, "Return temperature"),
+    (0x5F, "C", 1.0, "Return temperature"),
+    (0x60, "K", 0.001, "Temperature difference"),
+    (0x61, "K", 0.01, "Temperature difference"),
+    (0x62, "K", 0.1, "Temperature difference"),
     (0x63, "K", 1.0, "Temperature difference"),
-    (0x64, "10^-3 °C", 0.001, "External temperature"),
-    (0x65, "10^-2 °C", 0.01, "External temperature"),
-    (0x66, "10^-1 °C", 0.1, "External temperature"),
-    (0x67, "°C", 1.0, "External temperature"),
-    (0x68, "10^-3 bar", 0.001, "Pressure"),
-    (0x69, "10^-2 bar", 0.01, "Pressure"),
-    (0x6A, "10^-1 bar", 0.1, "Pressure"),
+    (0x64, "C", 0.001, "External temperature"),
+    (0x65, "C", 0.01, "External temperature"),
+    (0x66, "C", 0.1, "External temperature"),
+    (0x67, "C", 1.0, "External temperature"),
+    (0x68, "bar", 0.001, "Pressure"),
+    (0x69, "bar", 0.01, "Pressure"),
+    (0x6A, "bar", 0.1, "Pressure"),
     (0x6B, "bar", 1.0, "Pressure"),
     (0x6C, "-", 1.0, "Time point (date)"),
     (0x6D, "-", 1.0, "Time point (date & time)"),
@@ -270,6 +270,13 @@ pub fn lookup_primary_vif(code: u8) -> Option<VifInfo> {
 
 /// Looks up VIFE FD extension code.
 pub fn lookup_vife_fd(code: u8) -> Option<VifInfo> {
+    // Algorithmic ranges first: the table above only lists the discrete codes and
+    // marks these "handled separately", which previously meant not handled at all —
+    // a voltage record decoded to the right number with no quantity and no unit.
+    // EN 13757-3 defines them as exponent ranges, not table entries.
+    if let Some(info) = vife_fd_algorithmic(code) {
+        return Some(info);
+    }
     VIFE_FD_CODES
         .iter()
         .find(|(c, _, _, _)| *c == code)
@@ -279,6 +286,23 @@ pub fn lookup_vife_fd(code: u8) -> Option<VifInfo> {
             exponent: *exponent,
             quantity,
         })
+}
+
+/// The exponent-bearing FD ranges: voltage `0x40-0x4F` as 10^(nnnn-9) V and
+/// current `0x50-0x5F` as 10^(nnnn-12) A.
+fn vife_fd_algorithmic(code: u8) -> Option<VifInfo> {
+    let nnnn = (code & 0x0F) as i32;
+    let (unit, exponent, quantity) = match code {
+        0x40..=0x4F => ("V", 10f64.powi(nnnn - 9), "Voltage"),
+        0x50..=0x5F => ("A", 10f64.powi(nnnn - 12), "Current"),
+        _ => return None,
+    };
+    Some(VifInfo {
+        vif: 0x100u16 + code as u16,
+        unit,
+        exponent,
+        quantity,
+    })
 }
 
 /// Looks up VIFE FB extension code.
@@ -292,4 +316,30 @@ pub fn lookup_vife_fb(code: u8) -> Option<VifInfo> {
             exponent: *exponent,
             quantity,
         })
+}
+
+#[cfg(test)]
+mod vife_fd_range_tests {
+    use super::*;
+
+    #[test]
+    fn fd_voltage_and_current_ranges_carry_unit_and_exponent() {
+        // 0xFD 0x46: nnnn = 6, so 10^(6-9) V = millivolts. A meter's battery record.
+        let v = lookup_vife_fd(0x46).expect("voltage range must resolve");
+        assert_eq!(v.unit, "V");
+        assert_eq!(v.quantity, "Voltage");
+        assert!((v.exponent - 1e-3).abs() < 1e-15);
+
+        // 0xFD 0x59: nnnn = 9, so 10^(9-12) A = milliamps.
+        let i = lookup_vife_fd(0x59).expect("current range must resolve");
+        assert_eq!(i.unit, "A");
+        assert_eq!(i.quantity, "Current");
+        assert!((i.exponent - 1e-3).abs() < 1e-15);
+
+        // The discrete entries outside those ranges must still resolve.
+        assert_eq!(
+            lookup_vife_fd(0x61).map(|x| x.quantity),
+            Some("Cumulation Counter")
+        );
+    }
 }

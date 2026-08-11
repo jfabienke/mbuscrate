@@ -30,6 +30,10 @@ const UNATTRIBUTED_KEY: &str = "unattributed_crc_fail";
 /// keys here lets the gateway load credentials locally at startup — before, and independent
 /// of, the MQTT control-topic pull.
 const KEYS: TableDefinition<u32, &str> = TableDefinition::new("keys");
+/// Device profiles pushed by the backend Device Manager: meter id -> JSON
+/// `{"model":..,"firmware":..}`. Persisted before install (durable-before-live) and
+/// loaded at startup before broker contact, exactly like KEYS.
+const PROFILES: TableDefinition<u32, &str> = TableDefinition::new("profiles");
 
 /// A well-formed AES-128 key is exactly 32 hex chars (16 bytes). Validated before any key is
 /// stored; the key value itself is never logged.
@@ -63,6 +67,37 @@ struct DeviceRecord {
     /// Last AFC-measured carrier offset from the 868.95 MHz center, in Hz.
     #[serde(default)]
     last_freq_offset_hz: i32,
+    /// Quirk ids applied to this device's decodes (vendor-layers P5): a consumer of
+    /// the store can tell an overridden reading from a standard one. Empty for
+    /// records written before quirk tracking existed.
+    #[serde(default)]
+    applied_quirks: Vec<String>,
+}
+
+/// META keys for the `op:observed` up-sync (see docs/OP_OBSERVED_UPSYNC.md).
+const OBSERVED_HWM_KEY: &str = "observed_hwm"; // last synced last_seen high-water mark
+const OBSERVED_SEQ_KEY: &str = "observed_seq"; // monotonic per-gateway sync sequence
+
+/// A device must have at least this many CRC-valid frames before it is eligible for
+/// up-sync — the ghost guard, so a one-off CRC fluke never becomes a synced asset.
+const OBSERVED_MIN_FRAMES_OK: u64 = 2;
+
+/// Gateway-owned observation of one meter, projected for the `op:observed` up-sync.
+/// Deliberately excludes keys and backend-owned profile fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedRecord {
+    pub serial: u32,
+    pub mfr: String,
+    pub device_type: u8,
+    pub mode: String,
+    pub encrypted: bool,
+    pub has_key: bool,
+    pub silent: bool,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    pub frames_ok: u64,
+    pub frames_total: u64,
+    pub last_rssi: i16,
 }
 
 /// Persisted event record (JSON-encoded as the `events` table value).
@@ -121,6 +156,8 @@ pub struct Observation {
     pub mode: String,
     /// AFC-measured carrier offset from the 868.95 MHz center for this frame, in Hz.
     pub freq_offset_hz: i32,
+    /// Vendor quirk ids that fired while decoding this frame (vendor-layers P5).
+    pub applied_quirks: Vec<String>,
 }
 
 pub struct DeviceManager {
@@ -142,6 +179,7 @@ impl DeviceManager {
             w.open_table(EVENTS)?;
             w.open_table(META)?;
             w.open_table(KEYS)?; // initialize the keys table on first database creation
+            w.open_table(PROFILES)?;
         }
         w.commit()?;
         Ok(Self {
@@ -196,6 +234,119 @@ impl DeviceManager {
         }
         w.commit()?;
         Ok(existed)
+    }
+
+    /// Durably store a device profile (write-through when one is pushed by the
+    /// backend). Validation happened at parse; this is the atomic persistence half.
+    pub fn store_profile(&self, meterid: u32, model: &str, firmware: Option<&str>) -> Result<()> {
+        if meterid == 0 || model.is_empty() {
+            anyhow::bail!("refusing to store malformed profile for meter {meterid}");
+        }
+        let json = serde_json::json!({ "model": model, "firmware": firmware }).to_string();
+        let w = self.db.begin_write()?;
+        {
+            let mut t = w.open_table(PROFILES)?;
+            t.insert(meterid, json.as_str())?;
+        }
+        w.commit()?;
+        Ok(())
+    }
+
+    /// Load all persisted `(meterid, model, firmware)` profiles, to seed the profile
+    /// store at startup before MQTT contact.
+    pub fn load_profiles(&self) -> Result<Vec<(u32, String, Option<String>)>> {
+        let r = self.db.begin_read()?;
+        let t = match r.open_table(PROFILES) {
+            Ok(t) => t,
+            // A store created before the profiles table existed: nothing to load.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (k, v) = row?;
+            let j: serde_json::Value = serde_json::from_str(v.value())?;
+            let model = j["model"].as_str().unwrap_or_default().to_string();
+            if model.is_empty() {
+                continue;
+            }
+            let firmware = j["firmware"].as_str().map(str::to_string);
+            out.push((k.value(), model, firmware));
+        }
+        Ok(out)
+    }
+
+    /// Meter ids currently tracked by the device store — the payload of a
+    /// profile_request, so the backend answers for the fleet we actually hear.
+    pub fn device_ids(&self) -> Result<Vec<u32>> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(DEVICES)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            out.push(row?.0.value());
+        }
+        Ok(out)
+    }
+
+    /// Records whose `last_seen` is newer than `hwm` and which pass the ghost guard,
+    /// projected for the `op:observed` up-sync. Pass `hwm = 0` for a full snapshot.
+    pub fn observed_since(&self, hwm: i64) -> Result<Vec<ObservedRecord>> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(DEVICES)?;
+        let mut out = Vec::new();
+        for row in t.iter()? {
+            let (k, v) = row?;
+            let rec: DeviceRecord = serde_json::from_str(v.value())?;
+            if rec.frames_ok >= OBSERVED_MIN_FRAMES_OK && rec.last_seen > hwm {
+                out.push(ObservedRecord {
+                    serial: k.value(),
+                    mfr: rec.manufacturer,
+                    device_type: rec.device_type,
+                    mode: rec.mode,
+                    encrypted: rec.encrypted,
+                    has_key: rec.has_key,
+                    silent: rec.silent,
+                    first_seen: rec.first_seen,
+                    last_seen: rec.last_seen,
+                    frames_ok: rec.frames_ok,
+                    frames_total: rec.frames_total,
+                    last_rssi: rec.last_rssi,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Current up-sync high-water mark (max `last_seen` confirmed synced). 0 = never.
+    pub fn observed_watermark(&self) -> Result<i64> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(META)?;
+        Ok(t.get(OBSERVED_HWM_KEY)?
+            .map(|g| g.value().parse().unwrap_or(0))
+            .unwrap_or(0))
+    }
+
+    /// Current up-sync sequence number (last used). 0 = none sent.
+    pub fn observed_seq(&self) -> Result<u64> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(META)?;
+        Ok(t.get(OBSERVED_SEQ_KEY)?
+            .map(|g| g.value().parse().unwrap_or(0))
+            .unwrap_or(0))
+    }
+
+    /// Persist the watermark and sequence after a sync is *confirmed* (ack or
+    /// publish success). Until this is called the same records re-select on the next
+    /// sync, so a backhaul outage drains rather than drops.
+    pub fn advance_observed(&self, new_hwm: i64, seq: u64) -> Result<()> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut t = txn.open_table(META)?;
+            t.insert(OBSERVED_HWM_KEY, new_hwm.to_string().as_str())?;
+            t.insert(OBSERVED_SEQ_KEY, seq.to_string().as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
     }
 
     /// Load all persisted `(meterid, hexkey)` pairs, to seed the keystore at startup before
@@ -285,6 +436,10 @@ impl DeviceManager {
                     let prev_has_key = prev.as_ref().map(|r| r.has_key).unwrap_or(false);
                     let was_silent = prev.as_ref().map(|r| r.silent).unwrap_or(false);
                     let prev_reading = prev.as_ref().and_then(|r| r.last_reading.clone());
+                    let prev_quirks = prev
+                        .as_ref()
+                        .map(|r| r.applied_quirks.clone())
+                        .unwrap_or_default();
 
                     let type_name = device_type_name(o.device_type).to_string();
                     let mut rec = prev.unwrap_or_default();
@@ -298,6 +453,9 @@ impl DeviceManager {
                     rec.has_key = o.has_key;
                     rec.mode = o.mode.clone();
                     rec.last_freq_offset_hz = o.freq_offset_hz;
+                    if !o.applied_quirks.is_empty() {
+                        rec.applied_quirks = o.applied_quirks.clone();
+                    }
                     rec.silent = false;
                     if is_new {
                         rec.first_seen = now;
@@ -331,6 +489,11 @@ impl DeviceManager {
                         if prev_reading.as_deref() != Some(r.as_str()) {
                             events.push(("reading", r.clone()));
                         }
+                    }
+                    // A quirk overriding this device's decode is a significant,
+                    // auditable state change — logged once per set change, like `key`.
+                    if !o.applied_quirks.is_empty() && o.applied_quirks != prev_quirks {
+                        events.push(("quirk", o.applied_quirks.join(",")));
                     }
                     if total.is_multiple_of(self.sample_every) {
                         events.push(("sample", format!("rssi={} crc_ok=true", o.rssi)));
@@ -558,9 +721,10 @@ impl DeviceManager {
                         frames_fail: od.frames_fail,
                         last_rssi: od.last_rssi,
                         last_reading: od.last_reading.clone(),
-                        // Old SQLite dumps predate mode/frequency tracking.
+                        // Old SQLite dumps predate mode/frequency/quirk tracking.
                         mode: String::new(),
                         last_freq_offset_hz: 0,
+                        applied_quirks: Vec::new(),
                     },
                 };
                 dtab.insert(od.meter_id, serde_json::to_string(&merged)?.as_str())?;
@@ -695,6 +859,7 @@ mod tests {
             reading: None,
             mode: "C".into(),
             freq_offset_hz: 0,
+            applied_quirks: Vec::new(),
         }
     }
 
@@ -888,6 +1053,80 @@ mod tests {
         assert!(!has_device(&dm, 63398870), "ghost removed");
         assert!(has_device(&dm, 74644444), "validated device kept");
         assert_eq!(count_events(&dm, 74644444, "first_seen"), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Profiles follow the key discipline: validated, atomically persisted, loaded
+    /// on reopen before any broker contact, tolerant of stores that predate the table.
+    #[test]
+    fn stores_and_loads_profiles_surviving_reopen() {
+        let path = tmp_db();
+        {
+            let dm = DeviceManager::open(&path, 20, 600).unwrap();
+            dm.store_profile(74644444, "MULTICAL 21", None).unwrap();
+            dm.store_profile(63398862, "MULTICAL 21", Some("FW54"))
+                .unwrap();
+            assert!(dm.store_profile(0, "X", None).is_err(), "meter 0 refused");
+            assert!(
+                dm.store_profile(1, "", None).is_err(),
+                "empty model refused"
+            );
+        }
+        let dm = DeviceManager::open(&path, 20, 600).unwrap();
+        let mut rows = dm.load_profiles().unwrap();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    63398862,
+                    "MULTICAL 21".to_string(),
+                    Some("FW54".to_string())
+                ),
+                (74644444, "MULTICAL 21".to_string(), None),
+            ]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn device_ids_lists_the_tracked_fleet() {
+        let path = tmp_db();
+        let dm = DeviceManager::open(&path, 20, 600).unwrap();
+        dm.record_frame(&obs(74644444, true, false)).unwrap();
+        dm.record_frame(&obs(63398862, true, false)).unwrap();
+        let mut ids = dm.device_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec![63398862, 74644444]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// P5 into the store: a quirk overriding a device's decode is persisted on the
+    /// record and logged as an event — once per set change, like `key` — and survives
+    /// reopen. Records written before quirk tracking load with an empty set.
+    #[test]
+    fn persists_applied_quirks_and_logs_set_changes_once() {
+        let path = tmp_db();
+        {
+            let dm = DeviceManager::open(&path, 1000, 600).unwrap();
+            let mut o = obs(12345678, true, false);
+            o.applied_quirks = vec!["qds-vif04-date".to_string()];
+            dm.record_frame(&o).unwrap();
+            dm.record_frame(&o).unwrap(); // unchanged set: no second event
+            assert_eq!(count_events(&dm, 12345678, "quirk"), 1);
+
+            // CRC-failed frame must not touch the quirk state (P6 upstream anyway).
+            let mut bad = obs(12345678, false, false);
+            bad.applied_quirks = vec!["bogus".to_string()];
+            dm.record_frame(&bad).unwrap();
+            assert_eq!(count_events(&dm, 12345678, "quirk"), 1);
+        } // drop -> releases the file
+        let dm = DeviceManager::open(&path, 1000, 600).unwrap();
+        let txn = dm.db.begin_read().unwrap();
+        let dtab = txn.open_table(DEVICES).unwrap();
+        let rec: DeviceRecord =
+            serde_json::from_str(dtab.get(12345678u32).unwrap().unwrap().value()).unwrap();
+        assert_eq!(rec.applied_quirks, vec!["qds-vif04-date"]);
         let _ = std::fs::remove_file(&path);
     }
 

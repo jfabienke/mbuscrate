@@ -66,6 +66,7 @@ use std::time::Duration;
 /// Default GPIO pin configuration for SX126x on Raspberry Pi
 #[cfg(feature = "raspberry-pi")]
 const DEFAULT_GPIO_PINS: GpioPins = GpioPins {
+    nss: None,
     busy: 25,        // Pin 22
     dio1: 24,        // Pin 18
     dio2: Some(23),  // Pin 16 (optional)

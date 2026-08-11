@@ -443,6 +443,7 @@ fn test_integration_with_mbus_frame() {
         data_len: 0,
         data: [0; 256],
         more_records_follow: 0,
+        applied_quirks: Vec::new(),
     }];
 
     // Convert to unified instrumentation
