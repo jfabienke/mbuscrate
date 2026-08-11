@@ -191,13 +191,50 @@ from `decode.rs`, or add an explicit Techem branch there.
    prioritise the newer OMS cells (largest in-scope share, least new code); add
    positional cells only as captures/fleet demand shows them.
 
+## Prior art & cross-reference (KuguHome openHAB binding)
+
+[KuguHome/openhab-binding-wmbus](https://github.com/KuguHome/openhab-binding-wmbus)
+(EPL-2.0, Java, ~2021) is the most Techem-specific open-source decoder besides
+`wmbusmeters`/FHEM. Its `TechemBindingConstants` holds an independent variant table
+keyed on **(version, reportedType, coding, deviceType)** — where `coding` is the
+manufacturer **CI byte** (0xA0 / 0xA1 / 0xA2), a generational discriminator we do not
+key on. Mining it (2026-08) against our decoder and against `wmbusmeters` (the tested
+oracle) produced these outcomes:
+
+| KuguHome variant | corroborated by `wmbusmeters`? | our action |
+|---|---|---|
+| water **0x74** /62,/72 (CI A2) | ✅ `mkradio3` | **added** `Variant::MkRadio3` (+ dates), golden-tested |
+| **smoke detector 0x76 / 0xF0** (CI A0/A1) | ✅ `tsd2` | **added** `Variant::SmokeDetector` (status + date), golden-tested |
+| HCA **0x45 / 0x43** labelled `HKV45` | ❌ — `wmbusmeters` `compact5` detects `TCH,45,43` as a **HeatMeter** | **no change** — our Compact5 (heat) is correct; KuguHome's own code flags the doubt (`// TODO Isn't this a heat meter?`) |
+| HCA **0x61** (reserved type), **0x64** (0x80) | ❌ not in `wmbusmeters` | **not added** — KuguHome-only, uncorroborated |
+| heat **0x71 / 0x43**, **0x57 / 0x44** | ❌ not in `wmbusmeters` | **not added** — KuguHome-only, uncorroborated |
+
+Key lessons:
+
+- **`wmbusmeters` is the authority; KuguHome is corroboration only.** KuguHome mis-labels
+  0x45/0x43 (an HCA vs a heat meter) — so its labels are not trusted without a second
+  source. Anything KuguHome-only is recorded here as *unverified* and left out of the
+  code until a capture or a second oracle confirms it.
+- **The CI (`coding`) dimension is real.** The same (version, type) appears under
+  different CIs (e.g. `tsd2` under A0 *and* A1; KuguHome's WMZ 113/43 under A0 *and*
+  A2), and the framings differ. Our `handle_ci_manufacturer_range` receives the CI but
+  dispatches on (version, type) + a payload tag byte; the positional decoders must stay
+  robust when a known (version,type) arrives under an unexpected CI.
+- **`almanac` = bi-weekly (14-day) consumption history.** KuguHome extracts a periodic
+  history run we don't — the same gap flagged for `mkradio3a` (DIF `82xx FD3A`). Worth
+  decoding when a capture is available.
+- KuguHome is **positional-only** and predates the modern OMS cells, so it has none of
+  our FHKV data IV / radio-4 / mkradio-3a/4a / vario-411/451-MID coverage. The two
+  projects are complementary.
+
 ## Licensing
 
-`wmbusmeters` is **GPL-3.0**. The *format facts* used here — FLAG ID, CI codes,
+`wmbusmeters` is **GPL-3.0**; KuguHome's binding is **EPL-2.0**. The *format facts*
+used here — FLAG ID, CI codes,
 `(version,type)` selectors, field offsets, DIF/VIF keys, date-packing math, unit
 scaling — are not copyrightable and are free to use. **Do not** port the `.xmq`
-drivers or their C++ into this (differently-licensed) repo; implement clean-room
-from the facts. Treat the test-telegram corpus as external reference, cite it, and
+drivers or their C++, nor KuguHome's Java, into this (differently-licensed) repo;
+implement clean-room from the facts. Treat the test-telegram corpus as external reference, cite it, and
 build our own regression fixtures from real captures where we can.
 
 ## Sources

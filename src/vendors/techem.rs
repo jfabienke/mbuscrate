@@ -100,12 +100,15 @@ pub fn identify(version: u8, device_type: u8) -> Option<(&'static str, &'static 
         (0x6A, 0x08) => ("Techem FHKV radio 4", "heat cost allocator"),
         (0x70 | 0x95, 0x62) => ("Techem mk-radio (warm water)", "warm water"),
         (0x70 | 0x95, 0x72) => ("Techem mk-radio (cold water)", "water"),
+        (0x74, 0x62) => ("Techem mk-radio 3 (warm water)", "warm water"),
+        (0x74, 0x72) => ("Techem mk-radio 3 (cold water)", "water"),
         (0x50, 0x72) => ("Techem mk-radio 3a", "water"),
         (0x95, 0x37) => ("Techem mk-radio 4a", "water"),
         (0x22 | 0x39 | 0x45, 0x04 | 0x43 | 0xC3) => ("Techem compact V", "heat"),
         (0x27, 0x04 | 0xC3) => ("Techem vario 4", "heat"),
         (0x28, 0x04) => ("Techem vario 411", "heat"),
         (0x17, 0x04) => ("Techem vario 451 MID", "heat"),
+        (0x76, 0xF0) => ("Techem smoke detector (TSD2)", "smoke detector"),
         _ => return None,
     })
 }
@@ -116,6 +119,7 @@ pub enum Category {
     Hca,
     Water,
     Heat,
+    Smoke,
 }
 
 /// A legacy positional Techem telegram variant.
@@ -123,12 +127,17 @@ pub enum Category {
 pub enum Variant {
     /// FHKV data III heat-cost allocator (unencrypted, CI 0xA0/0xA2).
     FhkvIii,
-    /// mk-radio 3/4 water meter (legacy, CI 0xA2).
+    /// mk-radio 4 water meter (versions 0x70/0x95, legacy, CI 0xA0/0xA2).
     MkRadio,
+    /// mk-radio 3 water meter (version 0x74) — same volume layout as mk-radio 4
+    /// but also carries the billing/readout dates (wmbusmeters `mkradio3`).
+    MkRadio3,
     /// compact5 heat meter (legacy, CI 0xA1/0xA2).
     Compact5,
     /// vario451 heat meter (legacy, CI 0xA2, raw mGJ).
     Vario451,
+    /// TSD2 smoke detector (version 0x76, type 0xF0) — status + last-reading date.
+    SmokeDetector,
 }
 
 impl Variant {
@@ -142,8 +151,10 @@ impl Variant {
         match (version, device_type) {
             (0x69 | 0x94, 0x80) => Some(Variant::FhkvIii),
             (0x70 | 0x95, 0x62 | 0x72) => Some(Variant::MkRadio),
+            (0x74, 0x62 | 0x72) => Some(Variant::MkRadio3),
             (0x22 | 0x39 | 0x45, 0x04 | 0x43 | 0xC3) => Some(Variant::Compact5),
             (0x27, 0x04 | 0xC3) => Some(Variant::Vario451),
+            (0x76, 0xF0) => Some(Variant::SmokeDetector),
             _ => None,
         }
     }
@@ -151,8 +162,9 @@ impl Variant {
     pub fn category(self) -> Category {
         match self {
             Variant::FhkvIii => Category::Hca,
-            Variant::MkRadio => Category::Water,
+            Variant::MkRadio | Variant::MkRadio3 => Category::Water,
             Variant::Compact5 | Variant::Vario451 => Category::Heat,
+            Variant::SmokeDetector => Category::Smoke,
         }
     }
 
@@ -161,8 +173,10 @@ impl Variant {
         match self {
             Variant::FhkvIii => decode_fhkv_iii(app_data),
             Variant::MkRadio => decode_mkradio(app_data),
+            Variant::MkRadio3 => decode_mkradio3(app_data),
             Variant::Compact5 => decode_compact5(app_data),
             Variant::Vario451 => decode_vario451(app_data),
+            Variant::SmokeDetector => decode_smoke(app_data),
         }
     }
 }
@@ -267,6 +281,44 @@ fn decode_mkradio(d: &[u8]) -> Option<Vec<VendorDataRecord>> {
         num(0x02, 0x15, "current_volume_m3", "m3", curr),
         num(0x42, 0x15, "previous_volume_m3", "m3", prev),
         num(0x0C, 0x15, "total_volume_m3", "m3", prev + curr),
+    ])
+}
+
+/// mk-radio 3 water (version 0x74): `[tag] PrevDate(u16) PrevVol(u16)@4215
+/// CurrDate(u16) CurrVol(u16)@0215`. Same volume offsets as mk-radio 4 (VIF 0x15 =
+/// × 0.1 m³) but with the two bit-packed dates decoded as well.
+fn decode_mkradio3(d: &[u8]) -> Option<Vec<VendorDataRecord>> {
+    let prev_date = le16(d, 1)?;
+    let prev = le16(d, 3)? as f64 * 0.1;
+    let curr_date = le16(d, 5)?;
+    let curr = le16(d, 7)? as f64 * 0.1;
+
+    let (py, pm, pd) = date_prev(prev_date);
+    let (cy, cm, cd) = date_curr(curr_date, py, pm, pd);
+
+    Some(vec![
+        num(0x02, 0x15, "current_volume_m3", "m3", curr),
+        num(0x42, 0x15, "previous_volume_m3", "m3", prev),
+        num(0x0C, 0x15, "total_volume_m3", "m3", prev + curr),
+        text(0x42, 0x6C, "current_date", iso(cy, cm, cd)),
+        text(0x02, 0x6C, "previous_date", iso(py, pm, pd)),
+    ])
+}
+
+/// TSD2 smoke detector (version 0x76, type 0xF0): `[status] PrevDate(u16) …`.
+/// Status byte `00` = OK, `01` = SMOKE, anything else is surfaced raw (`STATUS_xx`);
+/// the date is the previous/last-reading date in the standard `date_prev` packing.
+fn decode_smoke(d: &[u8]) -> Option<Vec<VendorDataRecord>> {
+    let status = match *d.get(0)? {
+        0x00 => "OK".to_string(),
+        0x01 => "SMOKE".to_string(),
+        other => format!("STATUS_{other:02X}"),
+    };
+    let prev_date = le16(d, 1)?;
+    let (py, pm, pd) = date_prev(prev_date);
+    Some(vec![
+        text(0x01, 0x01, "status", status),
+        text(0x02, 0x6C, "previous_date", iso(py, pm, pd)),
     ])
 }
 
@@ -451,6 +503,66 @@ mod tests {
         assert!((n(&r, "previous_volume_m3") - 0.1).abs() < 1e-9);
         assert!((n(&r, "current_volume_m3") - 0.3).abs() < 1e-9);
         assert!((n(&r, "total_volume_m3") - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mkradio3_golden() {
+        // wmbusmeters mkradio3 (version 0x74): 8.9 target + 4.9 current = 13.8 m³,
+        // billing 2018-12-31, readout 2019-04-27.
+        let d = app("2F446850313233347462A2069F255900B029310000000306060906030609070606050509050505050407040605070500");
+        let r = Variant::MkRadio3.decode(&d).unwrap();
+        assert!((n(&r, "previous_volume_m3") - 8.9).abs() < 1e-9);
+        assert!((n(&r, "current_volume_m3") - 4.9).abs() < 1e-9);
+        assert!((n(&r, "total_volume_m3") - 13.8).abs() < 1e-9);
+        assert_eq!(s(&r, "previous_date"), "2018-12-31");
+        assert_eq!(s(&r, "current_date"), "2019-04-27");
+
+        // Rollover-boundary golden: prev 2018-03-31, curr 2018-04-01 (same year).
+        let d = app("2F446850313233347462A2067F2459001008310000000306060906030609070606050509050505050407040605070500");
+        let r = Variant::MkRadio3.decode(&d).unwrap();
+        assert_eq!(s(&r, "previous_date"), "2018-03-31");
+        assert_eq!(s(&r, "current_date"), "2018-04-01");
+    }
+
+    #[test]
+    fn smoke_detector_golden() {
+        // wmbusmeters tsd2 (version 0x76, type 0xF0): status byte + last-reading date.
+        let ok =
+            app("294468506935639176F0A0009F2782290060822900000401D6311AF93E1BF93E008DC3009ED4000FE500");
+        let r = Variant::SmokeDetector.decode(&ok).unwrap();
+        assert_eq!(s(&r, "status"), "OK");
+        assert_eq!(s(&r, "previous_date"), "2019-12-31");
+
+        let smoke =
+            app("294468506935639176F0A0019F2782290060822900000401D6311AF93E1BF93E008DC3009ED4000FE500");
+        assert_eq!(s(&Variant::SmokeDetector.decode(&smoke).unwrap(), "status"), "SMOKE");
+
+        // Unknown status byte is surfaced raw, never guessed.
+        let weird =
+            app("294468506935639176F0A0719F2782290060822900000401D6311AF93E1BF93E008DC3009ED4000FE500");
+        assert_eq!(
+            s(&Variant::SmokeDetector.decode(&weird).unwrap(), "status"),
+            "STATUS_71"
+        );
+
+        // Selector + registry route (0x76, 0xF0) through the CI seam end to end.
+        let reg = crate::vendors::VendorRegistry::with_defaults().unwrap();
+        let recs = crate::vendors::dispatch_ci_hook(&reg, "TCH", 0x76, 0xF0, 0xA0, &ok)
+            .unwrap()
+            .expect("smoke detector routes via the CI seam");
+        assert!(recs.iter().any(|r| r.quantity == "status"));
+    }
+
+    #[test]
+    fn identifies_mkradio3_and_smoke_detector() {
+        assert_eq!(
+            identify(0x74, 0x62),
+            Some(("Techem mk-radio 3 (warm water)", "warm water"))
+        );
+        assert_eq!(
+            identify(0x76, 0xF0),
+            Some(("Techem smoke detector (TSD2)", "smoke detector"))
+        );
     }
 
     #[test]
