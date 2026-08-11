@@ -258,10 +258,10 @@ fn test_parse_variable_record_all_dif_types() {
         (0x02, 2), // 16 bit integer
         (0x03, 3), // 24 bit integer
         (0x04, 4), // 32 bit integer
-        (0x05, 6), // 48 bit integer
-        (0x06, 8), // 64 bit integer
-        (0x07, 0), // Selection for Readout
-        (0x08, 0), // Special functions
+        (0x05, 4), // 32 bit real (IEEE float)
+        (0x06, 6), // 48 bit integer
+        (0x07, 8), // 64 bit integer
+        (0x08, 0), // Selection for readout (no data)
         (0x09, 1), // 2 digit BCD
         (0x0A, 2), // 4 digit BCD
         (0x0B, 3), // 6 digit BCD
