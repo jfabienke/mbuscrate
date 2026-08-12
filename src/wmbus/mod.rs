@@ -44,7 +44,7 @@ pub use radio::rfm69::{Rfm69Config, Rfm69Driver, Rfm69Error, Rfm69Mode};
 pub use compact_cache::{CacheStats, CachedDeviceInfo, CompactFrameCache};
 pub use compact_frame::{CompactError, CompactLayoutCache, RecordLayout};
 #[cfg(feature = "crypto")]
-pub use crypto::{AesKey, CryptoError, DeviceInfo, EncryptionMode, KeyMode, WMBusCrypto};
+pub use crypto::{AesKey, CryptoError, DeviceInfo, KeyMode, WMBusCrypto};
 #[cfg(feature = "crypto")]
 pub use ell::{decrypt_ell_payload, DecryptedEll, EllError, EllHeader, EllSecurity};
 pub use encryption::WMBusEncryption;
@@ -56,3 +56,5 @@ pub use handle::WMBusHandle;
 pub use mode_c::{decode_mode_c, WMBusLinkFrame};
 pub use mode_switching::{ModeNegotiator, ModeSwitcher, SwitchingStats, WMBusMode};
 pub use network::WMBusNetwork;
+#[cfg(feature = "crypto")]
+pub use oms::{decrypt_mode5_cbc, decrypted_ok, mode5_cbc_iv, Mode5Error};

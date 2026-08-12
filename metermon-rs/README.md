@@ -55,7 +55,7 @@ cargo build --features radio           # on the Pi
 |---|---|---|
 | RFM69 receive | ⚠️ via `RadioDriver` trait | routes around the `WMBusHandle` coupling gap (mbus-rs Phase 2.2) |
 | wM-Bus CRC | ⚠️ routes to `verify_wmbus_crc` | **wrong polynomial until mbus-rs Phase 1.3** — real frames read `crc_ok:false` |
-| Mode 5 decrypt | ⚠️ routes to `WMBusCrypto` | **CTR-not-CBC + bogus key derivation until Phase 1.4** — plaintext will NOT match metermon yet |
+| Mode 5 decrypt | ✅ routes to `oms::decrypt_mode5_cbc` | AES-CBC with the correct `link_address ‖ ACC` IV (epulse-verified); the legacy CTR `WMBusCrypto` facade has been retired |
 | CI dispatch, header decode | ✅ | mode read from Configuration Word, matching epulse |
 | Record decode | ⚠️ first record only | `parse_variable_record` doesn't report bytes consumed; multi-record loop is a follow-up |
 | MQTT publish | ✅ | `rumqttc`, live or shadow topic |
