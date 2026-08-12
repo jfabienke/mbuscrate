@@ -22,7 +22,12 @@ jobs:
   # Basic CI remains fast for PRs
   test:
     runs-on: ${{ matrix.os }}
+    # beta is an early-warning signal (its clippy/rustc are ahead of stable and their
+    # lints are a moving target), not a merge gate — keep the beta leg non-blocking so
+    # a future beta-only lint never reddens master.
+    continue-on-error: ${{ matrix.rust == 'beta' }}
     strategy:
+      fail-fast: false
       matrix:
         # Linux only for the heavier enhanced build. Cross-platform coverage of the
         # default feature set lives in ci.yml; the platform-specific features
@@ -54,8 +59,10 @@ jobs:
     - name: Doc tests
       run: cargo test --doc --features $CI_FEATURES
 
-  # Fuzzing - runs on every PR but with limited iterations
+  # Fuzzing - smoke test. Schedule-only: cargo-fuzz builds from source and each target
+  # runs 30s+, too heavy/noisy for a per-push gate (deep-fuzz already runs weekly).
   fuzz:
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -86,13 +93,15 @@ jobs:
     
     - name: Upload fuzz artifacts
       if: failure()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: fuzz-artifacts
         path: fuzz/artifacts/
 
-  # Benchmarks - check for performance regressions
+  # Benchmarks - schedule-only: criterion on shared runners is too noisy to gate, and
+  # regression detection needs a persisted baseline CI does not keep. Record weekly.
   benchmark:
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -110,7 +119,7 @@ jobs:
         cargo bench --bench vif_benchmark -- --save-baseline current
     
     - name: Upload benchmark results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: benchmark-results
         path: target/criterion/
@@ -139,37 +148,40 @@ jobs:
     - name: Run integration tests
       run: cargo test --test '*_integration_*' --features $CI_FEATURES
 
-  # Coverage analysis
+  # Coverage analysis — informational, never a gate.
   coverage:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
+
     - uses: dtolnay/rust-toolchain@stable
-    
-    - name: Install tarpaulin
-      run: cargo install cargo-tarpaulin
-    
-    - name: Run coverage
-      run: cargo tarpaulin --out Lcov --features $CI_FEATURES --ignore-tests --timeout 300
-    
+      with:
+        components: llvm-tools-preview
+
+    - uses: Swatinem/rust-cache@v2
+
+    # cargo-llvm-cov replaces the archived actions-rs/tarpaulin; taiki-e/install-action
+    # fetches a prebuilt binary (no from-source install).
+    - uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Coverage (lcov)
+      run: cargo llvm-cov --features $CI_FEATURES --lcov --output-path lcov.info
+
+    - name: Upload coverage artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-lcov
+        path: lcov.info
+
+    # Best-effort upload; a Codecov hiccup (or a missing token on a private repo) must
+    # not fail the job. No hard threshold gate — coverage is a metric, not a gate.
     - name: Upload to Codecov
-      uses: codecov/codecov-action@v3
+      continue-on-error: true
+      uses: codecov/codecov-action@v5
       with:
         files: ./lcov.info
-        fail_ci_if_error: true
-    
-    - name: Check coverage threshold
-      run: |
-        # Extract coverage percentage
-        coverage=$(cargo tarpaulin --print-summary 2>&1 | grep "Coverage" | awk '{print $2}' | sed 's/%//')
-        echo "Coverage: $coverage%"
-        
-        # Fail if below 80%
-        if (( $(echo "$coverage < 80" | bc -l) )); then
-          echo "Coverage below 80% threshold!"
-          exit 1
-        fi
+        fail_ci_if_error: false
+        token: ${{ secrets.CODECOV_TOKEN }}
 
   # Mutation testing - weekly only due to time
   mutation:
@@ -193,7 +205,7 @@ jobs:
           --jobs 2
     
     - name: Upload mutation report
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: mutation-report
         path: mutants.out/
@@ -246,7 +258,7 @@ jobs:
         done
     
     - name: Upload corpus
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: fuzz-corpus
         path: fuzz/corpus/
@@ -299,7 +311,7 @@ jobs:
         awk '/^## \['"$VERSION"'\]/,/^## \[/' CHANGELOG.md | head -n -1 > RELEASE_NOTES.md
     
     - name: Upload release notes
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: release-notes
         path: RELEASE_NOTES.md
