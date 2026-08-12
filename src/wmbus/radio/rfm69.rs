@@ -39,18 +39,23 @@
 //! }
 //! ```
 
+// The RFM69 driver is legacy diagnostic scaffolding pending retirement (#10): a few
+// helper fns aren't wired up yet and some radio-config return types are intentionally
+// complex. Silence those specific lints module-wide rather than churn code being removed.
+#![allow(dead_code, clippy::type_complexity)]
+
 use crate::wmbus::radio::rfm69_packet::*;
 use crate::wmbus::radio::rfm69_registers::*;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 
 #[cfg(feature = "rfm69")]
 use rppal::{
-    gpio::{Gpio, InputPin, Level, OutputPin, Trigger},
-    spi::{BitOrder, Bus, Mode, SlaveSelect, Spi},
+    gpio::{Gpio, InputPin, OutputPin, Trigger},
+    spi::{Bus, Mode, SlaveSelect, Spi},
 };
 
 /// Parse a `/dev/spidevB.C` path into its rppal (Bus, SlaveSelect).
@@ -996,8 +1001,8 @@ impl Rfm69Driver {
     }
 
     /// Handle a FIFO-level interrupt: read one sync-triggered burst as a whole
-    /// packet, deliver it, and re-arm the receiver — matching epulse's ReceivePacket
-    /// + Interrupt model. HW sync (SYNCCONFIG=0x90) fires the FIFO fill per frame, so
+    /// packet, deliver it, and re-arm the receiver — matching epulse's ReceivePacket +
+    /// Interrupt model. HW sync (SYNCCONFIG=0x90) fires the FIFO fill per frame, so
     /// each burst is one frame; accumulating across bursts in a persistent buffer
     /// (the previous approach) misaligned and flooded "invalid header".
     #[cfg(feature = "rfm69")]
@@ -1361,7 +1366,7 @@ impl Rfm69Driver {
         let mut rx = [0u8; 2];
 
         {
-            let mut spi = spi.lock().unwrap();
+            let spi = spi.lock().unwrap();
             spi.transfer(&mut rx, &tx)
                 .map_err(|e| Rfm69Error::Spi(format!("Read register failed: {}", e)))?;
         }
@@ -1560,11 +1565,7 @@ impl crate::wmbus::radio::radio_driver::RadioDriver for Rfm69Driver {
         config: crate::wmbus::radio::radio_driver::WMBusConfig,
     ) -> Result<(), crate::wmbus::radio::radio_driver::RadioDriverError> {
         // Update internal configuration from trait config
-        if let Some(ref aes_key) = config
-            .sync_word
-            .get(0..32)
-            .and_then(|bytes| Some(hex::encode(bytes)))
-        {
+        if let Some(ref aes_key) = config.sync_word.get(0..32).map(hex::encode) {
             self.config.aes_key = Some(aes_key.clone());
         }
 

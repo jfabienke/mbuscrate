@@ -6,6 +6,11 @@
 //! reports what the radio thinks it is doing even when nothing arrives — silence with
 //! no explanation is the failure mode that cost the most time on the RFM69.
 
+// This instrumented receiver keeps diagnostic constants and helpers (register opcodes,
+// an IRQ-name table) that aren't all wired into the default path; allow dead_code
+// module-wide for that scaffolding.
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use mbus_rs::wmbus::mode_c::decode_mode_c;
 use mbus_rs::wmbus::radio::driver::Sx126xDriver;
@@ -159,6 +164,7 @@ impl Counters {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one arg per SX1262 pin/RF knob this diagnostic exposes
 pub fn run(
     spidev: &str,
     pins: GpioPins,

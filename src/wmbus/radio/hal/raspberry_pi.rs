@@ -71,7 +71,7 @@
 use crate::wmbus::radio::hal::{Hal, HalError};
 #[cfg(feature = "rfm69")]
 use crate::wmbus::radio::rfm69_registers::SPI_SPEED as RFM69_SPI_SPEED;
-use rppal::gpio::{Gpio, InputPin, Level, OutputPin, Trigger};
+use rppal::gpio::{Gpio, InputPin, Level, OutputPin};
 use rppal::spi::{BitOrder, Bus, Error as SpiError, Mode, SlaveSelect, Spi};
 use std::thread;
 use std::time::Duration;
@@ -208,7 +208,9 @@ impl Default for GpioPins {
 pub struct RaspberryPiHal {
     /// SPI interface for radio communication
     spi: Spi,
-    /// GPIO controller for pin access
+    /// GPIO controller for pin access. Held for the lifetime of the pin handles
+    /// derived from it at init; not read again after construction.
+    #[allow(dead_code)]
     gpio: Gpio,
     /// Input pins for radio status signals
     nss_pin: Option<OutputPin>,
@@ -302,7 +304,7 @@ impl RaspberryPiHal {
     ) -> Result<Self, RpiHalError> {
         // Initialize SPI with SX126x-compatible settings.
         // rppal 0.22: bit order is set on the constructed Spi, not via a builder method.
-        let mut spi = Spi::new(bus, slave_select, 8_000_000, Mode::Mode0)?;
+        let spi = Spi::new(bus, slave_select, 8_000_000, Mode::Mode0)?;
         spi.set_bit_order(BitOrder::MsbFirst)?;
 
         let bus_info = bus_label;
@@ -482,6 +484,13 @@ impl RaspberryPiHal {
 
         log::warn!("BUSY pin timeout after {}ms", timeout_ms);
         Err(RpiHalError::BusyTimeout)
+    }
+
+    /// Human-readable bus identity for diagnostics (e.g. `"SPI0"`, or the spidev
+    /// path when opened via [`from_spidev`](Self::from_spidev)). Surfaces the
+    /// `bus_info` the HAL records at init.
+    pub fn get_info(&self) -> &str {
+        &self.bus_info
     }
 
     /// Get the current state of a DIO pin
@@ -868,7 +877,7 @@ mod tests {
 
     #[test]
     fn test_invalid_spi_speed() {
-        let result = RaspberryPiHalBuilder::new()
+        let _result = RaspberryPiHalBuilder::new()
             .spi_speed(20_000_000) // Too high
             .build();
 
@@ -908,11 +917,11 @@ impl Default for Rfm69GpioPins {
 /// Returns (SpiDevice, OutputPin, InputPin) for RFM69 driver use
 pub fn new_rfm69_spi(
     gpio: &Gpio,
-    spi_device: Option<&str>,
+    _spi_device: Option<&str>,
     pins: &Rfm69GpioPins,
 ) -> Result<(Spi, Option<OutputPin>, Option<InputPin>), RpiHalError> {
     // Initialize SPI with RFM69-specific settings (1 MHz, Mode 0)
-    let mut spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, RFM69_SPI_SPEED, Mode::Mode0)?;
+    let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, RFM69_SPI_SPEED, Mode::Mode0)?;
     spi.set_bit_order(BitOrder::MsbFirst)?;
 
     log::info!(

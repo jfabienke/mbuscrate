@@ -294,13 +294,13 @@ async fn run_hardware_test() -> Result<(), Box<dyn std::error::Error>> {
     info!("Testing GPIO pins...");
 
     // Check DIO1 pin
-    match driver.gpio_read(1) {
+    match driver.hal_mut().read_dio(1) {
         Ok(state) => info!("✅ DIO1 pin read: {}", if state { "HIGH" } else { "LOW" }),
         Err(e) => error!("❌ DIO1 pin read failed: {}", e),
     }
 
     // Check DIO2 pin (if configured)
-    match driver.gpio_read(2) {
+    match driver.hal_mut().read_dio(2) {
         Ok(state) => info!("✅ DIO2 pin read: {}", if state { "HIGH" } else { "LOW" }),
         Err(_) => info!("ℹ️  DIO2 pin not configured or read failed"),
     }
@@ -444,7 +444,7 @@ fn decode_manufacturer_id(m_field: u16) -> String {
 
     let mut result = String::new();
     for &char_val in &[char1, char2, char3] {
-        if char_val >= 1 && char_val <= 26 {
+        if (1..=26).contains(&char_val) {
             result.push((b'A' + char_val - 1) as char);
         } else {
             result.push('?');
@@ -502,8 +502,8 @@ fn encode_manufacturer_id(id: &str) -> u16 {
     let mut result = 0u16;
     for (i, ch) in id.chars().take(3).enumerate() {
         let upper = ch.to_ascii_uppercase();
-        if upper >= 'A' && upper <= 'Z' {
-            let char_value = ((upper as u16) - ('A' as u16) + 1); // A=1, B=2, ..., Z=26
+        if upper.is_ascii_uppercase() {
+            let char_value = (upper as u16) - ('A' as u16) + 1; // A=1, B=2, ..., Z=26
             result |= char_value << (10 - i * 5);
         }
     }

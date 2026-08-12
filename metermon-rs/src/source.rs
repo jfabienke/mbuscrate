@@ -250,12 +250,11 @@ impl Sx1262Source {
             .lora
             .as_ref()
             .expect("rotation only runs with LoRa enabled");
-        let freqs = &l.freqs_hz;
-        let sfs = &l.sfs;
-        let f = freqs[self.rotation % freqs.len().max(1)];
-        let sf = sfs[(self.rotation / freqs.len().max(1)) % sfs.len().max(1)];
+        let p = l
+            .point_at(self.rotation)
+            .expect("Config::validate guarantees non-empty freqs_hz/sfs");
         self.rotation += 1;
-        (f, sf)
+        p
     }
 
     /// Drive the window schedule: switch profiles when a boundary passes. Kept
@@ -419,6 +418,9 @@ impl Sx1262Source {
 /// Live radio dispatch: the gateway's config names the driver, everything
 /// downstream sees one type. Methods mirror the source structs exactly.
 #[cfg(feature = "radio")]
+// Rfm69 is the legacy path and Sx1262 is already boxed; boxing Rfm69 too would ripple
+// through every constructor and match arm for no real gain here.
+#[allow(clippy::large_enum_variant)]
 pub enum RadioSource {
     Rfm69(Rfm69Source),
     Sx1262(Box<Sx1262Source>),
