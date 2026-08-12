@@ -59,6 +59,7 @@ fn detect_raspberry_pi_model() {
 }
 
 #[cfg(not(target_arch = "aarch64"))]
+#[allow(dead_code)] // no-op stub for non-ARM; never called on x86_64 (CI's runner)
 fn detect_raspberry_pi_model() {
     // No-op on non-ARM platforms
 }

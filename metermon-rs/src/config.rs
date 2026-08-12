@@ -129,11 +129,47 @@ fn default_lora_sfs() -> Vec<u8> {
     vec![12, 9, 7]
 }
 
+impl LoraListenConfig {
+    /// The `(frequency, SF)` for rotation step `n`. Frequencies advance fastest, so
+    /// one SF pass covers every channel before the ladder moves.
+    ///
+    /// `None` when either list is empty — a config [`Config::validate`] rejects, but
+    /// guarded here too so no caller can index an empty vec (the panic finding).
+    /// Pure and host-testable, independent of the `radio` feature that drives it.
+    pub fn point_at(&self, n: usize) -> Option<(u32, u8)> {
+        if self.freqs_hz.is_empty() || self.sfs.is_empty() {
+            return None;
+        }
+        let f = self.freqs_hz[n % self.freqs_hz.len()];
+        let sf = self.sfs[(n / self.freqs_hz.len()) % self.sfs.len()];
+        Some((f, sf))
+    }
+}
+
 impl Config {
     pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path.as_ref())?;
         let cfg: Config = serde_json::from_str(&text)?;
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Reject configs that would panic or misbehave at runtime. Today: a
+    /// `lora-listen` block whose `freqs_hz` or `sfs` is explicitly empty — serde
+    /// defaults are non-empty, but an explicit `[]` otherwise reaches the rotation
+    /// and indexes an empty vec.
+    fn validate(&self) -> anyhow::Result<()> {
+        for (name, dev) in &self.devices {
+            if let Some(l) = &dev.lora_listen {
+                if l.freqs_hz.is_empty() {
+                    anyhow::bail!("device {name}: lora-listen.freqs_hz must not be empty");
+                }
+                if l.sfs.is_empty() {
+                    anyhow::bail!("device {name}: lora-listen.sfs must not be empty");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Retained topic carrying the gateway's `online`/`offline` state (the latter delivered
@@ -194,5 +230,96 @@ mod tests {
             Some("meter/control/gateway-001")
         );
         assert_eq!(kb.gwid.as_deref(), Some("gateway-001"));
+    }
+
+    fn lora(freqs: Vec<u32>, sfs: Vec<u8>) -> LoraListenConfig {
+        LoraListenConfig {
+            period_secs: 120,
+            window_secs: 8,
+            freqs_hz: freqs,
+            sfs,
+        }
+    }
+
+    #[test]
+    fn point_at_advances_frequencies_before_the_sf_ladder() {
+        let l = lora(vec![868_100_000, 868_300_000, 868_500_000], vec![12, 9]);
+        // One SF pass covers every channel before the ladder steps.
+        assert_eq!(l.point_at(0), Some((868_100_000, 12)));
+        assert_eq!(l.point_at(1), Some((868_300_000, 12)));
+        assert_eq!(l.point_at(2), Some((868_500_000, 12)));
+        assert_eq!(l.point_at(3), Some((868_100_000, 9)));
+        assert_eq!(l.point_at(5), Some((868_500_000, 9)));
+        assert_eq!(
+            l.point_at(6),
+            Some((868_100_000, 12)),
+            "wraps after 3x2 points"
+        );
+    }
+
+    #[test]
+    fn point_at_is_none_for_empty_lists() {
+        // The panic finding, at the pure boundary: empty lists yield None instead of
+        // indexing an empty vec.
+        assert_eq!(lora(vec![], vec![9]).point_at(0), None);
+        assert_eq!(lora(vec![868_100_000], vec![]).point_at(0), None);
+    }
+
+    fn cfg_with_lora(freqs: &str, sfs: &str) -> Config {
+        let json = format!(
+            r#"{{"gwid":"6543",
+                 "mqtt":{{"host":"h","clientid":"c","data-topic":"t"}},
+                 "devices":{{"wmbus0":{{"type":"WMBUS","spidev":"/dev/x",
+                     "lora-listen":{{"freqs_hz":{freqs},"sfs":{sfs}}}}}}}}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn validate_rejects_empty_lora_lists() {
+        assert!(cfg_with_lora("[]", "[9]").validate().is_err());
+        assert!(cfg_with_lora("[868100000]", "[]").validate().is_err());
+        assert!(cfg_with_lora("[868100000]", "[9]").validate().is_ok());
+        // A config with no lora-listen at all is unaffected.
+        let plain: Config = serde_json::from_str(
+            r#"{"gwid":"6543","mqtt":{"host":"h","clientid":"c","data-topic":"t"}}"#,
+        )
+        .unwrap();
+        assert!(plain.validate().is_ok());
+    }
+
+    #[test]
+    fn load_runs_validation_on_the_file_path() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push(format!("metermon-cfg-loadtest-{}.json", std::process::id()));
+        let write = |body: &str| {
+            std::fs::File::create(&path)
+                .unwrap()
+                .write_all(body.as_bytes())
+                .unwrap();
+        };
+
+        // An empty freqs_hz must be rejected via load()'s validate() call, not just
+        // when validate() is invoked directly.
+        write(
+            r#"{"gwid":"6543","mqtt":{"host":"h","clientid":"c","data-topic":"t"},
+                "devices":{"wmbus0":{"type":"WMBUS","spidev":"/dev/x",
+                    "lora-listen":{"freqs_hz":[],"sfs":[9]}}}}"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("freqs_hz"),
+            "load must reject via validate: {err}"
+        );
+
+        // A valid config loads through the same path.
+        write(
+            r#"{"gwid":"6543","mqtt":{"host":"h","clientid":"c","data-topic":"t"},
+                "devices":{"wmbus0":{"type":"WMBUS","spidev":"/dev/x",
+                    "lora-listen":{"freqs_hz":[868100000],"sfs":[9]}}}}"#,
+        );
+        assert!(Config::load(&path).is_ok());
+        let _ = std::fs::remove_file(&path);
     }
 }

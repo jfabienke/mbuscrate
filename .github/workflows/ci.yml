@@ -21,11 +21,49 @@ jobs:
     - run: cargo fmt --all -- --check
     - run: cargo clippy --all-targets -- -D warnings
     - run: cargo test --verbose
+    # Coverage is a metric, not a correctness gate — never let it fail the build.
+    # `actions-rs/tarpaulin@v0.1` is a deprecated, archived action (actions-rs org
+    # archived 2023) and currently errors; a proper replacement is CI-modernization
+    # follow-up. Until then, keep it informational so a real green `test` job isn't
+    # held hostage by dead coverage tooling.
     - name: Coverage
       if: matrix.os == 'ubuntu-latest'
+      continue-on-error: true
       uses: actions-rs/tarpaulin@v0.1
       with:
         args: --ignore-tests --out Lcov
+
+  # metermon-rs is a standalone (non-workspace) crate: the root `test` matrix runs at
+  # the repo root and never formats, builds, or tests it — and its live gateway code
+  # sits behind `--features radio` (rppal → Linux/aarch64 only, so it cannot build on
+  # the macos/windows legs). This Ubuntu job is the only place metermon-rs, and the
+  # root crate's Linux radio backends, are checked. It is what would have caught the
+  # `JoinAdmission` import miss and the LoRa-rotation panic before they reached the Pi.
+  radio-feature:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+    # Compile-gate the Linux-only radio backend *library* (RFM69 driver + Pi HAL).
+    # Scoped to `--lib` deliberately: `--all-targets -- -D warnings` surfaced a large
+    # pre-existing backlog in never-built radio code — ~30 lints plus genuine compile
+    # errors in stale radio tests/examples (raspberry_pi_integration, raspberry_pi_wmbus,
+    # pi_quick_start) that rotted against an evolved API (get_info/gpio_read removed, the
+    # new GpioPins.nss field). That whole cleanup is tracked as #10, to be done on-device
+    # where the radio builds — not blind via CI. This lib check still catches the class it
+    # was added for (the driver library failing to compile). Restore `--all-targets
+    # -- -D warnings` once #10 lands.
+    - run: cargo clippy --features rfm69,raspberry-pi --lib
+    # The standalone metermon-rs gateway: format-check + compile + test with the radio
+    # path (monitor loop, SX1262/RFM69 sources, LoRaWAN responder) that only builds here.
+    - name: metermon-rs (fmt + radio build + test)
+      working-directory: metermon-rs
+      run: |
+        cargo fmt --all -- --check
+        cargo clippy --features radio --all-targets
+        cargo test   --features radio --verbose
 
   audit:
     runs-on: ubuntu-latest
