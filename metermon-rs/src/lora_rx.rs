@@ -71,7 +71,7 @@ fn describe_lorawan(payload: &[u8]) -> String {
                 u16::from_le_bytes([payload[17], payload[18]])
             )
         }
-        0b010 | 0b100 | 0b011 | 0b101 if payload.len() >= 12 => {
+        0b010..=0b101 if payload.len() >= 12 => {
             // Data up/down: MHDR | DevAddr(4) | FCtrl | FCnt(2) | ...
             let dir = if mtype == 0b010 || mtype == 0b100 {
                 "Up"

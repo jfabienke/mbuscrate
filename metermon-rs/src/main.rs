@@ -1804,7 +1804,7 @@ fn run_dumpregs(config_path: &str) -> Result<()> {
         _ => SlaveSelect::Ss0,
     };
 
-    let mut spi = Spi::new(bus, ss, 1_000_000, Mode::Mode0)?;
+    let spi = Spi::new(bus, ss, 1_000_000, Mode::Mode0)?;
     spi.set_bit_order(BitOrder::MsbFirst)?;
 
     // Same register set metermon-rs dumps after its own config, for a direct diff.

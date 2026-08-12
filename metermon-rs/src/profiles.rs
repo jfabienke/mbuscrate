@@ -40,6 +40,7 @@ impl ProfileStore {
         self.profiles.len()
     }
 
+    #[allow(dead_code)] // companion to len(); kept for API completeness
     pub fn is_empty(&self) -> bool {
         self.profiles.is_empty()
     }

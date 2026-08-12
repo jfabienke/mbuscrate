@@ -58,7 +58,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 #[cfg(feature = "raspberry-pi")]
-use rppal::gpio::{Error as GpioError, Gpio, InputPin, Level, OutputPin, Trigger};
+use rppal::gpio::{Gpio, InputPin, Level, Trigger};
 
 /// Enhanced GPIO errors with specific failure types
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -324,7 +324,7 @@ impl EnhancedGpio {
             };
 
             // Send event (non-blocking)
-            if let Err(_) = event_tx.send(event) {
+            if event_tx.send(event).is_err() {
                 // Event channel closed, log but don't panic
                 log::warn!("GPIO event channel closed for pin {}", pin_num);
             }

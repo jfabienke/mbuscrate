@@ -12,10 +12,7 @@ fn main() {
 }
 
 #[cfg(feature = "raspberry-pi")]
-use mbus_rs::wmbus::radio::{
-    driver::Sx126xDriver,
-    hal::{GpioPins, RaspberryPiHalBuilder},
-};
+use mbus_rs::wmbus::radio::{driver::Sx126xDriver, hal::RaspberryPiHalBuilder};
 #[cfg(feature = "raspberry-pi")]
 use std::time::Duration;
 

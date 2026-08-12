@@ -46,6 +46,9 @@ pub struct JoinCredential {
 
 /// A completed join, for reporting back up the provisioning chain.
 #[derive(Debug, Clone)]
+// Some fields are provisioning/telemetry context captured at join time but not yet
+// consumed downstream (product-direction work, #32).
+#[allow(dead_code)]
 pub struct JoinedDevice {
     pub dev_eui: String,
     pub join_eui: String,

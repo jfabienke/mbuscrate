@@ -80,6 +80,7 @@ impl MBusDeviceManager {
 
     /// Adds a new wireless wM-Bus handle for Raspberry Pi with custom configuration.
     #[cfg(feature = "raspberry-pi")]
+    #[allow(clippy::too_many_arguments)] // per-pin config mirrors the HAL's GpioPins fields
     pub async fn add_wmbus_handle_raspberry_pi_custom(
         &mut self,
         device_id: &str,

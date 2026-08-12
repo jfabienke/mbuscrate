@@ -149,7 +149,6 @@ mod packet_tests {
 
 #[cfg(feature = "rfm69")]
 mod rfm69_hardware_tests {
-    use mbus_rs::wmbus::radio::radio_driver::*;
     use mbus_rs::wmbus::radio::rfm69_packet::*;
     use mbus_rs::wmbus::radio::rfm69_registers::*;
 
@@ -368,7 +367,7 @@ mod rfm69_hardware_tests {
     /// Test packet statistics tracking
     #[test]
     fn test_packet_statistics() {
-        let mut stats = PacketStats::default();
+        let stats = PacketStats::default();
 
         // Initial state
         assert_eq!(stats.packets_received, 0);

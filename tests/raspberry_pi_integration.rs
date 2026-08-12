@@ -23,6 +23,7 @@ mod raspberry_pi_tests {
     /// Default test GPIO configuration
     fn test_gpio_pins() -> GpioPins {
         GpioPins {
+            nss: None,
             busy: 25,
             dio1: 24,
             dio2: Some(23),
@@ -41,7 +42,7 @@ mod raspberry_pi_tests {
 
     #[test]
     fn test_hal_builder_configuration() {
-        let builder = RaspberryPiHalBuilder::new()
+        let _builder = RaspberryPiHalBuilder::new()
             .spi_bus(1)
             .spi_speed(10_000_000)
             .busy_pin(20)
@@ -194,7 +195,7 @@ mod raspberry_pi_tests {
         let mut driver = Sx126xDriver::new(hal, 32_000_000);
 
         // Test GPIO read functionality
-        match driver.gpio_read(1) {
+        match driver.hal_mut().read_dio(1) {
             // DIO1 pin
             Ok(state) => {
                 println!(
@@ -208,7 +209,7 @@ mod raspberry_pi_tests {
         }
 
         // Test DIO2 if configured
-        match driver.gpio_read(2) {
+        match driver.hal_mut().read_dio(2) {
             // DIO2 pin
             Ok(state) => {
                 println!(
@@ -242,6 +243,7 @@ mod raspberry_pi_tests {
 
         // Test SPI bus 1 (if available)
         let pins_bus1 = GpioPins {
+            nss: None,
             busy: 20,
             dio1: 21,
             dio2: None,
@@ -341,6 +343,7 @@ mod mock_tests {
     fn test_pin_configuration_variants() {
         // Test different pin configurations
         let minimal = GpioPins {
+            nss: None,
             busy: 25,
             dio1: 24,
             dio2: None,
@@ -348,6 +351,7 @@ mod mock_tests {
         };
 
         let full = GpioPins {
+            nss: None,
             busy: 25,
             dio1: 24,
             dio2: Some(23),

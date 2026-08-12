@@ -74,6 +74,7 @@ impl RedbJoinStore {
 
     /// Wrap an already-open database (e.g. the device store's), so join state lives
     /// in the same file under its own table. Uses the default policy.
+    #[allow(dead_code)] // shared-db constructor; not wired until the join responder ships (#32)
     pub fn from_db(db: Arc<Database>) -> Self {
         Self {
             db,

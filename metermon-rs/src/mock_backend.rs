@@ -27,6 +27,11 @@
 //! network path see the key: serve real keys only over a broker and network you trust,
 //! and prefer a synthetic key when all you need is to exercise the channel.
 
+// Reference implementation of the (future) backend Device Manager: several projected
+// types (observation inventory, position resolution) are defined ahead of being wired,
+// so allow dead_code module-wide here rather than pepper per-item attributes.
+#![allow(dead_code)]
+
 use crate::config::Config;
 use crate::keystore::KeyStore;
 use anyhow::{Context, Result};
