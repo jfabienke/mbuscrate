@@ -569,7 +569,53 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
     }
     let i = i_temp;
 
+    accumulate_dib_fields(&mut record);
+
     Ok((i, record))
+}
+
+/// Accumulate storage number, tariff, and subunit (device) from the DIF + DIFE chain
+/// per EN 13757-3 §6.3.2.
+///
+/// The DIF's bit 6 (`0x40`) carries the storage-number LSB — present on *every* record,
+/// so it is always applied. Each DIFE then extends the fields, least-significant first:
+/// its low nibble (`0x0F`) adds 4 more storage bits, bits `0x30` add 2 tariff bits, and
+/// bit `0x40` adds 1 subunit bit.
+///
+/// Tariff and subunit keep the `-1` "absent" sentinel unless at least one DIFE is present,
+/// so a plain record still reports "no tariff / no subunit" (downstream instrumentation
+/// maps `< 0` to `None`). Storage has no sentinel — `0` is a valid storage number — so it
+/// is always written.
+///
+/// This is what surfaces a Techem/OMS storage-indexed history run (e.g. `mkradio3a`'s
+/// `82 xx FD3A` slots): each slot's DIFE nibble becomes a distinct `storage_number`, which
+/// the vendor layer maps to a billing date.
+fn accumulate_dib_fields(record: &mut MBusRecord) {
+    let dif = record.drh.dib.dif;
+    let ndife = record.drh.dib.ndife;
+
+    // Storage-number LSB from DIF bit 6 — always present.
+    let mut storage: u32 = ((dif & MBUS_DATA_RECORD_DIF_MASK_STORAGE_NO) >> 6) as u32;
+
+    if ndife > 0 {
+        let mut tariff: u32 = 0;
+        let mut device: u32 = 0;
+        for (idx, &dife) in record.drh.dib.dife[..ndife].iter().enumerate() {
+            // Storage bits are 4 per DIFE, starting at bit 1 (LSB is the DIF bit above).
+            // Guard the shift: a pathological chain (>7 DIFEs) would exceed u32 — those
+            // high bits simply don't fit and are dropped, matching libmbus behaviour.
+            let storage_shift = 1 + 4 * idx;
+            if storage_shift < 32 {
+                storage |= ((dife & MBUS_DATA_RECORD_DIFE_MASK_STORAGE_NO) as u32) << storage_shift;
+            }
+            tariff |= (((dife & MBUS_DATA_RECORD_DIFE_MASK_TARIFF) >> 4) as u32) << (2 * idx);
+            device |= (((dife & MBUS_DATA_RECORD_DIFE_MASK_DEVICE) >> 6) as u32) << idx;
+        }
+        record.tariff = tariff as i32;
+        record.device = device as i32;
+    }
+
+    record.storage_number = storage;
 }
 
 /// Normalizes a fixed-length M-Bus data record.
@@ -783,6 +829,66 @@ fn parse_variable_data_length(input: u8) -> Result<usize, MBusError> {
 
 #[cfg(test)]
 mod tests {
+
+    // --- DIF/DIFE storage-number / tariff / subunit accumulation (EN 13757-3 §6.3.2) ---
+
+    /// A plain record with no DIFE and no DIF storage bit: storage 0, tariff/subunit absent.
+    #[test]
+    fn plain_record_has_zero_storage_and_absent_tariff_subunit() {
+        // DIF 0x04 (32-bit int, bit 6 clear), VIF 0x13, 4 data bytes.
+        let (rec, _) =
+            parse_variable_record_consumed(&[0x04, 0x13, 0x00, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(rec.storage_number, 0);
+        assert_eq!(rec.tariff, -1, "no DIFE -> tariff absent");
+        assert_eq!(rec.device, -1, "no DIFE -> subunit absent");
+    }
+
+    /// DIF bit 6 alone (no DIFE) is the storage-number LSB -> storage 1.
+    #[test]
+    fn dif_bit6_sets_storage_lsb() {
+        // DIF 0x41 = 32-bit... actually 0x01 (8-bit int) | 0x40 storage bit.
+        let (rec, _) = parse_variable_record_consumed(&[0x41, 0x13, 0x07]).unwrap();
+        assert_eq!(rec.storage_number, 1);
+        assert_eq!(rec.tariff, -1);
+    }
+
+    /// One DIFE carrying a storage nibble: storage = DIF-LSB | (nibble << 1).
+    #[test]
+    fn single_dife_extends_storage_number() {
+        // DIF 0x84 (32-bit int + extension), DIFE 0x03 (storage nibble 3, no tariff/subunit).
+        // storage = 0 (DIF bit6 clear) | (3 << 1) = 6.
+        let (rec, _) =
+            parse_variable_record_consumed(&[0x84, 0x03, 0x13, 0x00, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(rec.storage_number, 6);
+        assert_eq!(rec.tariff, 0, "DIFE present, tariff bits 0");
+        assert_eq!(rec.device, 0, "DIFE present, subunit bit 0");
+    }
+
+    /// DIFE tariff and subunit bits decode independently of storage.
+    #[test]
+    fn dife_tariff_and_subunit_bits() {
+        // DIF 0x84, DIFE 0x50 = tariff (0x30>>4 = 1) ... 0x50 & 0x30 = 0x10 -> tariff 1,
+        // 0x50 & 0x40 = 0x40 -> subunit 1, storage nibble 0.
+        let (rec, _) =
+            parse_variable_record_consumed(&[0x84, 0x50, 0x13, 0x00, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(rec.tariff, 1);
+        assert_eq!(rec.device, 1);
+        assert_eq!(rec.storage_number, 0);
+    }
+
+    /// A storage-indexed history run: successive DIFE nibbles yield distinct storage
+    /// numbers — the mechanism the Techem/OMS almanac decode depends on.
+    #[test]
+    fn history_run_yields_distinct_storage_numbers() {
+        // Two DIFEs: low nibble of DIFE0 = bits [4:1], low nibble of DIFE1 = bits [8:5].
+        // DIFE0 = 0x08 (storage nibble 8), DIFE1 = 0x00 -> storage = 8 << 1 = 16.
+        let (rec, _) =
+            parse_variable_record_consumed(&[0x84, 0x88, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00])
+                .unwrap();
+        // DIFE0 = 0x88: extension bit set + storage nibble 8. DIFE1 = 0x00.
+        // storage = (8 << 1) | (0 << 5) = 16.
+        assert_eq!(rec.storage_number, 16);
+    }
 
     /// Parsing a record header is not the same as reading a meter: these pin the
     /// data-byte decoding and VIF scaling that turn a DRH plus bytes into a value.
