@@ -14,7 +14,7 @@ working configuration, verified on a live Pi 5 (kernel 6.6.20-rpi-2712).
 
 | Layer | Setting |
 |-------|---------|
-| wM-Bus radio | SX1262 on `/dev/spidev0.1`, `BUSY=GPIO20`, `DIO1=GPIO16`, `RESET=GPIO18` |
+| wM-Bus radio | SX1262 on `/dev/spidev0.1`, `NSS=GPIO21` (software CS — see note), `BUSY=GPIO20`, `DIO1=GPIO16`, `RESET=GPIO18` |
 | GNSS chip | **CASIC AT6558R** (GPS+GLONASS, URANUS5 fw) — *not* an L76K |
 | GNSS UART | `/dev/ttyAMA0` @ **9600** baud (GPIO14=TXD0 / GPIO15=RXD0) |
 | Enable UART | `dtparam=uart0=on` in `/boot/firmware/config.txt` |
@@ -25,6 +25,11 @@ working configuration, verified on a live Pi 5 (kernel 6.6.20-rpi-2712).
 A position fix additionally requires the GNSS antenna to have **sky view** — indoors the
 receiver streams NMEA but reports no fix (mode 1, 0 satellites), and `metermon` only adds
 `gw_pos` to the up-sync once the fix is valid.
+
+> **Chip-select note.** The radio bus is `/dev/spidev0.1`, which *implies* the SPI0 hardware
+> chip-enable **CE1 = GPIO7**. This HAT does **not** use CE1: it drives the SX1262 `NSS` from a
+> **software / bit-banged chip-select on GPIO21**. A reproduction that wires the design assuming
+> hardware CE1 will not match — the chip-select is GPIO21, in software.
 
 ---
 
@@ -134,6 +139,11 @@ json.dump(d, open(p, "w"), indent=2)
 PY
 sudo systemctl restart metermon-rs
 ```
+
+> This `json.dump(..., indent=2)` rewrites the whole file, so it **re-indents all of
+> `metermon.conf`**, not just the one key — harmless for JSON, and the `.bak-pregps` backup
+> above preserves the original. If you need a minimal single-key diff, use
+> `jq '.gps="127.0.0.1:2947"'` (or edit by hand) instead.
 
 Confirm the wiring in the log:
 
