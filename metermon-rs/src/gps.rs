@@ -186,6 +186,9 @@ fn read_loop(addr: &str, handle: &GpsHandle) -> std::io::Result<()> {
     // Latest satellites-used count from gpsd SKY reports; gates TPV fixes so a
     // zero-satellite default position (see module docs) is never published.
     let mut sats_used: u32 = 0;
+    // Whether we have already logged the current run of satellite-gated rejections,
+    // so a sustained phantom fix warns once rather than at the ~1 Hz TPV rate.
+    let mut gate_logged = false;
     for line in reader.lines() {
         let line = line?;
         if let Some(used) = parse_gpsd_sky(&line) {
@@ -193,16 +196,34 @@ fn read_loop(addr: &str, handle: &GpsHandle) -> std::io::Result<()> {
             continue;
         }
         match parse_gpsd_tpv(&line) {
-            Some(TpvReport::Fix(mut fix)) => {
+            Some(TpvReport::Fix(mut fix)) if fix_valid_with_sats(sats_used) => {
                 fix.ts = now_unix();
-                if !fix_valid_with_sats(sats_used) {
-                    // mode >= 2 but not backed by real satellites: keep the
-                    // coordinates for the log, but do not publish them as gw_pos.
-                    fix.valid = false;
-                }
+                gate_logged = false;
                 handle.set(fix);
             }
-            Some(TpvReport::NoFix) => handle.invalidate(),
+            Some(TpvReport::Fix(fix)) => {
+                // mode >= 2 but not backed by real satellites (e.g. the CASIC
+                // AT6558R default 30N/120E with 0 sats). Drop validity via
+                // invalidate() — same as a mode<2 loss — so the last known-good
+                // position is preserved for the log rather than overwritten with the
+                // phantom coordinates. Log the reason once so a genuinely gated lock
+                // is diagnosable and not mistaken for dead hardware.
+                if !gate_logged {
+                    log::warn!(
+                        "gpsd: ignoring mode>=2 fix at {:.5},{:.5} — {} satellite(s) used (< {}); receiver default, not a real lock",
+                        fix.lat,
+                        fix.lon,
+                        sats_used,
+                        MIN_SATS_FOR_FIX
+                    );
+                    gate_logged = true;
+                }
+                handle.invalidate();
+            }
+            Some(TpvReport::NoFix) => {
+                gate_logged = false;
+                handle.invalidate();
+            }
             None => {}
         }
     }
