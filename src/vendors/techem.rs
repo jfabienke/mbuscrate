@@ -18,6 +18,7 @@
 
 use super::{VendorDataRecord, VendorDeviceInfo, VendorExtension, VendorVariable};
 use crate::error::MBusError;
+use crate::payload::record::{MBusRecord, MBusRecordValue};
 use serde_json::{json, Value};
 
 /// Techem `VendorExtension` — registered under `"TCH"`. Decodes the legacy
@@ -345,6 +346,108 @@ fn decode_vario451(d: &[u8]) -> Option<Vec<VendorDataRecord>> {
     ])
 }
 
+// ---- OMS almanac (storage-indexed billing history) ------------------------
+//
+// Techem's newer OMS cells (fhkvdataiv HCA, mkradio3a water) decode through the
+// generic DIF/VIF walker — no positional decoder here. But each historical billing
+// period is carried as a *storage-indexed* record: the current reading at storage 0,
+// the set-date reading at storage 1, older periods at storage 8, 9, … The generic
+// walker now surfaces those distinct storage numbers (see `record.rs` DIFE
+// accumulation), so the history run is finally separable instead of collapsing onto
+// storage 0.
+//
+// This is what "almanac decode" means downstream: pair each storage≥1 *value* record
+// with the *date* record at the same storage, and render the date. The date cells use
+// the standard EN 13757-3 **Type G (CP16)** encoding (VIF `0x6C`) — NOT Techem's
+// bit-packed positional date (`date_prev`/`date_curr` above), which only appears in the
+// legacy telegrams. The generic `record.rs` path leaves a `0x6C` field as a raw u16, so
+// the Type-G rendering is done here.
+
+/// One historical billing period recovered from a Techem OMS telegram.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlmanacEntry {
+    /// EN 13757-3 storage number: 1 = set-date period, 8… = older periods.
+    pub storage: u32,
+    /// Billing date for this period, ISO `YYYY-MM-DD`, if a Type-G date record was
+    /// present at the same storage number.
+    pub date: Option<String>,
+    /// The reading at this period (HCA units, m³, kWh, …).
+    pub value: Option<f64>,
+    /// Quantity string of the value record (e.g. `"Units for H.C.A."`).
+    pub quantity: String,
+}
+
+/// Decode an EN 13757-3 **Type G (CP16)** date from its raw little-endian u16 into
+/// `(year, month, day)`. Base epoch 2000; matches `data_encoding::decode_time`'s size-2
+/// arm, re-expressed on the raw value because the generic record path hands back a raw
+/// integer rather than a `SystemTime` for VIF `0x6C`.
+fn type_g_date(raw: u16) -> (u16, u8, u8) {
+    let lo = (raw & 0x00FF) as u8;
+    let hi = ((raw >> 8) & 0x00FF) as u8;
+    let year = 2000 + (((lo & 0xE0) >> 5) | ((hi & 0xF0) >> 1)) as u16;
+    let month = hi & 0x0F;
+    let day = lo & 0x1F;
+    (year, month, day)
+}
+
+/// Whether a VIF (extension bit masked off) is the Type-G date field `0x6C`.
+fn is_type_g_date_vif(vif: u8) -> bool {
+    (vif & 0x7F) == 0x6C
+}
+
+/// Extract the storage-indexed billing history ("almanac") from the already-decoded
+/// records of a Techem OMS telegram (fhkvdataiv, mkradio3a).
+///
+/// Groups records by storage number, pairs each period's value record with the Type-G
+/// date record at the same storage, and returns the periods in ascending storage order.
+/// Storage 0 (the *current* reading) is excluded — it is not history. Records whose
+/// storage is 0 and any non-numeric value records are ignored.
+///
+/// This relies on the DIFE storage-number accumulation in `record.rs`; without it every
+/// record would report storage 0 and the history would be indistinguishable from the
+/// current reading.
+pub fn extract_oms_history(records: &[MBusRecord]) -> Vec<AlmanacEntry> {
+    use std::collections::BTreeMap;
+
+    /// Per-storage accumulator while pairing a period's value record with its date record.
+    #[derive(Default)]
+    struct Period {
+        value: Option<f64>,
+        quantity: String,
+        date: Option<String>,
+    }
+
+    let mut periods: BTreeMap<u32, Period> = BTreeMap::new();
+
+    for rec in records {
+        if rec.storage_number == 0 {
+            continue; // current reading, not history
+        }
+        let raw = match &rec.value {
+            MBusRecordValue::Numeric(v) => *v,
+            MBusRecordValue::String(_) => continue, // e.g. the compact-profile LVAR block
+        };
+        let slot = periods.entry(rec.storage_number).or_default();
+        if is_type_g_date_vif(rec.drh.vib.vif) {
+            let (y, m, d) = type_g_date(raw as u16);
+            slot.date = Some(iso(y, m, d));
+        } else {
+            slot.value = Some(raw);
+            slot.quantity = rec.quantity.clone();
+        }
+    }
+
+    periods
+        .into_iter()
+        .map(|(storage, p)| AlmanacEntry {
+            storage,
+            date: p.date,
+            value: p.value,
+            quantity: p.quantity,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,5 +698,68 @@ mod tests {
             .decode_status_bits("KAM", 0b1110_0000)
             .unwrap()
             .is_none());
+    }
+
+    // ---- OMS almanac (storage-indexed history) ----------------------------
+
+    #[test]
+    fn type_g_date_matches_en13757() {
+        // Standard EN 13757-3 Type-G (CP16) dates, raw little-endian u16.
+        assert_eq!(type_g_date(0x2C9F), (2020, 12, 31)); // set-date in the fhkvdataiv golden
+        assert_eq!(type_g_date(0x2A7F), (2019, 10, 31)); // storage-8 period date
+    }
+
+    /// Parse a concatenated record area into `MBusRecord`s (mirrors the generic walk).
+    fn parse_records(mut buf: &[u8]) -> Vec<MBusRecord> {
+        use crate::payload::record::parse_variable_record_consumed;
+        let mut out = Vec::new();
+        while !buf.is_empty() && buf[0] != 0x2F {
+            match parse_variable_record_consumed(buf) {
+                Ok((rec, used)) if used > 0 => {
+                    out.push(rec);
+                    buf = &buf[used..];
+                }
+                _ => break,
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn almanac_extracts_dated_history_from_fhkvdataiv() {
+        // The decrypted record area of the fhkvdataiv golden (id 14542076), from after
+        // the leading 2F2F idle-fill. Structure:
+        //   03 6E 020000        current HCA = 2            (storage 0 — excluded)
+        //   43 6E 190000        set-date HCA = 25          (storage 1)
+        //   42 6C 9F2C          set-date date 2020-12-31   (storage 1)
+        //   83 04 6E 000000     storage-8 HCA = 0          (storage 8)
+        //   82 04 6C 7F2A       storage-8 date 2019-10-31  (storage 8)
+        //   8D 04 EE1F 1E ..    compact-profile LVAR block (String value — skipped)
+        let rec_area = hx(
+            "036E020000436E190000426C9F2C83046E00000082046C7F2A8D04EE1F1E72FE000000000000000000000000000000000000000000000000030016",
+        );
+        let records = parse_records(&rec_area);
+        let history = extract_oms_history(&records);
+
+        // Two historical periods: storage 1 (set-date) and storage 8. Storage 0 (current)
+        // is excluded; the LVAR compact-profile block is skipped (non-numeric).
+        assert_eq!(history.len(), 2, "history: {history:#?}");
+
+        let set = &history[0];
+        assert_eq!(set.storage, 1);
+        assert_eq!(set.date.as_deref(), Some("2020-12-31"));
+        assert_eq!(set.value, Some(25.0));
+
+        let prior = &history[1];
+        assert_eq!(prior.storage, 8);
+        assert_eq!(prior.date.as_deref(), Some("2019-10-31"));
+        assert_eq!(prior.value, Some(0.0));
+    }
+
+    #[test]
+    fn almanac_is_empty_without_storage_indexed_records() {
+        // A plain current-only reading (storage 0) yields no history.
+        let rec_area = hx("036E020000");
+        assert!(extract_oms_history(&parse_records(&rec_area)).is_empty());
     }
 }

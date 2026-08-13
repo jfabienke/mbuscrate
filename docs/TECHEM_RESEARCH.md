@@ -113,6 +113,36 @@ current `mbus-rs` decode after TPL/ELL + AES:
 - `vario411` / `vario451mid` (heat): total/target Energy (`AnyEnergyVIF`) + Date
   (storage 1/8), ELL-wrapped (`CI 0x8C`). AES.
 
+### Almanac (storage-indexed billing history) — decoded (2026-08)
+
+The storage-indexed history above collapsed onto storage 0 until the generic record
+walker learned to **accumulate the DIF/DIFE storage number** (EN 13757-3 §6.3.2). The
+`record.rs` variable-data parser had captured DIFE bytes into `dife[]` but never folded
+them into `storage_number` (it stayed `0`), so `82 xx` / `83 xx` history cells were
+indistinguishable from the current reading. Fixed in
+`payload::record::accumulate_dib_fields` — DIF bit 6 is the storage LSB, each DIFE adds
+4 more storage bits (`0x0F`), 2 tariff bits (`0x30`), 1 subunit bit (`0x40`). This is a
+**general** fix (every OMS meter with a set-date/history run benefits, not just Techem).
+
+On top of it, `vendors::techem::extract_oms_history` pairs each storage≥1 *value* record
+with the Type-G *date* record at the same storage and returns dated `AlmanacEntry`
+periods. The history dates are standard EN 13757-3 **Type G (CP16)** (VIF `0x6C`), *not*
+Techem's bit-packed positional date — the generic path leaves `0x6C` as a raw u16, so the
+Type-G rendering is done in the vendor module.
+
+Verified end-to-end against the `fhkvdataiv` golden (id 14542076, key in the vector table
+below): decrypt → walk → `current 2 @storage 0`, `set-date 25 @storage 1 (2020-12-31)`,
+`prior 0 @storage 8 (2019-10-31)`. Tests: `payload::record` DIFE unit tests,
+`vendors::techem` almanac unit tests, `tests/techem_almanac_golden.rs`.
+
+**Remaining (capture-gated):** the `fhkvdataiv` **compact-profile LVAR block**
+(`8D 04 EE1F …`, ~30 bytes of packed monthly deltas) and the KuguHome bi-weekly
+`almanac` run are *not* unpacked — the `EE1F` VIFE semantics and the delta packing need a
+second oracle or an own capture, and `wmbusmeters`' own compact-profile machinery is GPL
+(do not port). `extract_oms_history` skips the LVAR block (non-numeric) rather than
+guessing. `mkradio3a`'s `82xxFD3A` run decodes by the same storage-number mechanism but is
+not yet golden-validated (no `mkradio3a` reference telegram in hand).
+
 ## Golden telegrams (reference — from `wmbusmeters` GPL test suite)
 
 Documented here as wire-format reference; **validate against our own captures
@@ -221,8 +251,11 @@ Key lessons:
   dispatches on (version, type) + a payload tag byte; the positional decoders must stay
   robust when a known (version,type) arrives under an unexpected CI.
 - **`almanac` = bi-weekly (14-day) consumption history.** KuguHome extracts a periodic
-  history run we don't — the same gap flagged for `mkradio3a` (DIF `82xx FD3A`). Worth
-  decoding when a capture is available.
+  history run. We now decode the **storage-indexed** history (see "Almanac" above:
+  `record.rs` DIFE storage-number accumulation + `techem::extract_oms_history`), which
+  covers the discrete per-period value+date cells. The tighter **bi-weekly compact-profile
+  packing** inside the `fhkvdataiv` `8D 04 EE1F` LVAR block is still not unpacked — that
+  remains the capture-gated piece.
 - KuguHome is **positional-only** and predates the modern OMS cells, so it has none of
   our FHKV data IV / radio-4 / mkradio-3a/4a / vario-411/451-MID coverage. The two
   projects are complementary.
