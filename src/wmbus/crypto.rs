@@ -1,24 +1,24 @@
-//! # Enhanced wM-Bus AES Encryption/Decryption
+//! # wM-Bus Mode 9 (AES-128-GCM) + LoRaWAN/auth helpers
 //!
-//! This module implements AES encryption and decryption for wM-Bus frames according
-//! to OMS 7.2.4 specification. It provides robust handling of encrypted wM-Bus
-//! Mode 5/ELL frames with proper key derivation, IV construction, and multi-mode
-//! AES support based on industry best practices.
+//! This module implements the wM-Bus **Mode 9 (AES-128-GCM, OMS 7.3.6)** transport
+//! security profile, plus the LoRaWAN MIC / HMAC-SHA1 / Qundis authentication helpers.
+//!
+//! The other transport/link security profiles live in their own canonical modules and
+//! must be used directly:
+//!
+//! - **Mode 5 (OMS Security Profile A, AES-128-CBC)**: [`crate::wmbus::oms`]
+//! - **ELL link-layer (AES-128-CTR)**: [`crate::wmbus::ell`]
+//!
+//! This module no longer detects the encryption mode from the CI field or dispatches to
+//! CTR/CBC/ECB paths; that legacy facade was retired because its Mode 5 path used the
+//! wrong cipher (CTR instead of CBC) and its mode detection read the wrong field.
 //!
 //! ## Features
 //!
-//! - **AES-128 Support**: ECB, CBC, and CTR modes for different wM-Bus encryption schemes
-//! - **Key Derivation**: Proper key derivation from 16-byte AES keys per OMS specification
-//! - **IV Construction**: Correct initialization vector building for CBC/CTR modes
-//! - **Mode Detection**: Automatic detection of encryption mode from CI field
-//! - **Error Handling**: Comprehensive error types for encryption/decryption failures
-//! - **Performance**: Optimized implementation using the `aes` crate
-//!
-//! ## Supported Encryption Modes
-//!
-//! 1. **Mode 5 (AES-128 CTR)**: Counter mode for secure streaming encryption
-//! 2. **Mode 7 (AES-128 CBC)**: Cipher block chaining for block-based encryption
-//! 3. **ELL (AES-128 ECB)**: Electronic codebook mode for simple encryption
+//! - **Mode 9 GCM**: authenticated AES-128-GCM encrypt/decrypt with OMS 7.3.6 AAD + IV
+//! - **LoRaWAN MIC**: CMAC-AES128 message integrity codes
+//! - **Auth helpers**: HMAC-SHA1 and the Qundis 3-step authentication flow
+//! - **Error Handling**: comprehensive error types for encryption/decryption failures
 //!
 //! ## Usage
 //!
@@ -36,14 +36,11 @@
 //! #     device_type: 0x07,
 //! #     access_number: None,
 //! # };
-//! // Decrypt wM-Bus frame
-//! let decrypted = crypto.decrypt_frame(&encrypted_frame, &device_info).unwrap();
+//! // Decrypt a Mode 9 (AES-128-GCM) wM-Bus frame
+//! let decrypted = crypto.decrypt_mode9_gcm(&encrypted_frame, &device_info).unwrap();
 //! ```
 
 use crate::util::{hex, logging};
-use crate::vendors;
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
-use aes::Aes128;
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -73,49 +70,6 @@ pub enum CryptoError {
 
     #[error("Key derivation failed: {reason}")]
     KeyDerivationFailed { reason: String },
-}
-
-/// wM-Bus encryption modes according to OMS specification
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum EncryptionMode {
-    /// Mode 5: AES-128 CTR (Counter mode)
-    Mode5Ctr,
-    /// Mode 7: AES-128 CBC (Cipher Block Chaining)
-    Mode7Cbc,
-    /// Mode 9: AES-128 GCM (Galois/Counter Mode) - OMS 7.3.6
-    Mode9Gcm,
-    /// ELL: AES-128 ECB (Electronic Codebook)
-    EllEcb,
-    /// No encryption
-    None,
-}
-
-impl EncryptionMode {
-    /// Detect encryption mode from CI (Control Information) field
-    pub fn from_ci_field(ci: u8) -> Self {
-        match ci {
-            0x7A => Self::Mode5Ctr,      // Mode 5 with authentication
-            0x7B => Self::Mode5Ctr,      // Mode 5 without authentication
-            0x8A => Self::Mode7Cbc,      // Mode 7 with authentication
-            0x8B => Self::Mode7Cbc,      // Mode 7 without authentication
-            0x89 => Self::Mode9Gcm,      // Mode 9 GCM (OMS 7.3.6)
-            0x90..=0x97 => Self::EllEcb, // ELL encryption modes
-            _ => Self::None,
-        }
-    }
-
-    /// Get block size for this encryption mode
-    pub fn block_size(&self) -> usize {
-        match self {
-            Self::Mode5Ctr | Self::Mode7Cbc | Self::Mode9Gcm | Self::EllEcb => 16, // AES block size
-            Self::None => 1,
-        }
-    }
-
-    /// Check if mode requires initialization vector
-    pub fn requires_iv(&self) -> bool {
-        matches!(self, Self::Mode5Ctr | Self::Mode7Cbc | Self::Mode9Gcm)
-    }
 }
 
 /// AES-128 key for wM-Bus encryption
@@ -266,70 +220,6 @@ impl WMBusCrypto {
         self.full_tag_compatibility
     }
 
-    /// Decrypt wM-Bus frame with vendor key provisioning support
-    ///
-    /// This function allows vendor extensions to provide custom AES keys
-    /// for decryption, bypassing the standard key derivation process.
-    pub fn decrypt_frame_with_vendor(
-        &mut self,
-        encrypted_frame: &[u8],
-        device_info: &DeviceInfo,
-        manufacturer_id: Option<&str>,
-        registry: Option<&vendors::VendorRegistry>,
-    ) -> Result<Vec<u8>, CryptoError> {
-        // Check for vendor-provided key
-        if let (Some(mfr_id), Some(reg)) = (manufacturer_id, registry) {
-            // Convert device info for vendor hook
-            let vendor_info = vendors::VendorDeviceInfo {
-                manufacturer_id: device_info.manufacturer,
-                device_id: device_info.device_id,
-                version: device_info.version,
-                device_type: device_info.device_type,
-                model: None,
-                serial_number: None,
-                firmware_version: None,
-                additional_info: std::collections::HashMap::new(),
-            };
-
-            // Try to get vendor-provided key
-            if let Ok(Some(vendor_key)) =
-                vendors::dispatch_key_hook(reg, mfr_id, &vendor_info, encrypted_frame)
-            {
-                // A vendor-provided key is already the effective device key: use it directly
-                // WITHOUT deriving again (the old code swapped it into master_key and let
-                // decrypt_frame derive from it, producing the wrong key).
-                let device_key =
-                    AesKey::from_bytes(&vendor_key).map_err(|_| CryptoError::InvalidKeyLength {
-                        expected: 16,
-                        actual: vendor_key.len(),
-                    })?;
-                return self.decrypt_frame_with_effective_key(
-                    encrypted_frame,
-                    device_info,
-                    &device_key,
-                );
-            }
-        }
-
-        // Fall back to standard decryption
-        self.decrypt_frame(encrypted_frame, device_info)
-    }
-
-    /// Decrypt a wM-Bus frame with automatic mode detection.
-    ///
-    /// The key is used exactly as supplied ([`KeyMode::Direct`], the default), which is
-    /// what a per-device provisioned key requires. Under
-    /// [`KeyMode::DerivedFromMaster`] the deprecated XOR mixing is applied instead —
-    /// see [`AesKey::derive_device_key`] for why that is not a real KDF.
-    pub fn decrypt_frame(
-        &mut self,
-        encrypted_frame: &[u8],
-        device_info: &DeviceInfo,
-    ) -> Result<Vec<u8>, CryptoError> {
-        let device_key = self.effective_key(device_info);
-        self.decrypt_frame_with_effective_key(encrypted_frame, device_info, &device_key)
-    }
-
     /// The key to use for a device under the configured [`KeyMode`].
     fn effective_key(&self, device_info: &DeviceInfo) -> AesKey {
         match self.key_mode {
@@ -339,111 +229,6 @@ impl WMBusCrypto {
                 .master_key
                 .derive_device_key(device_info.device_id, device_info.manufacturer),
         }
-    }
-
-    /// Decrypt a wM-Bus frame using an explicit **effective** device key, performing NO
-    /// further derivation. Use this when the key is already the device key — e.g. a
-    /// vendor-provisioned key — so it is not derived a second time.
-    pub fn decrypt_frame_with_effective_key(
-        &mut self,
-        encrypted_frame: &[u8],
-        device_info: &DeviceInfo,
-        device_key: &AesKey,
-    ) -> Result<Vec<u8>, CryptoError> {
-        // Validate minimum frame size
-        if encrypted_frame.len() < 11 {
-            return Err(CryptoError::InvalidFrame {
-                reason: "Frame too short for encryption headers".to_string(),
-            });
-        }
-
-        // Extract CI field to determine encryption mode
-        let ci_offset = self.find_ci_offset(encrypted_frame)?;
-        let ci = encrypted_frame[ci_offset];
-        let mode = EncryptionMode::from_ci_field(ci);
-
-        if mode == EncryptionMode::None {
-            return Err(CryptoError::UnsupportedMode { mode: ci });
-        }
-
-        // Extract encrypted payload (after CI field)
-        let payload_start = ci_offset + 1;
-        if payload_start >= encrypted_frame.len() {
-            return Err(CryptoError::InvalidFrame {
-                reason: "No encrypted payload found".to_string(),
-            });
-        }
-
-        let encrypted_payload = &encrypted_frame[payload_start..];
-
-        // Decrypt based on mode, using the supplied effective key as-is.
-        let decrypted_payload = match mode {
-            EncryptionMode::Mode5Ctr => {
-                self.decrypt_ctr_mode(device_key, encrypted_payload, device_info)?
-            }
-            EncryptionMode::Mode7Cbc => {
-                self.decrypt_cbc_mode(device_key, encrypted_payload, device_info)?
-            }
-            EncryptionMode::Mode9Gcm => {
-                self.decrypt_gcm_mode(device_key, encrypted_payload, encrypted_frame, device_info)?
-            }
-            EncryptionMode::EllEcb => self.decrypt_ecb_mode(device_key, encrypted_payload)?,
-            EncryptionMode::None => unreachable!(),
-        };
-
-        // Reconstruct frame with decrypted payload
-        let mut decrypted_frame = encrypted_frame[..payload_start].to_vec();
-        decrypted_frame.extend_from_slice(&decrypted_payload);
-
-        Ok(decrypted_frame)
-    }
-
-    /// Encrypt wM-Bus frame
-    pub fn encrypt_frame(
-        &mut self,
-        plaintext_frame: &[u8],
-        device_info: &DeviceInfo,
-        mode: EncryptionMode,
-    ) -> Result<Vec<u8>, CryptoError> {
-        if mode == EncryptionMode::None {
-            return Ok(plaintext_frame.to_vec());
-        }
-
-        // Find CI field and extract payload
-        let ci_offset = self.find_ci_offset(plaintext_frame)?;
-        let payload_start = ci_offset + 1;
-
-        if payload_start >= plaintext_frame.len() {
-            return Err(CryptoError::InvalidFrame {
-                reason: "No payload to encrypt".to_string(),
-            });
-        }
-
-        let plaintext_payload = &plaintext_frame[payload_start..];
-
-        let device_key = self.effective_key(device_info);
-
-        // Encrypt based on mode
-        let encrypted_payload = match mode {
-            EncryptionMode::Mode5Ctr => {
-                self.encrypt_ctr_mode(&device_key, plaintext_payload, device_info)?
-            }
-            EncryptionMode::Mode7Cbc => {
-                self.encrypt_cbc_mode(&device_key, plaintext_payload, device_info)?
-            }
-            EncryptionMode::Mode9Gcm => {
-                self.encrypt_gcm_mode(&device_key, plaintext_payload, plaintext_frame, device_info)?
-            }
-            EncryptionMode::EllEcb => self.encrypt_ecb_mode(&device_key, plaintext_payload)?,
-            EncryptionMode::None => unreachable!(),
-        };
-
-        // Update CI field for encryption mode
-        let mut encrypted_frame = plaintext_frame[..ci_offset].to_vec();
-        encrypted_frame.push(self.get_ci_for_mode(mode));
-        encrypted_frame.extend_from_slice(&encrypted_payload);
-
-        Ok(encrypted_frame)
     }
 
     /// Find CI field offset in frame
@@ -462,268 +247,59 @@ impl WMBusCrypto {
         Ok(STANDARD_CI_OFFSET)
     }
 
-    /// Get CI field value for encryption mode
-    fn get_ci_for_mode(&self, mode: EncryptionMode) -> u8 {
-        match mode {
-            EncryptionMode::Mode5Ctr => 0x7A, // Mode 5 with authentication
-            EncryptionMode::Mode7Cbc => 0x8A, // Mode 7 with authentication
-            EncryptionMode::Mode9Gcm => 0x89, // Mode 9 GCM (OMS 7.3.6)
-            EncryptionMode::EllEcb => 0x90,   // ELL encryption
-            EncryptionMode::None => 0x72,     // No encryption
-        }
-    }
-
-    /// Decrypt using AES-128 CTR mode (Mode 5)
-    fn decrypt_ctr_mode(
-        &mut self,
-        key: &AesKey,
-        ciphertext: &[u8],
-        device_info: &DeviceInfo,
-    ) -> Result<Vec<u8>, CryptoError> {
-        if ciphertext.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Build IV for CTR mode (OMS 7.2.4.3)
-        let iv = self.build_ctr_iv(device_info)?;
-
-        // Perform CTR decryption (CTR encryption and decryption are the same)
-        self.aes_ctr_process(key, ciphertext, &iv)
-    }
-
-    /// Encrypt using AES-128 CTR mode (Mode 5)
-    fn encrypt_ctr_mode(
-        &mut self,
-        key: &AesKey,
-        plaintext: &[u8],
-        device_info: &DeviceInfo,
-    ) -> Result<Vec<u8>, CryptoError> {
-        if plaintext.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Build IV for CTR mode
-        let iv = self.build_ctr_iv(device_info)?;
-
-        // Perform CTR encryption
-        self.aes_ctr_process(key, plaintext, &iv)
-    }
-
-    /// Decrypt using AES-128 CBC mode (Mode 7)
-    fn decrypt_cbc_mode(
-        &mut self,
-        key: &AesKey,
-        ciphertext: &[u8],
-        device_info: &DeviceInfo,
-    ) -> Result<Vec<u8>, CryptoError> {
-        if !ciphertext.len().is_multiple_of(16) {
-            return Err(CryptoError::InvalidDataLength {
-                block_size: 16,
-                actual: ciphertext.len(),
-            });
-        }
-
-        // Build IV for CBC mode
-        let iv = self.build_cbc_iv(device_info)?;
-
-        // Perform CBC decryption
-        self.aes_cbc_decrypt(key, ciphertext, &iv)
-    }
-
-    /// Encrypt using AES-128 CBC mode (Mode 7)
-    fn encrypt_cbc_mode(
-        &mut self,
-        key: &AesKey,
-        plaintext: &[u8],
-        device_info: &DeviceInfo,
-    ) -> Result<Vec<u8>, CryptoError> {
-        // Pad to block boundary for CBC
-        let padded_plaintext = self.pkcs7_pad(plaintext, 16);
-
-        // Build IV for CBC mode
-        let iv = self.build_cbc_iv(device_info)?;
-
-        // Perform CBC encryption
-        self.aes_cbc_encrypt(key, &padded_plaintext, &iv)
-    }
-
-    /// Decrypt using AES-128 ECB mode (ELL)
-    fn decrypt_ecb_mode(
-        &mut self,
-        key: &AesKey,
-        ciphertext: &[u8],
-    ) -> Result<Vec<u8>, CryptoError> {
-        if !ciphertext.len().is_multiple_of(16) {
-            return Err(CryptoError::InvalidDataLength {
-                block_size: 16,
-                actual: ciphertext.len(),
-            });
-        }
-
-        // Perform ECB decryption
-        self.aes_ecb_decrypt(key, ciphertext)
-    }
-
-    /// Encrypt using AES-128 ECB mode (ELL)
-    fn encrypt_ecb_mode(&mut self, key: &AesKey, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        // Pad to block boundary for ECB
-        let padded_plaintext = self.pkcs7_pad(plaintext, 16);
-
-        // Perform ECB encryption
-        self.aes_ecb_encrypt(key, &padded_plaintext)
-    }
-
-    /// Build initialization vector for CTR mode
-    fn build_ctr_iv(&self, device_info: &DeviceInfo) -> Result<[u8; 16], CryptoError> {
-        // OMS 7.2.4.3: IV = M(2) + ID(4) + V(1) + T(1) + zeros(8)
-        let mut iv = [0u8; 16];
-
-        // Manufacturer (2 bytes, little-endian)
-        let mfg_bytes = device_info.manufacturer.to_le_bytes();
-        iv[0..2].copy_from_slice(&mfg_bytes);
-
-        // Device ID (4 bytes, little-endian)
-        let id_bytes = device_info.device_id.to_le_bytes();
-        iv[2..6].copy_from_slice(&id_bytes);
-
-        // Version (1 byte)
-        iv[6] = device_info.version;
-
-        // Device Type (1 byte)
-        iv[7] = device_info.device_type;
-
-        // Remaining 8 bytes are zeros (already initialized)
-
-        Ok(iv)
-    }
-
-    /// Build initialization vector for CBC mode
-    fn build_cbc_iv(&self, device_info: &DeviceInfo) -> Result<[u8; 16], CryptoError> {
-        // For CBC mode, use similar IV construction but with different pattern
-        let mut iv = [0u8; 16];
-
-        // Use device info to create unique IV
-        let mfg_bytes = device_info.manufacturer.to_le_bytes();
-        let id_bytes = device_info.device_id.to_le_bytes();
-
-        iv[0..2].copy_from_slice(&mfg_bytes);
-        iv[2..6].copy_from_slice(&id_bytes);
-        iv[6] = device_info.version;
-        iv[7] = device_info.device_type;
-
-        // Fill remaining bytes with pattern based on device ID
-        for (i, item) in iv.iter_mut().enumerate().skip(8) {
-            *item = (device_info.device_id >> ((i - 8) * 4)) as u8;
-        }
-
-        Ok(iv)
-    }
-
-    /// PKCS#7 padding for block ciphers
-    fn pkcs7_pad(&self, data: &[u8], block_size: usize) -> Vec<u8> {
-        let pad_len = block_size - (data.len() % block_size);
-        let mut padded = data.to_vec();
-        padded.resize(data.len() + pad_len, pad_len as u8);
-        padded
-    }
-
-    /// Remove PKCS#7 padding
-    fn pkcs7_unpad(&self, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        if data.is_empty() {
-            return Err(CryptoError::DecryptionFailed {
-                reason: "Empty data for unpadding".to_string(),
-            });
-        }
-
-        let pad_len = data[data.len() - 1] as usize;
-        if pad_len == 0 || pad_len > 16 || pad_len > data.len() {
-            return Err(CryptoError::DecryptionFailed {
-                reason: format!("Invalid padding length: {pad_len}"),
-            });
-        }
-
-        // Verify padding
-        for i in 0..pad_len {
-            if data[data.len() - 1 - i] != pad_len as u8 {
-                return Err(CryptoError::DecryptionFailed {
-                    reason: "Invalid PKCS#7 padding".to_string(),
-                });
-            }
-        }
-
-        Ok(data[..data.len() - pad_len].to_vec())
-    }
-
-    /// AES-128-CTR keystream processing (identical for encrypt and decrypt).
+    /// Decrypt a wM-Bus **Mode 9 (AES-128-GCM, OMS 7.3.6)** frame.
     ///
-    /// `iv` is the full 16-byte initial counter block; the counter is treated as a
-    /// 128-bit big-endian integer, per NIST SP 800-38A and every wM-Bus profile that
-    /// uses CTR.
-    fn aes_ctr_process(
+    /// Mode 9 GCM is the one transport-layer security profile handled in this module.
+    /// The CBC-based OMS Security Profile A (mode 5) lives in [`crate::wmbus::oms`] and
+    /// the ELL link-layer CTR profile in [`crate::wmbus::ell`]; use those directly. The
+    /// frame's CI byte must be `0x89`.
+    pub fn decrypt_mode9_gcm(
         &mut self,
-        key: &AesKey,
-        data: &[u8],
-        iv: &[u8; 16],
+        encrypted_frame: &[u8],
+        device_info: &DeviceInfo,
     ) -> Result<Vec<u8>, CryptoError> {
-        use ctr::cipher::{KeyIvInit, StreamCipher};
-        let mut out = data.to_vec();
-        let mut cipher = ctr::Ctr128BE::<Aes128>::new(key.as_bytes().into(), iv.into());
-        cipher.apply_keystream(&mut out);
-        Ok(out)
-    }
-
-    /// AES-128-CBC decryption with PKCS#7 padding removal.
-    fn aes_cbc_decrypt(
-        &mut self,
-        key: &AesKey,
-        ciphertext: &[u8],
-        iv: &[u8; 16],
-    ) -> Result<Vec<u8>, CryptoError> {
-        use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
-        cbc::Decryptor::<Aes128>::new(key.as_bytes().into(), iv.into())
-            .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
-            .map_err(|_| CryptoError::DecryptionFailed {
-                reason: "CBC unpad failed (wrong key or corrupt ciphertext)".to_string(),
-            })
-    }
-
-    /// AES-128-CBC encryption with PKCS#7 padding.
-    fn aes_cbc_encrypt(
-        &mut self,
-        key: &AesKey,
-        plaintext: &[u8],
-        iv: &[u8; 16],
-    ) -> Result<Vec<u8>, CryptoError> {
-        use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
-        Ok(
-            cbc::Encryptor::<Aes128>::new(key.as_bytes().into(), iv.into())
-                .encrypt_padded_vec_mut::<Pkcs7>(plaintext),
-        )
-    }
-
-    /// AES-128-ECB decryption. ECB is used only by the legacy ELL profile; it is not
-    /// semantically secure and must never be used for new work.
-    fn aes_ecb_decrypt(&mut self, key: &AesKey, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let cipher = Aes128::new(key.as_bytes().into());
-        let mut out = Vec::with_capacity(ciphertext.len());
-        for chunk in ciphertext.chunks_exact(16) {
-            let mut block = *aes::Block::from_slice(chunk);
-            cipher.decrypt_block(&mut block);
-            out.extend_from_slice(&block);
+        let device_key = self.effective_key(device_info);
+        let ci_offset = self.find_ci_offset(encrypted_frame)?;
+        let ci = encrypted_frame[ci_offset];
+        if ci != 0x89 {
+            return Err(CryptoError::UnsupportedMode { mode: ci });
         }
-        self.pkcs7_unpad(&out)
+        let payload_start = ci_offset + 1;
+        if payload_start >= encrypted_frame.len() {
+            return Err(CryptoError::InvalidFrame {
+                reason: "No encrypted payload found".to_string(),
+            });
+        }
+        let encrypted_payload = &encrypted_frame[payload_start..];
+        let decrypted_payload =
+            self.decrypt_gcm_mode(&device_key, encrypted_payload, encrypted_frame, device_info)?;
+        let mut decrypted_frame = encrypted_frame[..payload_start].to_vec();
+        decrypted_frame.extend_from_slice(&decrypted_payload);
+        Ok(decrypted_frame)
     }
 
-    /// AES-128-ECB encryption (legacy ELL only — see [`Self::aes_ecb_decrypt`]).
-    fn aes_ecb_encrypt(&mut self, key: &AesKey, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let cipher = Aes128::new(key.as_bytes().into());
-        let mut out = Vec::with_capacity(plaintext.len());
-        for chunk in plaintext.chunks_exact(16) {
-            let mut block = *aes::Block::from_slice(chunk);
-            cipher.encrypt_block(&mut block);
-            out.extend_from_slice(&block);
+    /// Encrypt a wM-Bus **Mode 9 (AES-128-GCM, OMS 7.3.6)** frame. The frame's CI byte
+    /// is set to `0x89`. See [`Self::decrypt_mode9_gcm`] for why only Mode 9 lives here.
+    pub fn encrypt_mode9_gcm(
+        &mut self,
+        plaintext_frame: &[u8],
+        device_info: &DeviceInfo,
+    ) -> Result<Vec<u8>, CryptoError> {
+        let ci_offset = self.find_ci_offset(plaintext_frame)?;
+        let payload_start = ci_offset + 1;
+        if payload_start >= plaintext_frame.len() {
+            return Err(CryptoError::InvalidFrame {
+                reason: "No payload to encrypt".to_string(),
+            });
         }
-        Ok(out)
+        let plaintext_payload = &plaintext_frame[payload_start..];
+        let device_key = self.effective_key(device_info);
+        let encrypted_payload =
+            self.encrypt_gcm_mode(&device_key, plaintext_payload, plaintext_frame, device_info)?;
+        let mut encrypted_frame = plaintext_frame[..ci_offset].to_vec();
+        encrypted_frame.push(0x89);
+        encrypted_frame.extend_from_slice(&encrypted_payload);
+        Ok(encrypted_frame)
     }
 
     /// Decrypt using AES-128 GCM mode (Mode 9) - OMS 7.3.6
@@ -1235,32 +811,6 @@ mod tests {
     }
 
     #[test]
-    fn test_encryption_mode_detection() {
-        assert_eq!(
-            EncryptionMode::from_ci_field(0x7A),
-            EncryptionMode::Mode5Ctr
-        );
-        assert_eq!(
-            EncryptionMode::from_ci_field(0x7B),
-            EncryptionMode::Mode5Ctr
-        );
-        assert_eq!(
-            EncryptionMode::from_ci_field(0x8A),
-            EncryptionMode::Mode7Cbc
-        );
-        assert_eq!(
-            EncryptionMode::from_ci_field(0x8B),
-            EncryptionMode::Mode7Cbc
-        );
-        assert_eq!(
-            EncryptionMode::from_ci_field(0x89),
-            EncryptionMode::Mode9Gcm
-        );
-        assert_eq!(EncryptionMode::from_ci_field(0x90), EncryptionMode::EllEcb);
-        assert_eq!(EncryptionMode::from_ci_field(0x72), EncryptionMode::None);
-    }
-
-    #[test]
     fn test_key_derivation() {
         let master_key = AesKey::from_bytes(&[0; 16]).unwrap();
         #[allow(deprecated)]
@@ -1273,94 +823,6 @@ mod tests {
         #[allow(deprecated)]
         let device_key2 = master_key.derive_device_key(0x12345678, 0xABCD);
         assert_eq!(device_key.as_bytes(), device_key2.as_bytes());
-    }
-
-    #[test]
-    fn test_ctr_iv_construction() {
-        let master_key = AesKey::from_bytes(&[0; 16]).unwrap();
-        let crypto = WMBusCrypto::new(master_key);
-
-        let device_info = DeviceInfo {
-            device_id: 0x12345678,
-            manufacturer: 0xABCD,
-            version: 0x01,
-            device_type: 0x02,
-            access_number: None,
-        };
-
-        let iv = crypto.build_ctr_iv(&device_info).unwrap();
-
-        // Check IV structure: M(2) + ID(4) + V(1) + T(1) + zeros(8)
-        assert_eq!(&iv[0..2], &0xABCDu16.to_le_bytes()); // Manufacturer
-        assert_eq!(&iv[2..6], &0x12345678u32.to_le_bytes()); // Device ID
-        assert_eq!(iv[6], 0x01); // Version
-        assert_eq!(iv[7], 0x02); // Device type
-        assert_eq!(&iv[8..16], &[0; 8]); // Zeros
-    }
-
-    #[test]
-    fn test_pkcs7_padding() {
-        let master_key = AesKey::from_bytes(&[0; 16]).unwrap();
-        let crypto = WMBusCrypto::new(master_key);
-
-        // Test padding
-        let data = vec![0x01, 0x02, 0x03];
-        let padded = crypto.pkcs7_pad(&data, 16);
-        assert_eq!(padded.len(), 16);
-        assert_eq!(padded[3..], vec![13; 13]); // 13 bytes of padding with value 13
-
-        // Test unpadding
-        let unpadded = crypto.pkcs7_unpad(&padded).unwrap();
-        assert_eq!(unpadded, data);
-    }
-
-    /// NIST SP 800-38A F.5.1 (CTR-AES128) — a published known-answer vector, so this
-    /// pins our CTR mode to the standard rather than to our own implementation.
-    #[test]
-    fn ctr_matches_nist_sp800_38a_vector() {
-        let key = AesKey::from_hex("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
-        let mut crypto = WMBusCrypto::new(key.clone());
-        let iv: [u8; 16] = hex::decode_hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let plaintext = hex::decode_hex(
-            "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51\
-             30c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
-        )
-        .unwrap();
-        let expected = "874d6191b620e3261bef6864990db6ce9806f66b7970fdff8617187bb9fffdff\
-                        5ae4df3edbd5d35e5b4f09020db03eab1e031dda2fbe03d1792170a0f3009cee";
-        let ct = crypto.aes_ctr_process(&key, &plaintext, &iv).unwrap();
-        assert_eq!(
-            hex::encode_hex(&ct),
-            expected.replace(char::is_whitespace, "")
-        );
-        // CTR is its own inverse.
-        let back = crypto.aes_ctr_process(&key, &ct, &iv).unwrap();
-        assert_eq!(back, plaintext);
-    }
-
-    /// NIST SP 800-38A F.2.1 (CBC-AES128). Our CBC applies PKCS#7, so the vector's
-    /// exact-block plaintext gains one padding block that we drop before comparing.
-    #[test]
-    fn cbc_matches_nist_sp800_38a_vector() {
-        let key = AesKey::from_hex("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
-        let mut crypto = WMBusCrypto::new(key.clone());
-        let iv: [u8; 16] = hex::decode_hex("000102030405060708090a0b0c0d0e0f")
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let plaintext = hex::decode_hex(
-            "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51\
-             30c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
-        )
-        .unwrap();
-        let expected_prefix = "7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2\
-                               73bed6b8e3c1743b7116e69e222295163ff1caa1681fac09120eca307586e1a7";
-        let ct = crypto.aes_cbc_encrypt(&key, &plaintext, &iv).unwrap();
-        assert!(hex::encode_hex(&ct).starts_with(&expected_prefix.replace(char::is_whitespace, "")));
-        assert_eq!(crypto.aes_cbc_decrypt(&key, &ct, &iv).unwrap(), plaintext);
     }
 
     #[test]
@@ -1380,49 +842,6 @@ mod tests {
         } else {
             panic!("Expected InvalidKeyLength error");
         }
-    }
-
-    #[test]
-    #[cfg(feature = "crypto")]
-    fn test_real_aes_round_trip() {
-        // Test that real AES encryption/decryption works correctly
-        let master_key = AesKey::from_hex("0123456789ABCDEF0123456789ABCDEF").unwrap();
-        let mut crypto = WMBusCrypto::new(master_key);
-
-        let device_info = DeviceInfo {
-            device_id: 0x12345678,
-            manufacturer: 0xABCD,
-            version: 0x01,
-            device_type: 0x02,
-            access_number: None,
-        };
-
-        // Test data (16 bytes for clean AES block)
-        let test_data = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
-            0x0F, 0x10,
-        ];
-
-        // Create a minimal frame structure
-        let mut test_frame = vec![
-            0x10, 0x44, 0xCD, 0xAB, 0x78, 0x56, 0x34, 0x12, 0x01, 0x02, 0x72,
-        ];
-        test_frame.extend_from_slice(&test_data);
-
-        // Test CTR mode encryption/decryption
-        let encrypted = crypto
-            .encrypt_frame(&test_frame, &device_info, EncryptionMode::Mode5Ctr)
-            .unwrap();
-        let decrypted = crypto.decrypt_frame(&encrypted, &device_info).unwrap();
-
-        // With real AES, the frame should decrypt back to original
-        // (Note: CI field will be different due to encryption mode change)
-        assert_eq!(decrypted.len(), test_frame.len());
-
-        // The data payload should match after accounting for CI field change
-        let original_payload = &test_frame[11..];
-        let decrypted_payload = &decrypted[11..];
-        assert_eq!(decrypted_payload, original_payload);
     }
 
     #[test]
@@ -1525,15 +944,13 @@ mod tests {
         test_frame.extend_from_slice(&test_payload);
 
         // Encrypt with Mode 9 GCM
-        let encrypted = crypto
-            .encrypt_frame(&test_frame, &device_info, EncryptionMode::Mode9Gcm)
-            .unwrap();
+        let encrypted = crypto.encrypt_mode9_gcm(&test_frame, &device_info).unwrap();
 
         // Encrypted frame should have CI=0x89
         assert_eq!(encrypted[10], 0x89);
 
         // Decrypt
-        let decrypted = crypto.decrypt_frame(&encrypted, &device_info).unwrap();
+        let decrypted = crypto.decrypt_mode9_gcm(&encrypted, &device_info).unwrap();
 
         // Verify the payload matches
         assert_eq!(decrypted.len(), test_frame.len());
@@ -1565,12 +982,10 @@ mod tests {
         let mut test_frame = frame.clone();
         test_frame.extend_from_slice(&[0x00; 16]);
 
-        let encrypted = crypto
-            .encrypt_frame(&test_frame, &device_info, EncryptionMode::Mode9Gcm)
-            .unwrap();
+        let encrypted = crypto.encrypt_mode9_gcm(&test_frame, &device_info).unwrap();
 
         // Verify we can decrypt it back
-        let decrypted = crypto.decrypt_frame(&encrypted, &device_info).unwrap();
+        let decrypted = crypto.decrypt_mode9_gcm(&encrypted, &device_info).unwrap();
 
         // The decrypted frame should match the original (minus CRC handling)
         assert_eq!(decrypted[0..11], test_frame[0..11]);
@@ -1608,9 +1023,7 @@ mod tests {
         test_frame.extend_from_slice(&test_payload);
 
         // Encrypt with Mode 9 (12-byte tag)
-        let encrypted = crypto
-            .encrypt_frame(&test_frame, &device_info, EncryptionMode::Mode9Gcm)
-            .unwrap();
+        let encrypted = crypto.encrypt_mode9_gcm(&test_frame, &device_info).unwrap();
 
         // Verify encrypted length uses 12-byte tag
         let expected_len = 11 + test_payload.len() + 12; // header + payload + 12-byte tag
@@ -1641,9 +1054,9 @@ mod tests {
     #[test]
     #[cfg(feature = "crypto")]
     fn effective_key_path_uses_key_as_is_without_rederiving() {
-        // Regression for fix #6: `decrypt_frame_with_effective_key` must use the supplied key
-        // BYTE-FOR-BYTE (no OMS derivation). A vendor-provisioned key is already the device
-        // key; deriving from it again — as the old vendor path did — yields the wrong key.
+        // Regression for fix #6: under the default `KeyMode::Direct` the supplied key is
+        // used BYTE-FOR-BYTE (no OMS/XOR derivation). A vendor-provisioned key is already
+        // the device key; deriving from it again would yield the wrong key.
         let master_key = AesKey::from_hex("0123456789ABCDEF0123456789ABCDEF").unwrap();
         let device_info = DeviceInfo {
             device_id: 0x12345678,
@@ -1652,54 +1065,88 @@ mod tests {
             device_type: 0x02,
             access_number: None,
         };
-        // The device key `decrypt_frame` derives internally.
+
+        // Default is KeyMode::Direct: the effective key IS the supplied key, verbatim.
+        let crypto = WMBusCrypto::new(master_key.clone());
+        assert_eq!(
+            crypto.effective_key(&device_info).as_bytes(),
+            master_key.as_bytes(),
+            "KeyMode::Direct must use the supplied key as-is"
+        );
+
+        // Under the legacy mode the deprecated XOR mixing is applied, so the effective
+        // key equals the derived device key — and differs from the supplied master key.
         #[allow(deprecated)]
         let derived = master_key.derive_device_key(device_info.device_id, device_info.manufacturer);
         // XOR-based derivation must actually change the key, or the test proves nothing.
         assert_ne!(derived.as_bytes(), master_key.as_bytes());
 
-        let mut crypto = WMBusCrypto::new(master_key.clone());
-        let test_data = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
-            0x0F, 0x10,
-        ];
-        let mut test_frame = vec![
-            0x10, 0x44, 0xCD, 0xAB, 0x78, 0x56, 0x34, 0x12, 0x01, 0x02, 0x72,
-        ];
-        test_frame.extend_from_slice(&test_data);
-        let encrypted = crypto
-            .encrypt_frame(&test_frame, &device_info, EncryptionMode::Mode5Ctr)
-            .unwrap();
-
-        // Default is KeyMode::Direct: the supplied key is the device key, so
-        // decrypt_frame must use it verbatim — that is what a provisioned meter key
-        // requires, and re-deriving it silently would make correct keys undecryptable.
-        let via_decrypt = crypto.decrypt_frame(&encrypted, &device_info).unwrap();
-        let via_master = crypto
-            .decrypt_frame_with_effective_key(&encrypted, &device_info, &master_key)
-            .unwrap();
-        assert_eq!(
-            via_master, via_decrypt,
-            "KeyMode::Direct must use the supplied key as-is"
-        );
-
-        // Under the legacy mode the deprecated XOR mixing is applied instead, and the
-        // effective-key path with that same mixed key reproduces it — i.e. the
-        // effective-key path never derives a second time.
         let mut legacy = WMBusCrypto::new(master_key.clone());
         legacy.set_key_mode(KeyMode::DerivedFromMaster);
-        let legacy_encrypted = legacy
-            .encrypt_frame(&test_frame, &device_info, EncryptionMode::Mode5Ctr)
-            .unwrap();
-        let via_legacy = legacy
-            .decrypt_frame(&legacy_encrypted, &device_info)
-            .unwrap();
-        let via_derived = legacy
-            .decrypt_frame_with_effective_key(&legacy_encrypted, &device_info, &derived)
-            .unwrap();
         assert_eq!(
-            via_derived, via_legacy,
-            "effective key == derived device key must match (no double-derive)"
+            legacy.effective_key(&device_info).as_bytes(),
+            derived.as_bytes(),
+            "KeyMode::DerivedFromMaster must apply the XOR mixing exactly once"
         );
+    }
+
+    /// NIST SP 800-38A F.5.1 (CTR-AES128) — a published known-answer vector. Pins the
+    /// `ctr` crate (the exact AES-CTR the ELL path in [`crate::wmbus::ell`] relies on)
+    /// to the standard rather than to our own round-trip.
+    #[test]
+    fn ctr_matches_nist_sp800_38a_vector() {
+        use aes::Aes128;
+        use ctr::cipher::{KeyIvInit, StreamCipher};
+
+        let key = AesKey::from_hex("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
+        let iv: [u8; 16] = hex::decode_hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let mut buf = hex::decode_hex(
+            "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51\
+             30c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
+        )
+        .unwrap();
+        let expected = "874d6191b620e3261bef6864990db6ce9806f66b7970fdff8617187bb9fffdff\
+                        5ae4df3edbd5d35e5b4f09020db03eab1e031dda2fbe03d1792170a0f3009cee"
+            .replace(char::is_whitespace, "");
+        ctr::Ctr128BE::<Aes128>::new(key.as_bytes().into(), &iv.into()).apply_keystream(&mut buf);
+        assert_eq!(hex::encode_hex(&buf), expected);
+    }
+
+    /// NIST SP 800-38A F.2.1 (CBC-AES128), no padding on the exact-block plaintext.
+    /// Pins the `cbc` crate that backs OMS Mode 5 ([`crate::wmbus::oms`]) to the
+    /// published ciphertext, and confirms decrypt inverts it.
+    #[test]
+    fn cbc_matches_nist_sp800_38a_vector() {
+        use aes::Aes128;
+        use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+
+        let key = AesKey::from_hex("2b7e151628aed2a6abf7158809cf4f3c").unwrap();
+        let iv: [u8; 16] = hex::decode_hex("000102030405060708090a0b0c0d0e0f")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let plaintext = hex::decode_hex(
+            "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51\
+             30c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
+        )
+        .unwrap();
+        let expected = "7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2\
+                        73bed6b8e3c1743b7116e69e222295163ff1caa1681fac09120eca307586e1a7"
+            .replace(char::is_whitespace, "");
+
+        let mut buf = plaintext.clone();
+        let n = buf.len();
+        cbc::Encryptor::<Aes128>::new(key.as_bytes().into(), &iv.into())
+            .encrypt_padded_mut::<NoPadding>(&mut buf, n)
+            .unwrap();
+        assert_eq!(hex::encode_hex(&buf), expected);
+
+        cbc::Decryptor::<Aes128>::new(key.as_bytes().into(), &iv.into())
+            .decrypt_padded_mut::<NoPadding>(&mut buf)
+            .unwrap();
+        assert_eq!(buf, plaintext);
     }
 }

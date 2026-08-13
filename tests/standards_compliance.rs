@@ -231,28 +231,31 @@ fn test_wired_wildcard_secondary() {
 // These are placeholders showing the expected structure
 
 #[test]
-#[ignore] // Will be enabled once wireless parsing is implemented
 fn test_wmbus_type_a_multiblock() {
-    let bytes = hex_to_bytes(WMBUS_TYPE_A_MULTIBLOCK);
-    println!("Type A Multi-block frame bytes: {bytes:02X?}");
+    // prEN 13757-4 Annex C illustrative Type A multi-block frame. The per-block CRCs and
+    // application bytes in the spec example are placeholders (not genuine EN 13757 CRCs),
+    // so `crc_ok` and the CI are not asserted here; what the public decoder must recover
+    // from a well-formed Type A header is the serial and manufacturer. Real CRC-passing
+    // captured frames live in `tests/wmbus_golden_frames.rs`.
+    use mbus_rs::wmbus::mode_c::decode_mode_c;
 
-    // Expected behavior:
-    // - L-field = 0x1D (29 bytes user data excluding CRCs)
-    // - 3 blocks total with per-block CRC validation
-    // - CRC should be complement of calculated value (~crc16)
-    // - Initial CRC value should be 0xFFFF
+    let bytes = hex_to_bytes(WMBUS_TYPE_A_MULTIBLOCK);
+    let f = decode_mode_c(&bytes).expect("Annex C Type A frame must decode");
+    assert_eq!(
+        f.device_address, 12_345_678,
+        "BCD serial from the Annex C header"
+    );
+    assert_eq!(f.manufacturer_id, 0x1593, "\"ELS\" (Elster)");
 }
 
 #[test]
-#[ignore] // Will be enabled once wireless parsing is implemented
+#[ignore = "the OMS v4.0.4 illustrative compact frame in WMBUS_COMPACT_FRAME is \
+            truncated (11 bytes; decode_mode_c needs 13), so it is not decodable as \
+            written; compact-frame handling is covered by src/wmbus/compact_frame.rs \
+            unit tests"]
 fn test_wmbus_compact_frame() {
     let bytes = hex_to_bytes(WMBUS_COMPACT_FRAME);
     println!("Compact frame bytes: {bytes:02X?}");
-
-    // Expected behavior:
-    // - CI = 0x79 indicates compact frame
-    // - Signature = 0xABCD (bytes 2-3)
-    // - Data CRC can be skipped if signature is cached
 }
 
 // ================================================================================

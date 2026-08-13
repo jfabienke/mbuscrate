@@ -26,9 +26,7 @@
 
 use mbus_rs::mbus::frame::{parse_frame, verify_frame};
 use mbus_rs::util::{hex_to_bytes, rev8, IoBuffer};
-use mbus_rs::wmbus::{
-    calculate_wmbus_crc_enhanced, AesKey, DeviceInfo, EncryptionMode, FrameDecoder, WMBusCrypto,
-};
+use mbus_rs::wmbus::{calculate_wmbus_crc_enhanced, AesKey, DeviceInfo, FrameDecoder, WMBusCrypto};
 use mbus_rs::{MBusFrame, MBusFrameType};
 use std::time::Instant;
 
@@ -415,35 +413,40 @@ fn test_crypto_with_simulated_encrypted_frame() {
         access_number: None,
     };
 
-    // Test encryption mode detection
     let _encrypted_frame = hex_to_bytes(ENCRYPTED_FRAME_HEX);
 
-    // Create a test plaintext frame
+    // Create a test plaintext frame with a Mode 9 (GCM) CI byte (0x89) at offset 10.
+    // The legacy CTR/CBC facade has been retired; Mode 9 GCM is the transport-layer
+    // profile handled by WMBusCrypto (Mode 5 CBC lives in wmbus::oms).
     let plaintext = vec![
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
-        0x10,
+        0x44, 0x10, 0xCD, 0xAB, 0x78, 0x56, 0x34, 0x12, 0x01, 0x02, // header
+        0x89, // CI = Mode 9 GCM
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // payload
     ];
 
-    // Test CTR mode encryption/decryption
-    match crypto.encrypt_frame(&plaintext, &device_info, EncryptionMode::Mode5Ctr) {
+    // Test Mode 9 GCM encryption/decryption round-trip
+    match crypto.encrypt_mode9_gcm(&plaintext, &device_info) {
         Ok(encrypted) => {
-            println!("✓ CTR encryption successful: {} bytes", encrypted.len());
+            println!("✓ GCM encryption successful: {} bytes", encrypted.len());
+            assert_eq!(encrypted[10], 0x89, "CI byte must be Mode 9 (0x89)");
 
             // Test decryption
-            match crypto.decrypt_frame(&encrypted, &device_info) {
+            match crypto.decrypt_mode9_gcm(&encrypted, &device_info) {
                 Ok(decrypted) => {
-                    println!("✓ CTR decryption successful: {} bytes", decrypted.len());
-
-                    // Verify round-trip (note: placeholder AES means XOR, so it should match)
-                    // In production with real AES, this would be a proper round-trip test
+                    println!("✓ GCM decryption successful: {} bytes", decrypted.len());
+                    assert_eq!(
+                        &decrypted[11..],
+                        &plaintext[11..],
+                        "GCM round-trip must recover the payload"
+                    );
                 }
                 Err(e) => {
-                    println!("⚠ CTR decryption failed: {e:?}");
+                    panic!("GCM decryption failed: {e:?}");
                 }
             }
         }
         Err(e) => {
-            println!("⚠ CTR encryption failed: {e:?}");
+            panic!("GCM encryption failed: {e:?}");
         }
     }
 
