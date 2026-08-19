@@ -560,6 +560,138 @@ impl DataFrame {
     }
 }
 
+/// Parameters for a Class-A downlink data frame (network → device).
+///
+/// This is the minimum a single-channel responder needs to steer a joined device:
+/// a MAC command in `fopts` (cleartext in 1.0.x, MIC-protected, ≤15 bytes) is enough
+/// to pin the device's channel plan. `fport`/`frm_payload` are here for completeness
+/// (an application downlink) and encrypt the same way an uplink does.
+pub struct DownlinkParams {
+    pub dev_addr: u32,
+    /// NFCntDown, the network's downlink frame counter for this session. The low 16
+    /// bits go on the wire; the full value binds the MIC, so a fresh session starts
+    /// at 0 and the caller increments per downlink.
+    pub fcnt: u32,
+    /// Set the ADR bit — we manage the device's data rate, so this is normally true.
+    pub adr: bool,
+    /// Acknowledge a Confirmed uplink.
+    pub ack: bool,
+    /// More data pending (frame-pending bit).
+    pub fpending: bool,
+    /// MAC commands carried in the FHDR, in the clear (1.0.x). ≤15 bytes.
+    pub fopts: Vec<u8>,
+    /// Application port; `None` for a MAC-only downlink (FOpts carries everything).
+    pub fport: Option<u8>,
+    /// Application payload; encrypted with AppSKey (or NwkSKey for port 0).
+    pub frm_payload: Vec<u8>,
+}
+
+/// Build an Unconfirmed Data Down frame, MIC'd with the network session key.
+///
+/// The MIC uses the downlink direction bit (dir=1) in its B0 block — the same field
+/// [`DataFrame::verify_mic`] checks — so a frame built here round-trips through
+/// [`DataFrame::parse`] + `verify_mic`. FOpts are transmitted in the clear (LoRaWAN
+/// 1.0.x); only `frm_payload` is encrypted.
+pub fn build_data_down(nwk_skey: &[u8; 16], app_skey: &[u8; 16], p: &DownlinkParams) -> Vec<u8> {
+    assert!(
+        p.fopts.len() <= 15,
+        "FOpts must fit the 4-bit FOptsLen field"
+    );
+    let mhdr = MTYPE_UNCONFIRMED_DOWN << 5;
+    let fctrl = (if p.adr { 0x80 } else { 0 })
+        | (if p.ack { 0x20 } else { 0 })
+        | (if p.fpending { 0x10 } else { 0 })
+        | (p.fopts.len() as u8 & 0x0F);
+
+    let mut frame = Vec::with_capacity(12 + p.fopts.len() + p.frm_payload.len());
+    frame.push(mhdr);
+    frame.extend_from_slice(&p.dev_addr.to_le_bytes());
+    frame.push(fctrl);
+    frame.extend_from_slice(&(p.fcnt as u16).to_le_bytes());
+    frame.extend_from_slice(&p.fopts);
+    if let Some(port) = p.fport {
+        frame.push(port);
+        let key = if port == 0 { nwk_skey } else { app_skey };
+        for (i, chunk) in p.frm_payload.chunks(16).enumerate() {
+            let mut a = [0u8; 16];
+            a[0] = 0x01;
+            a[5] = 1; // downlink direction
+            a[6..10].copy_from_slice(&p.dev_addr.to_le_bytes());
+            a[10..14].copy_from_slice(&p.fcnt.to_le_bytes());
+            a[15] = (i + 1) as u8;
+            aes_encrypt_block(key, &mut a);
+            for (b, s) in chunk.iter().zip(a.iter()) {
+                frame.push(b ^ s);
+            }
+        }
+    }
+
+    // MIC over B0(dir=1) || frame, per EN/LoRaWAN 1.0.x.
+    let mut b0 = [0u8; 16];
+    b0[0] = 0x49;
+    b0[5] = 1; // downlink
+    b0[6..10].copy_from_slice(&p.dev_addr.to_le_bytes());
+    b0[10..14].copy_from_slice(&p.fcnt.to_le_bytes());
+    b0[15] = frame.len() as u8;
+    let mut buf = Vec::with_capacity(16 + frame.len());
+    buf.extend_from_slice(&b0);
+    buf.extend_from_slice(&frame);
+    frame.extend_from_slice(&mic4(nwk_skey, &buf));
+    frame
+}
+
+/// The `LinkADRReq` MAC command (CID 0x03), as the 5 FOpts bytes.
+///
+/// `channel_mask` bit *n* enables channel *n* (bit 0 = EU868 868.1 MHz), so
+/// `0x0001` pins the device to the single default channel a one-channel gateway
+/// hears. `data_rate` and `tx_power` use the spec's `0x0F` sentinel to mean "keep
+/// current", so pinning the channel need not disturb the device's DR or power.
+/// `nb_trans` is the uplink repetition count (1 = default). ChMaskCntl is 0 — the
+/// mask applies to channels 0–15.
+pub fn link_adr_req(channel_mask: u16, data_rate: u8, tx_power: u8, nb_trans: u8) -> [u8; 5] {
+    [
+        0x03,
+        ((data_rate & 0x0F) << 4) | (tx_power & 0x0F),
+        (channel_mask & 0xFF) as u8,
+        (channel_mask >> 8) as u8,
+        nb_trans & 0x0F, // Redundancy: ChMaskCntl=0 (bits 6:4), NbTrans (bits 3:0)
+    ]
+}
+
+/// Scan an uplink's FOpts for a `LinkADRAns` (CID 0x03) and report whether the device
+/// accepted all three fields (channel-mask, data-rate, power).
+///
+/// FOpts is a back-to-back sequence of MAC commands, so this walks it using the
+/// known uplink command lengths rather than assuming position; an unrecognised CID
+/// stops the walk (we cannot know its length to skip it). Returns `None` if no
+/// LinkADRAns is present.
+pub fn parse_link_adr_ans(fopts: &[u8]) -> Option<bool> {
+    let mut i = 0;
+    while i < fopts.len() {
+        let cid = fopts[i];
+        // Payload length (excluding the CID byte) of each uplink MAC answer.
+        let payload_len = match cid {
+            0x02 => 0,        // LinkCheckReq
+            0x03 => 1,        // LinkADRAns  ← the one we want
+            0x04 => 0,        // DutyCycleAns
+            0x05 => 1,        // RXParamSetupAns
+            0x06 => 2,        // DevStatusAns
+            0x07 => 1,        // NewChannelAns
+            0x08 => 0,        // RXTimingSetupAns
+            0x09 => 0,        // TxParamSetupAns
+            0x0A => 1,        // DlChannelAns
+            _ => return None, // unknown CID: cannot walk further
+        };
+        if cid == 0x03 {
+            let status = *fopts.get(i + 1)?;
+            // bit0 ChannelMaskACK, bit1 DataRateACK, bit2 PowerACK
+            return Some(status & 0x07 == 0x07);
+        }
+        i += 1 + payload_len;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -938,5 +1070,89 @@ mod tests {
             s.admit_join(&a, 1).unwrap(),
             JoinAdmission::Admitted { join_nonce: 2 }
         );
+    }
+
+    // --- Downlink / MAC-command (channel pin) ---
+
+    const NWK_SKEY: [u8; 16] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10,
+    ];
+    const APP_SKEY: [u8; 16] = [
+        0xF0, 0xE0, 0xD0, 0xC0, 0xB0, 0xA0, 0x90, 0x80, 0x70, 0x60, 0x50, 0x40, 0x30, 0x20, 0x10,
+        0x00,
+    ];
+
+    #[test]
+    fn link_adr_req_pins_channel_zero_without_touching_dr_or_power() {
+        // ChMask=0x0001 (only 868.1), DR/power = "no change" (0xF), NbTrans=1.
+        assert_eq!(
+            link_adr_req(0x0001, 0x0F, 0x0F, 1),
+            [0x03, 0xFF, 0x01, 0x00, 0x01]
+        );
+    }
+
+    #[test]
+    fn data_down_with_link_adr_req_round_trips_and_mic_verifies() {
+        let fopts = link_adr_req(0x0001, 0x0F, 0x0F, 1).to_vec();
+        let p = DownlinkParams {
+            dev_addr: 0x2600_0001,
+            fcnt: 0,
+            adr: true,
+            ack: false,
+            fpending: false,
+            fopts: fopts.clone(),
+            fport: None,
+            frm_payload: Vec::new(),
+        };
+        let frame = build_data_down(&NWK_SKEY, &APP_SKEY, &p);
+
+        // It must parse as a *downlink* and authenticate with dir=1 under NwkSKey.
+        let df = DataFrame::parse(&frame).unwrap();
+        assert!(!df.is_uplink());
+        assert_eq!(df.dev_addr, 0x2600_0001);
+        assert_eq!(df.fcnt, 0);
+        assert_eq!(df.fopts, fopts); // FOpts carried in the clear (1.0.x)
+        assert_eq!(df.fport, None);
+        assert!(df.verify_mic(&NWK_SKEY, 0));
+        // Wrong counter must fail the MIC just like a forgery.
+        assert!(!df.verify_mic(&NWK_SKEY, 1));
+    }
+
+    #[test]
+    fn data_down_app_payload_round_trips_through_decrypt() {
+        let payload = b"pin-check".to_vec();
+        let p = DownlinkParams {
+            dev_addr: 0x2600_0002,
+            fcnt: 7,
+            adr: true,
+            ack: false,
+            fpending: false,
+            fopts: Vec::new(),
+            fport: Some(1),
+            frm_payload: payload.clone(),
+        };
+        let frame = build_data_down(&NWK_SKEY, &APP_SKEY, &p);
+        let df = DataFrame::parse(&frame).unwrap();
+        assert!(df.verify_mic(&NWK_SKEY, 7));
+        // Decrypting the downlink with the same keys/counter recovers the plaintext.
+        assert_eq!(df.decrypt_payload(&NWK_SKEY, &APP_SKEY, 7), payload);
+    }
+
+    #[test]
+    fn parse_link_adr_ans_reads_the_accept_bits() {
+        // status 0x07 = all three ACK bits set → accepted.
+        assert_eq!(parse_link_adr_ans(&[0x03, 0x07]), Some(true));
+        // ChannelMaskACK (bit0) clear → not fully accepted.
+        assert_eq!(parse_link_adr_ans(&[0x03, 0x06]), Some(false));
+        // No LinkADRAns present.
+        assert_eq!(parse_link_adr_ans(&[]), None);
+        // Walk past a preceding known command (DevStatusAns, 2 bytes) to find it.
+        assert_eq!(
+            parse_link_adr_ans(&[0x06, 0x00, 0x00, 0x03, 0x07]),
+            Some(true)
+        );
+        // Unknown leading CID stops the walk safely.
+        assert_eq!(parse_link_adr_ans(&[0x7F, 0x03, 0x07]), None);
     }
 }
