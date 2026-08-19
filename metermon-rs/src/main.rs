@@ -21,6 +21,8 @@ mod devices;
 mod gps;
 mod health;
 #[cfg(feature = "radio")]
+mod join_control;
+#[cfg(feature = "radio")]
 mod join_responder;
 mod join_store;
 mod keystore;
@@ -324,6 +326,36 @@ enum Cmd {
         #[arg(long, default_value_t = 300)]
         seconds: u64,
     },
+    /// MQTT-driven LoRaWAN join-control endpoint (requires `radio` feature). A
+    /// device-provisioning app arms the responder over MQTT, triggers the optical join,
+    /// and verifies the result; this end answers JoinRequests and reconciles the
+    /// outcome. AppKeys never cross the control topics.
+    LorawanJoinControl {
+        #[arg(long, default_value = "/dev/spidev0.1")]
+        spidev: String,
+        #[arg(long, default_value_t = 21)]
+        nss: u8,
+        #[arg(long, default_value_t = 20)]
+        busy: u8,
+        #[arg(long, default_value_t = 16)]
+        dio1: u8,
+        #[arg(long, default_value_t = 18)]
+        reset: u8,
+        /// JSON file of provisioned devices: {"<DevEUI big-endian hex>": "<32-hex AppKey>"}.
+        /// Keep it out of the repo; it holds real credentials.
+        #[arg(long)]
+        creds: String,
+        /// redb file holding durable join state (window of used DevNonces + next
+        /// JoinNonce), shared with the `lorawan-join` subcommand.
+        #[arg(long, default_value = "lorawan-join.redb")]
+        join_db: String,
+        /// Seconds an arm keeps the responder parked before it re-idles (each arm
+        /// re-parks it). The window ends early on a verified-both-sides result.
+        #[arg(long, default_value_t = 420)]
+        arm_window: u64,
+        #[arg(long, default_value = "metermon.conf")]
+        config: String,
+    },
     /// Transmit LoRa frames from the SX1262 (requires `radio` feature) — proves the
     /// gateway's transmit path against an independent receiver.
     LoraTx {
@@ -507,6 +539,19 @@ fn main() -> Result<()> {
             &join_db,
             capture.as_deref(),
             seconds,
+        ),
+        Cmd::LorawanJoinControl {
+            spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            creds,
+            join_db,
+            arm_window,
+            config,
+        } => run_lorawan_join_control(
+            &spidev, nss, busy, dio1, reset, &creds, &join_db, arm_window, &config,
         ),
         Cmd::LoraTx {
             spidev,
@@ -1592,6 +1637,47 @@ fn run_lorawan_join(
     _seconds: u64,
 ) -> Result<()> {
     bail_no_radio("lorawan-join")
+}
+
+#[cfg(feature = "radio")]
+#[allow(clippy::too_many_arguments)]
+fn run_lorawan_join_control(
+    spidev: &str,
+    nss: u8,
+    busy: u8,
+    dio1: u8,
+    reset: u8,
+    creds_path: &str,
+    join_db: &str,
+    arm_window: u64,
+    config_path: &str,
+) -> Result<()> {
+    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
+    let cfg = Config::load(config_path)?;
+    let pins = GpioPins {
+        nss: Some(nss),
+        busy,
+        dio1,
+        dio2: None,
+        reset: Some(reset),
+    };
+    join_control::run(&cfg, spidev, pins, creds_path, join_db, arm_window)
+}
+
+#[cfg(not(feature = "radio"))]
+#[allow(clippy::too_many_arguments)]
+fn run_lorawan_join_control(
+    _spidev: &str,
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
+    _creds_path: &str,
+    _join_db: &str,
+    _arm_window: u64,
+    _config_path: &str,
+) -> Result<()> {
+    bail_no_radio("lorawan-join-control")
 }
 
 #[cfg(feature = "radio")]
