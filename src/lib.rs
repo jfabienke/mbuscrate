@@ -1,0 +1,253 @@
+//! LoRaWAN join-control protocol — the shared message schema between the optical
+//! `device-config` app and the RF gateway (`metermon`) for coordinating an OTAA join.
+//!
+//! This crate is a **standalone, dependency-light** shared type: both apps add it as a
+//! path dependency so the wire schema has a single source of truth.
+//!
+//! ```toml
+//! # device-config (in core/Cargo.toml) and metermon-rs both add:
+//! lorawan-join-control = { path = "../../lorawan-join-control" }
+//! ```
+//!
+//! Transport-agnostic serde types. In deployment they ride the gateway's existing
+//! MQTT (topic layout in [`topics`]); nothing here depends on MQTT, so the same JSON
+//! works over any transport.
+//!
+//! ## Why this exists
+//! An OTAA join here is a two-app dance. `device-config` drives the meter optically
+//! (SET OTAA `0x24`, Join Request `0x06`, read `CheckJoinAccept 0x07`); the gateway's
+//! single-channel responder hears the JoinRequest, MIC-checks it, and transmits the
+//! JoinAccept. Neither side alone can confirm the whole join — the gateway knows it
+//! *sent* an accept, only the meter knows it *received* one — so they exchange these
+//! messages and agree on one [`JoinOutcome`].
+//!
+//! ## Sequence
+//! 1. device-config → gateway: [`ArmRequest`]   — park the responder on channel + SF
+//! 2. gateway → device-config: [`ArmReply`]     — armed + what it's listening on
+//! 3. device-config triggers the optical join, emitting a [`FiredNotice`] per attempt
+//! 4. gateway → device-config: [`JoinStatus`]   — heard? mic_ok? assigned DevAddr?
+//! 5. device-config reads the meter's `0x07` and sends a [`VerifyRequest`]
+//! 6. gateway → device-config: [`VerifyReply`] carrying the final [`JoinOutcome`]
+//!
+//! ## Key custody
+//! Credentials (the AppKey) are **never** carried in this protocol. They are
+//! provisioned out-of-band and held by the gateway; every message here references a
+//! device only by its DevEUI.
+
+use serde::{Deserialize, Serialize};
+
+/// A LoRaWAN DevEUI as big-endian hex (16 chars), e.g. `"04B648FC80257775"`.
+pub type DevEuiHex = String;
+
+/// device-config → gateway: arm the single-channel responder for a device.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArmRequest {
+    pub dev_eui: DevEuiHex,
+    /// Join channel the device transmits on, in Hz (e.g. `868_500_000`).
+    pub channel_hz: u32,
+    /// Spreading factor of the device's JoinRequest (7..=12). SF12 = DR0 for EU868.
+    pub sf: u8,
+}
+
+/// gateway → device-config: responder armed and listening.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArmReply {
+    pub dev_eui: DevEuiHex,
+    pub armed: bool,
+    pub listening_hz: u32,
+    pub listening_sf: u8,
+    /// Whether the gateway holds provisioned credentials for this DevEUI. `false`
+    /// means arm will hear the JoinRequest but cannot MIC-check or answer it.
+    pub creds_present: bool,
+}
+
+/// device-config → gateway: an optical Join Request was just triggered (for
+/// timestamp correlation against the responder's receive log).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FiredNotice {
+    pub dev_eui: DevEuiHex,
+    pub ts_unix: u64,
+    /// 1-based attempt counter within the current arm window.
+    pub fire_seq: u32,
+}
+
+/// gateway → device-config: what the responder has observed for this device so far.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JoinStatus {
+    pub dev_eui: DevEuiHex,
+    /// A JoinRequest was received on the armed channel/SF.
+    pub heard: bool,
+    /// MIC verification result, once a JoinRequest was heard.
+    pub mic_ok: Option<bool>,
+    /// DevAddr the gateway assigned in the JoinAccept it sent, if any.
+    pub assigned_dev_addr: Option<u32>,
+    /// When the JoinAccept was transmitted (unix seconds).
+    pub accept_ts_unix: Option<u64>,
+    /// Last uplink RSSI (dBm) / SNR (dB) — link-budget diagnostics.
+    pub rssi_dbm: Option<i16>,
+    pub snr_db: Option<f32>,
+}
+
+/// device-config → gateway: the meter's own view, read from `CheckJoinAccept (0x07)`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerifyRequest {
+    pub dev_eui: DevEuiHex,
+    /// DevAddr the meter reports it received; `0` = none (not joined device-side).
+    pub device_dev_addr: u32,
+    pub device_net_id: u32,
+}
+
+/// gateway → device-config: the agreed end-to-end result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerifyReply {
+    pub dev_eui: DevEuiHex,
+    pub outcome: JoinOutcome,
+}
+
+/// The end-to-end result both sides agree on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum JoinOutcome {
+    /// No JoinRequest was heard on the armed channel/SF (wrong channel/SF, or the
+    /// device never transmitted).
+    NotHeard,
+    /// A JoinRequest was heard but its MIC failed — wrong AppKey or corruption.
+    HeardMicFail,
+    /// The gateway assigned a DevAddr and sent the JoinAccept, but the meter's `0x07`
+    /// does not show it: the downlink did not reach the device (RX-window timing,
+    /// link budget, or receiver frequency offset). Real gateway-side, unconfirmed
+    /// device-side.
+    JoinedGatewayOnly { assigned_dev_addr: u32 },
+    /// The meter's `0x07` DevAddr matches the gateway's assignment — joined and
+    /// confirmed on both ends.
+    VerifiedBothSides { dev_addr: u32 },
+}
+
+impl JoinOutcome {
+    /// Reconcile the gateway's [`JoinStatus`] with the device's `0x07` DevAddr into a
+    /// single verdict. This is the core of the verification handshake.
+    pub fn reconcile(status: &JoinStatus, device_dev_addr: u32) -> Self {
+        match (status.heard, status.mic_ok, status.assigned_dev_addr) {
+            (false, _, _) => JoinOutcome::NotHeard,
+            (true, Some(false), _) => JoinOutcome::HeardMicFail,
+            // Heard + MIC ok + an accept was sent: did the device receive it?
+            (true, _, Some(assigned)) if assigned != 0 && device_dev_addr == assigned => {
+                JoinOutcome::VerifiedBothSides { dev_addr: assigned }
+            }
+            (true, _, Some(assigned)) if assigned != 0 => JoinOutcome::JoinedGatewayOnly {
+                assigned_dev_addr: assigned,
+            },
+            // Heard, but no accept was ever sent (e.g. MIC unknown / no creds).
+            (true, _, _) => JoinOutcome::HeardMicFail,
+        }
+    }
+
+    /// Whether the join is confirmed end-to-end (the only fully-successful state).
+    pub fn is_confirmed(&self) -> bool {
+        matches!(self, JoinOutcome::VerifiedBothSides { .. })
+    }
+}
+
+/// MQTT topic layout for the join-control protocol, namespaced per gateway id.
+///
+/// Rides the gateway's existing MQTT broker; the payload of each topic is the JSON of
+/// the correspondingly-named type above.
+pub mod topics {
+    /// device-config → gateway.
+    pub fn arm(gateway_id: &str) -> String {
+        format!("join/{gateway_id}/arm")
+    }
+    pub fn fired(gateway_id: &str) -> String {
+        format!("join/{gateway_id}/fired")
+    }
+    pub fn verify(gateway_id: &str) -> String {
+        format!("join/{gateway_id}/verify")
+    }
+    /// gateway → device-config.
+    pub fn arm_reply(gateway_id: &str) -> String {
+        format!("join/{gateway_id}/arm_reply")
+    }
+    pub fn status(gateway_id: &str, dev_eui: &str) -> String {
+        format!("join/{gateway_id}/status/{dev_eui}")
+    }
+    pub fn verify_reply(gateway_id: &str) -> String {
+        format!("join/{gateway_id}/verify_reply")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(heard: bool, mic_ok: Option<bool>, assigned: Option<u32>) -> JoinStatus {
+        JoinStatus {
+            dev_eui: "04B648FC80257775".into(),
+            heard,
+            mic_ok,
+            assigned_dev_addr: assigned,
+            accept_ts_unix: Some(1_787_140_769),
+            rssi_dbm: Some(-106),
+            snr_db: Some(5.0),
+        }
+    }
+
+    #[test]
+    fn reconcile_covers_every_outcome() {
+        // Nothing heard.
+        assert_eq!(
+            JoinOutcome::reconcile(&status(false, None, None), 0),
+            JoinOutcome::NotHeard
+        );
+        // Heard but MIC failed.
+        assert_eq!(
+            JoinOutcome::reconcile(&status(true, Some(false), None), 0),
+            JoinOutcome::HeardMicFail
+        );
+        // Our live case: gateway assigned 0x26000001, device 0x07 still 0 → gateway-only.
+        assert_eq!(
+            JoinOutcome::reconcile(&status(true, Some(true), Some(0x2600_0001)), 0),
+            JoinOutcome::JoinedGatewayOnly {
+                assigned_dev_addr: 0x2600_0001
+            }
+        );
+        // Device confirms the same DevAddr → verified both sides.
+        let both =
+            JoinOutcome::reconcile(&status(true, Some(true), Some(0x2600_0001)), 0x2600_0001);
+        assert_eq!(
+            both,
+            JoinOutcome::VerifiedBothSides {
+                dev_addr: 0x2600_0001
+            }
+        );
+        assert!(both.is_confirmed());
+        // A mismatched device DevAddr is NOT a confirmation.
+        assert!(
+            !JoinOutcome::reconcile(&status(true, Some(true), Some(0x2600_0002)), 0x2600_0001)
+                .is_confirmed()
+        );
+    }
+
+    #[test]
+    fn json_round_trips_and_tags_the_outcome() {
+        let reply = VerifyReply {
+            dev_eui: "04B648FC80257775".into(),
+            outcome: JoinOutcome::JoinedGatewayOnly {
+                assigned_dev_addr: 0x2600_0001,
+            },
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(json.contains("\"outcome\":\"joined_gateway_only\""));
+        assert!(json.contains("\"assigned_dev_addr\":637534209")); // 0x26000001
+        let back: VerifyReply = serde_json::from_str(&json).unwrap();
+        assert_eq!(reply, back);
+    }
+
+    #[test]
+    fn topics_are_namespaced_per_gateway() {
+        assert_eq!(topics::arm("gw-pi5-01"), "join/gw-pi5-01/arm");
+        assert_eq!(
+            topics::status("gw-pi5-01", "04B648FC80257775"),
+            "join/gw-pi5-01/status/04B648FC80257775"
+        );
+    }
+}
