@@ -34,3 +34,9 @@ name = "fuzz_multi_telegram"
 path = "fuzz_targets/fuzz_multi_telegram.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_lorawan"
+path = "fuzz_targets/fuzz_lorawan.rs"
+test = false
+doc = false
