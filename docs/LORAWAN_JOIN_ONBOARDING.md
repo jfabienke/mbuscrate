@@ -89,6 +89,18 @@ second of setup margin.
    side (DevAddr in *our* NetID, not the operator's) and by a **decrypted uplink** on the
    assigned DevAddr — the strongest proof (a device won't uplink without the session keys).
 
+## The uplink payload is NOT standard M-Bus/wM-Bus
+
+**Do not feed a Zenner LoRa uplink to the M-Bus record decoder.** The captured decrypted
+HCA payload (`921b80070101000110000892a9aa020000`) does not begin with a wM-Bus CI/DIF and
+does not parse as EN 13757-3 DIF/VIF records — it is a **Zenner-proprietary application
+format**, consistent with the earlier finding that Zenner's LoRa payloads are not M-Bus
+encoded. The join responder therefore **captures every frame** (ciphertext *and* decrypted
+plaintext) to the `--capture` JSONL specifically for **offline vendor-format
+reverse-engineering** — decoding it is separate vendor work, keyed on device/firmware, not
+a job for the generic decoder. A gateway that assumed M-Bus here would silently emit garbage
+readings.
+
 ## Cross-session credential hygiene (observed)
 
 The assistant's safety classifier **blocks transmitting an AppKey (or key-like hex) between
