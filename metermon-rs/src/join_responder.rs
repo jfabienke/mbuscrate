@@ -26,8 +26,6 @@ use mbus_rs::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, SpreadingFact
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// JOIN_ACCEPT_DELAY1: RX1 opens this long after the *end* of the JoinRequest.
-const JOIN_ACCEPT_DELAY1: Duration = Duration::from_millis(5000);
 /// How early to issue SetTx so the preamble is rising as the window opens.
 ///
 /// Small on purpose. The device listens for only a few symbols, and at SF9 an
@@ -35,6 +33,19 @@ const JOIN_ACCEPT_DELAY1: Duration = Duration::from_millis(5000);
 /// is finished before the device is listening, which looks exactly like never
 /// transmitting. All the SPI setup happens before this lead, not inside it.
 const TX_LEAD: Duration = Duration::from_millis(5);
+
+/// JOIN_ACCEPT_DELAY2: RX2 opens 1 s after RX1 (6 s after the JoinRequest). We answer
+/// here, not in RX1: RX2 is a single fixed window every LoRaWAN device supports, and
+/// because we stay silent in RX1 the device is guaranteed to open it. RX1 and RX2 also
+/// overlap for a join — the accept is ~1.5 s of SF12 airtime, longer than the 1 s
+/// RX1→RX2 gap — so answering both is physically impossible; one window it is.
+const JOIN_ACCEPT_DELAY2: Duration = Duration::from_millis(6000);
+/// EU868 RX2 is fixed at 869.525 MHz, DR0 (SF12). It sits in the 869.4–869.65 MHz
+/// sub-band, which permits +27 dBm ERP (10% duty), so the accept can go out at full
+/// chip power for downlink margin — the difference between a close simulator and a
+/// real device actually receiving it.
+const RX2_FREQ_HZ: u32 = 869_525_000;
+const RX2_POWER_DBM: i8 = 22;
 
 /// A device this gateway is willing to join, as provisioned by the Device Manager.
 #[derive(Debug, Clone)]
@@ -121,13 +132,13 @@ impl JoinResponder {
         }
     }
 
-    fn profile(&self, iq_inverted: bool) -> RadioProfile {
+    fn profile(&self, iq_inverted: bool, frequency_hz: u32, power_dbm: i8) -> RadioProfile {
         RadioProfile::LoRa(LoRaProfile {
-            frequency_hz: self.freq_hz,
+            frequency_hz,
             sf: self.sf_enum(),
             bw: LoRaBandwidth::BW125,
             cr: CodingRate::CR4_5,
-            power_dbm: 14,
+            power_dbm,
             // Public LoRaWAN sync word; a private-sync receiver is deaf to real
             // LoRaWAN devices and vice versa.
             sync_word: Some(0x3444),
@@ -140,7 +151,7 @@ impl JoinResponder {
     fn arm_uplink_rx(&mut self) -> Result<()> {
         set_rf_switch(true);
         self.driver
-            .switch_profile(&self.profile(false))
+            .switch_profile(&self.profile(false, self.freq_hz, 14))
             .context("uplink profile")?;
         self.driver.set_dio2_as_rf_switch(true)?;
         self.driver.set_rx_boosted_gain(true)?;
@@ -151,9 +162,9 @@ impl JoinResponder {
     /// Stage a downlink with **inverted IQ**, as every LoRaWAN downlink must be.
     /// Everything expensive happens here; [`JoinResponder::fire_downlink`] only
     /// issues SetTx.
-    fn stage_downlink(&mut self, frame: &[u8]) -> Result<()> {
+    fn stage_downlink_on(&mut self, frequency_hz: u32, power_dbm: i8, frame: &[u8]) -> Result<()> {
         self.driver
-            .switch_profile(&self.profile(true))
+            .switch_profile(&self.profile(true, frequency_hz, power_dbm))
             .context("downlink profile")?;
         self.driver.set_dio2_as_rf_switch(true)?;
         // pinctrl spawns a process, which costs milliseconds — far too much to do
@@ -252,7 +263,7 @@ impl JoinResponder {
                 }
             };
             // The clock starts the moment the frame lands: everything below has to
-            // finish inside JOIN_ACCEPT_DELAY1.
+            // stage and fire the accept before the RX2 deadline (JOIN_ACCEPT_DELAY2).
             let rx_at = Instant::now();
             seen += 1;
             let rssi = pkt.rssi_dbm;
@@ -358,23 +369,28 @@ impl JoinResponder {
         let accept = build_join_accept(&cred.app_key, &params);
         let keys = derive_session_keys(&cred.app_key, &params, jr.dev_nonce);
 
-        // Stage everything first, then sleep to the deadline and fire.
-        self.stage_downlink(&accept)?;
+        // Answer in the RX2 window (see JOIN_ACCEPT_DELAY2): stage the accept on the
+        // fixed 869.525 MHz / SF12 downlink channel at full +22 dBm, then sleep to the
+        // deadline and fire. Staying silent in RX1 guarantees the device opens RX2, and
+        // the higher-power sub-band gives the accept the downlink margin a real device
+        // needs (a close simulator received RX1 at +14 dBm; a 1 m commercial device did
+        // not).
+        self.stage_downlink_on(RX2_FREQ_HZ, RX2_POWER_DBM, &accept)?;
         let staged_at = rx_at.elapsed();
-        let fire_at = rx_at + JOIN_ACCEPT_DELAY1 - TX_LEAD;
+        let fire_at = rx_at + JOIN_ACCEPT_DELAY2 - TX_LEAD;
         let now = Instant::now();
         if fire_at > now {
             std::thread::sleep(fire_at - now);
         } else {
             println!(
-                "join: RX1 window missed by {:?} — staging took {:?}",
+                "join: RX2 window missed by {:?} — staging took {:?}",
                 now - fire_at,
                 staged_at
             );
         }
         self.fire_downlink()?;
         println!(
-            "join: JoinAccept fired at +{:?} (staging took {:?})",
+            "join: JoinAccept fired in RX2 at +{:?} (869.525 MHz @ {RX2_POWER_DBM} dBm, staging {:?})",
             rx_at.elapsed(),
             staged_at
         );
