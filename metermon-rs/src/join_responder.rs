@@ -58,8 +58,17 @@ const RX2_SF: SpreadingFactor = SpreadingFactor::SF12;
 /// as a fallback after RX1 (see JOIN_ACCEPT_DELAY1): the fixed 869.525 MHz / SF12 window
 /// every device supports, at full +22 dBm for the downlink margin a distant device needs.
 /// Because RX1 is answered with a short-airtime SF9 accept, it finishes in time to re-stage
-/// and still make RX2. Caveat: the RX1 airtime + re-stage can push the RX2 fire past its
-/// +6 s window, so a device that relies *only* on RX2 may miss it — the robust general
+/// and still make RX2.
+///
+/// **Measured caveat — at SF12 the RX2 fallback never lands.** When the uplink itself is
+/// SF12 (a real Zenner HCA), the RX1 accept is ~1.3 s of airtime, so the re-stage finishes
+/// after the RX2 deadline. Across a 15-cycle run against the meter this was dead
+/// consistent: `RX2 window missed by 332.26 ms — staging took 6.327 s`. So at SF12 the
+/// device gets exactly one shot, RX1, and RX2 is decorative; the accept must be good there
+/// or not at all (it was — 9/9 joins that were heard verified both-sides). The caveat below
+/// is therefore a measurement, not a worry.
+///
+/// A device that relies *only* on RX2 will miss it — the robust general
 /// answer is a per-device/adaptive window choice, not yet implemented.
 const JOIN_ACCEPT_DELAY2: Duration = Duration::from_millis(6000);
 /// EU868 RX2 is fixed at 869.525 MHz, DR0 (SF12). It sits in the 869.4–869.65 MHz
@@ -145,6 +154,14 @@ impl JoinResponder {
             sf,
             sessions: HashMap::new(),
             // 0x26xxxxxx is the conventional private-range DevAddr prefix.
+            //
+            // This counter is per-responder and in-memory, so it restarts at ..0001 on
+            // every construction. The join-control endpoint builds a fresh responder per
+            // arm, which means a device re-provisioned across N arms is handed the SAME
+            // DevAddr every time (observed: 9 verified joins of one meter, all
+            // 0x26000001). Harmless for a single-device bench responder — and the
+            // sessions map is likewise per-run — but a real LNS must allocate DevAddrs
+            // from durable state, or two devices joining in separate arms collide.
             next_dev_addr: 0x2600_0001,
             store,
             capture: None,
