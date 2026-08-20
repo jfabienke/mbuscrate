@@ -178,7 +178,7 @@ int main() {
 
   // LoRaWANNode overrides most air parameters per data rate; what matters here is
   // the TCXO voltage and that the radio answers at all.
-  int state = radio.begin(868.1, 125.0, 9, 5, RADIOLIB_SX126X_SYNC_WORD_PRIVATE,
+  int state = radio.begin(868.1, 125.0, 9, 5, 0x3444 /* public LoRaWAN sync, matches the gateway responder */,
                           10, 8, TCXO_V, false);
   if (state != RADIOLIB_ERR_NONE) {
     printf("[jt] radio begin failed: %d\n", state);

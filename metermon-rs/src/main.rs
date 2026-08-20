@@ -20,8 +20,10 @@ mod decode;
 mod devices;
 mod gps;
 mod health;
-#[cfg(feature = "radio")]
+#[cfg(feature = "join-control")]
 mod join_control;
+#[cfg(feature = "join-control")]
+mod join_control_backend;
 #[cfg(feature = "radio")]
 mod join_responder;
 mod join_store;
@@ -355,6 +357,41 @@ enum Cmd {
         arm_window: u64,
         #[arg(long, default_value = "metermon.conf")]
         config: String,
+        /// Simulate the join instead of driving the radio responder: after each arm,
+        /// wait a short latency then synthesize a `JoinStatus` (DevAddr counting up from
+        /// 0x26000001) and publish it, so the MQTT control-plane loop can be exercised and
+        /// fuzzed with no radio or meter present. Off by default (drive the real responder).
+        #[arg(long)]
+        simulate_join: bool,
+    },
+    /// Mock Device Manager backend driver for the join-control endpoint — pure MQTT, no
+    /// radio, runs on any host (requires the `join-control` feature). Publishes
+    /// arm/fired/verify and consumes arm_reply/status/verify_reply, driving full join
+    /// cycles; with `--fuzz` it injects random wait-states, reordering and duplication
+    /// before each publish to exercise the gateway endpoint's timing robustness.
+    JoinControlBackend {
+        #[arg(long, default_value = "metermon.conf")]
+        config: String,
+        /// DevEUI (big-endian hex) to drive; the gateway must hold its credential and be
+        /// running (real or `--simulate-join`) against the same broker + gateway id.
+        #[arg(long)]
+        dev_eui: String,
+        /// Join channel to request, in Hz.
+        #[arg(long, default_value_t = 868_500_000)]
+        channel_hz: u32,
+        /// Spreading factor to request (7..=12).
+        #[arg(long, default_value_t = 12)]
+        sf: u8,
+        /// Number of full arm→fire→verify cycles to drive.
+        #[arg(long, default_value_t = 20)]
+        cycles: u32,
+        /// Inject random wait-states, message reordering and duplication before each
+        /// publish, to fuzz the gateway endpoint's timing robustness.
+        #[arg(long)]
+        fuzz: bool,
+        /// PRNG seed, so a fuzz run is reproducible.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
     },
     /// Transmit LoRa frames from the SX1262 (requires `radio` feature) — proves the
     /// gateway's transmit path against an independent receiver.
@@ -550,9 +587,28 @@ fn main() -> Result<()> {
             join_db,
             arm_window,
             config,
+            simulate_join,
         } => run_lorawan_join_control(
-            &spidev, nss, busy, dio1, reset, &creds, &join_db, arm_window, &config,
+            &spidev,
+            nss,
+            busy,
+            dio1,
+            reset,
+            &creds,
+            &join_db,
+            arm_window,
+            &config,
+            simulate_join,
         ),
+        Cmd::JoinControlBackend {
+            config,
+            dev_eui,
+            channel_hz,
+            sf,
+            cycles,
+            fuzz,
+            seed,
+        } => run_join_control_backend(&config, &dev_eui, channel_hz, sf, cycles, fuzz, seed),
         Cmd::LoraTx {
             spidev,
             nss,
@@ -1639,7 +1695,7 @@ fn run_lorawan_join(
     bail_no_radio("lorawan-join")
 }
 
-#[cfg(feature = "radio")]
+#[cfg(feature = "join-control")]
 #[allow(clippy::too_many_arguments)]
 fn run_lorawan_join_control(
     spidev: &str,
@@ -1651,6 +1707,7 @@ fn run_lorawan_join_control(
     join_db: &str,
     arm_window: u64,
     config_path: &str,
+    simulate_join: bool,
 ) -> Result<()> {
     use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
     let cfg = Config::load(config_path)?;
@@ -1661,10 +1718,18 @@ fn run_lorawan_join_control(
         dio2: None,
         reset: Some(reset),
     };
-    join_control::run(&cfg, spidev, pins, creds_path, join_db, arm_window)
+    join_control::run(
+        &cfg,
+        spidev,
+        pins,
+        creds_path,
+        join_db,
+        arm_window,
+        simulate_join,
+    )
 }
 
-#[cfg(not(feature = "radio"))]
+#[cfg(not(feature = "join-control"))]
 #[allow(clippy::too_many_arguments)]
 fn run_lorawan_join_control(
     _spidev: &str,
@@ -1676,8 +1741,48 @@ fn run_lorawan_join_control(
     _join_db: &str,
     _arm_window: u64,
     _config_path: &str,
+    _simulate_join: bool,
 ) -> Result<()> {
-    bail_no_radio("lorawan-join-control")
+    anyhow::bail!(
+        "the `lorawan-join-control` subcommand needs the `join-control` feature (RF join \
+         responder + the lorawan-join-control schema crate). Build with: \
+         cargo build --features join-control  (on the Pi)."
+    )
+}
+
+/// Drive the mock Device Manager backend against a running join-control endpoint. Pure
+/// MQTT — no radio — so it runs on any host; still gated on `join-control` because it
+/// needs the shared wire-schema crate.
+#[cfg(feature = "join-control")]
+#[allow(clippy::too_many_arguments)]
+fn run_join_control_backend(
+    config_path: &str,
+    dev_eui: &str,
+    channel_hz: u32,
+    sf: u8,
+    cycles: u32,
+    fuzz: bool,
+    seed: u64,
+) -> Result<()> {
+    let cfg = Config::load(config_path)?;
+    join_control_backend::run(&cfg, dev_eui, channel_hz, sf, cycles, fuzz, seed)
+}
+
+#[cfg(not(feature = "join-control"))]
+#[allow(clippy::too_many_arguments)]
+fn run_join_control_backend(
+    _config_path: &str,
+    _dev_eui: &str,
+    _channel_hz: u32,
+    _sf: u8,
+    _cycles: u32,
+    _fuzz: bool,
+    _seed: u64,
+) -> Result<()> {
+    anyhow::bail!(
+        "the `join-control-backend` subcommand needs the `join-control` feature (the \
+         lorawan-join-control schema crate). Build with: cargo build --features join-control."
+    )
 }
 
 #[cfg(feature = "radio")]

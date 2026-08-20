@@ -50,8 +50,20 @@ enum Cmd {
     Fired(FiredNotice),
 }
 
+/// First synthetic DevAddr handed out in `--simulate-join` mode; each simulated join
+/// takes the next value up. Mirrors the live gateway's assignment base (see the
+/// `lorawan_join_control` reconcile tests, which use `0x2600_0001`).
+const SIM_DEV_ADDR_BASE: u32 = 0x2600_0001;
+
 /// Run the join-control endpoint. Blocks, servicing one armed device at a time, until
 /// the MQTT connection is lost (the pump thread exits and closes the channel).
+///
+/// When `simulate_join` is true no radio is touched: an arm is answered as usual, then a
+/// short latency later a synthetic [`JoinStatus`] is published and kept as the current
+/// status, so a following [`VerifyRequest`] reconciles to
+/// [`JoinOutcome::VerifiedBothSides`]. The arm-once/window/verify logic is identical to
+/// the live path; only *how* a join happens differs. This exists to exercise and fuzz the
+/// MQTT control-plane timing without RF or a meter.
 pub fn run(
     cfg: &Config,
     spidev: &str,
@@ -59,6 +71,7 @@ pub fn run(
     creds_path: &str,
     join_db: &str,
     arm_window_secs: u64,
+    simulate_join: bool,
 ) -> Result<()> {
     let gwid = cfg.gwid.clone();
 
@@ -85,8 +98,9 @@ pub fn run(
         .context("subscribe fired topic")?;
 
     log::info!(
-        "join-control on gateway {gwid}: listening for arm/verify/fired, {}s arm window, creds {creds_path}, store {join_db}",
-        arm_window_secs
+        "join-control on gateway {gwid}: listening for arm/verify/fired, {}s arm window, creds {creds_path}, store {join_db}{}",
+        arm_window_secs,
+        if simulate_join { " [SIMULATE-JOIN: no radio]" } else { "" }
     );
 
     // The MQTT event loop is the pump; it lives on a background thread and forwards
@@ -143,6 +157,8 @@ pub fn run(
     // Main loop: arm-once / run-the-window, one device at a time. A new arm that
     // arrives mid-window is carried over here rather than dropped.
     let mut next: Option<ArmRequest> = None;
+    // Monotonic DevAddr counter for `--simulate-join`; unused in the live path.
+    let mut sim_dev_addr: u32 = SIM_DEV_ADDR_BASE;
     loop {
         let arm = match next.take() {
             Some(a) => a,
@@ -171,6 +187,8 @@ pub fn run(
             join_db,
             arm_window_secs,
             arm,
+            simulate_join,
+            &mut sim_dev_addr,
         )?;
     }
 
@@ -191,6 +209,8 @@ fn handle_arm(
     join_db: &str,
     arm_window_secs: u64,
     arm: ArmRequest,
+    simulate_join: bool,
+    sim_dev_addr: &mut u32,
 ) -> Result<Option<ArmRequest>> {
     let dev_eui = arm.dev_eui.clone();
 
@@ -225,25 +245,46 @@ fn handle_arm(
     }
 
     log::info!(
-        "arm {dev_eui}: parking responder on {:.3} MHz SF{} for {}s",
+        "arm {dev_eui}: {} on {:.3} MHz SF{} for {}s",
+        if simulate_join {
+            "SIMULATING join (no radio)"
+        } else {
+            "parking responder"
+        },
         arm.channel_hz as f64 / 1e6,
         arm.sf,
         arm_window_secs
     );
 
-    // Durable join state (DevNonce window + next JoinNonce), same store the
-    // `lorawan-join` subcommand uses.
-    let store = crate::join_store::RedbJoinStore::open(join_db)
-        .map_err(|e| anyhow::anyhow!("opening join store {join_db}: {e}"))?;
-    let mut responder = JoinResponder::new(
-        spidev,
-        pins.clone(),
-        arm.channel_hz,
-        arm.sf,
-        creds,
-        Box::new(store),
-    )
-    .context("building join responder")?;
+    // Live path only: durable join state (DevNonce window + next JoinNonce), same store
+    // the `lorawan-join` subcommand uses, feeding the RF responder. In `--simulate-join`
+    // mode neither the store nor the responder (nor any radio) is touched.
+    let mut responder = if simulate_join {
+        None
+    } else {
+        let store = crate::join_store::RedbJoinStore::open(join_db)
+            .map_err(|e| anyhow::anyhow!("opening join store {join_db}: {e}"))?;
+        Some(
+            JoinResponder::new(
+                spidev,
+                pins.clone(),
+                arm.channel_hz,
+                arm.sf,
+                creds,
+                Box::new(store),
+            )
+            .context("building join responder")?,
+        )
+    };
+
+    // Simulated join: reserve this arm's DevAddr and pick a short latency to model the
+    // over-the-air join delay before the synthetic status is published.
+    let sim_assigned = *sim_dev_addr;
+    if simulate_join {
+        *sim_dev_addr = sim_dev_addr.wrapping_add(1);
+    }
+    let sim_latency = Duration::from_millis(1000 + u64::from(sim_assigned % 3) * 1000);
+    let mut sim_fired = false;
 
     // Gateway-side view of this device, updated by the on-join callback and read by
     // verify reconciliation.
@@ -263,9 +304,10 @@ fn handle_arm(
     let mut pending_arm: Option<ArmRequest> = None;
 
     while start.elapsed() < window && !confirmed && pending_arm.is_none() {
-        // Run one short receive slice. The on-join callback records the accept and
-        // publishes the updated JoinStatus; on-uplink just logs.
-        {
+        // Run one short receive slice. Live: the on-join callback records the accept and
+        // publishes the updated JoinStatus; on-uplink just logs. Simulated: no radio, so
+        // just wait out the latency and publish one synthetic JoinStatus.
+        if let Some(r) = responder.as_mut() {
             let status_cb = status.clone();
             let client_cb = client.clone();
             let status_topic = topics::status(gwid, &dev_eui);
@@ -297,9 +339,43 @@ fn handle_arm(
                     hex::encode(payload)
                 );
             };
-            responder
-                .run(SUB_WINDOW_SECS, on_join, on_uplink)
+            r.run(SUB_WINDOW_SECS, on_join, on_uplink)
                 .context("responder sub-window")?;
+        } else {
+            // Simulated slice. On the first slice sleep the modelled join latency, then
+            // publish exactly one synthetic status; later slices just sleep a sub-window
+            // so an incoming verify is still drained promptly between them.
+            if !sim_fired {
+                std::thread::sleep(sim_latency.min(Duration::from_secs(SUB_WINDOW_SECS)));
+                let snapshot = {
+                    let mut s = status.lock().unwrap();
+                    s.heard = true;
+                    s.mic_ok = Some(true);
+                    s.assigned_dev_addr = Some(sim_assigned);
+                    s.accept_ts_unix = Some(now_unix() as u64);
+                    s.rssi_dbm = Some(-70);
+                    s.snr_db = Some(6.0);
+                    s.clone()
+                };
+                let status_topic = topics::status(gwid, &dev_eui);
+                match serde_json::to_vec(&snapshot) {
+                    Ok(bytes) => {
+                        if let Err(e) =
+                            client.publish(&status_topic, QoS::AtLeastOnce, false, bytes)
+                        {
+                            log::warn!("simulated status publish failed: {e}");
+                        } else {
+                            log::info!(
+                                "simulated join {dev_eui}: assigned {sim_assigned:08X}, status published"
+                            );
+                        }
+                    }
+                    Err(e) => log::warn!("simulated status serialize failed: {e}"),
+                }
+                sim_fired = true;
+            } else {
+                std::thread::sleep(Duration::from_secs(SUB_WINDOW_SECS));
+            }
         }
 
         // Drain any control messages that arrived during the slice.
