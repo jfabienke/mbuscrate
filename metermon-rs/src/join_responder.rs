@@ -16,8 +16,8 @@
 
 use anyhow::{Context, Result};
 use mbus_rs::lorawan::{
-    build_join_accept, derive_session_keys, DataFrame, JoinAcceptParams, JoinAdmission,
-    JoinRequest, SessionKeys,
+    build_data_down, build_join_accept, derive_session_keys, link_adr_req, parse_link_adr_ans,
+    DataFrame, DownlinkParams, JoinAcceptParams, JoinAdmission, JoinRequest, SessionKeys,
 };
 use mbus_rs::wmbus::radio::driver::{LoRaProfile, RadioProfile, Sx126xDriver};
 use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
@@ -26,8 +26,6 @@ use mbus_rs::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, SpreadingFact
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// JOIN_ACCEPT_DELAY1: RX1 opens this long after the *end* of the JoinRequest.
-const JOIN_ACCEPT_DELAY1: Duration = Duration::from_millis(5000);
 /// How early to issue SetTx so the preamble is rising as the window opens.
 ///
 /// Small on purpose. The device listens for only a few symbols, and at SF9 an
@@ -35,6 +33,50 @@ const JOIN_ACCEPT_DELAY1: Duration = Duration::from_millis(5000);
 /// is finished before the device is listening, which looks exactly like never
 /// transmitting. All the SPI setup happens before this lead, not inside it.
 const TX_LEAD: Duration = Duration::from_millis(5);
+
+/// JOIN_ACCEPT_DELAY1: RX1 opens 5 s after the *end* of the JoinRequest, on the same
+/// channel and SF the device uplinked on (EU868 RX1DROffset 0), IQ-inverted. This is the
+/// first window every device opens and — for a close device like a bench Pico — the most
+/// reliable: same channel/SF the responder just received on (near-zero retune), a short
+/// SF9 preamble, and RadioLib locks it easily. We answer RX1 *and* RX2 (below): whichever
+/// the device catches first wins; if RX1 succeeds the device never opens RX2, so the
+/// second fire is harmless.
+const JOIN_ACCEPT_DELAY1: Duration = Duration::from_millis(5000);
+/// RECEIVE_DELAY1 for *data* frames: RX1 opens 1 s after the uplink ends (EU868
+/// default, and what we advertise as RxDelay in the JoinAccept). This is far tighter
+/// than the 5 s join window, but staging is ~20 ms so it is comfortably met. We use it
+/// to land a LinkADRReq in the device's first data RX1.
+const RX1_DATA_DELAY: Duration = Duration::from_millis(1000);
+/// The channel mask we pin joined devices to: bit 0 only = EU868 868.1 MHz (ch0), the
+/// single default channel a one-channel gateway hears. See [`link_adr_req`].
+const PIN_CHANNEL_MASK: u16 = 0x0001;
+/// EU868 RX2 is fixed at 869.525 MHz, DR0 = **SF12** (not the uplink SF). The earlier
+/// code sent the RX2 accept at the uplink SF, so a standards-compliant RX2 window (SF12)
+/// never heard it; only a device with a non-standard RX2 DR did.
+const RX2_SF: SpreadingFactor = SpreadingFactor::SF12;
+/// JOIN_ACCEPT_DELAY2: RX2 opens 1 s after RX1 (6 s after the JoinRequest). We answer it
+/// as a fallback after RX1 (see JOIN_ACCEPT_DELAY1): the fixed 869.525 MHz / SF12 window
+/// every device supports, at full +22 dBm for the downlink margin a distant device needs.
+/// Because RX1 is answered with a short-airtime SF9 accept, it finishes in time to re-stage
+/// and still make RX2.
+///
+/// **Measured caveat — at SF12 the RX2 fallback never lands.** When the uplink itself is
+/// SF12 (a real Zenner HCA), the RX1 accept is ~1.3 s of airtime, so the re-stage finishes
+/// after the RX2 deadline. Across a 15-cycle run against the meter this was dead
+/// consistent: `RX2 window missed by 332.26 ms — staging took 6.327 s`. So at SF12 the
+/// device gets exactly one shot, RX1, and RX2 is decorative; the accept must be good there
+/// or not at all (it was — 9/9 joins that were heard verified both-sides). The caveat below
+/// is therefore a measurement, not a worry.
+///
+/// A device that relies *only* on RX2 will miss it — the robust general
+/// answer is a per-device/adaptive window choice, not yet implemented.
+const JOIN_ACCEPT_DELAY2: Duration = Duration::from_millis(6000);
+/// EU868 RX2 is fixed at 869.525 MHz, DR0 (SF12). It sits in the 869.4–869.65 MHz
+/// sub-band, which permits +27 dBm ERP (10% duty), so the accept can go out at full
+/// chip power for downlink margin — the difference between a close simulator and a
+/// real device actually receiving it.
+const RX2_FREQ_HZ: u32 = 869_525_000;
+const RX2_POWER_DBM: i8 = 22;
 
 /// A device this gateway is willing to join, as provisioned by the Device Manager.
 #[derive(Debug, Clone)]
@@ -67,13 +109,23 @@ fn set_rf_switch(receive: bool) {
         .ok();
 }
 
+/// Per-session state beyond the derived keys: the network downlink counter and
+/// whether the device has accepted the single-channel pin.
+struct SessionState {
+    keys: SessionKeys,
+    /// NFCntDown for the MAC downlinks we send this session (starts at 0).
+    nfcnt_down: u32,
+    /// True once the device has ACKed our LinkADRReq channel pin.
+    pinned: bool,
+}
+
 pub struct JoinResponder {
     driver: Sx126xDriver<RaspberryPiHal>,
     creds: Vec<JoinCredential>,
     freq_hz: u32,
     sf: u8,
     /// Sessions established this run, keyed by DevAddr.
-    sessions: HashMap<u32, SessionKeys>,
+    sessions: HashMap<u32, SessionState>,
     next_dev_addr: u32,
     /// Durable 1.0.4 anti-replay state (DevNonce high-water, next JoinNonce). The
     /// JoinNonce that used to live in an in-memory field now comes from here, so it
@@ -102,6 +154,14 @@ impl JoinResponder {
             sf,
             sessions: HashMap::new(),
             // 0x26xxxxxx is the conventional private-range DevAddr prefix.
+            //
+            // This counter is per-responder and in-memory, so it restarts at ..0001 on
+            // every construction. The join-control endpoint builds a fresh responder per
+            // arm, which means a device re-provisioned across N arms is handed the SAME
+            // DevAddr every time (observed: 9 verified joins of one meter, all
+            // 0x26000001). Harmless for a single-device bench responder — and the
+            // sessions map is likewise per-run — but a real LNS must allocate DevAddrs
+            // from durable state, or two devices joining in separate arms collide.
             next_dev_addr: 0x2600_0001,
             store,
             capture: None,
@@ -121,13 +181,19 @@ impl JoinResponder {
         }
     }
 
-    fn profile(&self, iq_inverted: bool) -> RadioProfile {
+    fn profile(
+        &self,
+        iq_inverted: bool,
+        frequency_hz: u32,
+        sf: SpreadingFactor,
+        power_dbm: i8,
+    ) -> RadioProfile {
         RadioProfile::LoRa(LoRaProfile {
-            frequency_hz: self.freq_hz,
-            sf: self.sf_enum(),
+            frequency_hz,
+            sf,
             bw: LoRaBandwidth::BW125,
             cr: CodingRate::CR4_5,
-            power_dbm: 14,
+            power_dbm,
             // Public LoRaWAN sync word; a private-sync receiver is deaf to real
             // LoRaWAN devices and vice versa.
             sync_word: Some(0x3444),
@@ -140,7 +206,7 @@ impl JoinResponder {
     fn arm_uplink_rx(&mut self) -> Result<()> {
         set_rf_switch(true);
         self.driver
-            .switch_profile(&self.profile(false))
+            .switch_profile(&self.profile(false, self.freq_hz, self.sf_enum(), 14))
             .context("uplink profile")?;
         self.driver.set_dio2_as_rf_switch(true)?;
         self.driver.set_rx_boosted_gain(true)?;
@@ -151,9 +217,15 @@ impl JoinResponder {
     /// Stage a downlink with **inverted IQ**, as every LoRaWAN downlink must be.
     /// Everything expensive happens here; [`JoinResponder::fire_downlink`] only
     /// issues SetTx.
-    fn stage_downlink(&mut self, frame: &[u8]) -> Result<()> {
+    fn stage_downlink_on(
+        &mut self,
+        frequency_hz: u32,
+        sf: SpreadingFactor,
+        power_dbm: i8,
+        frame: &[u8],
+    ) -> Result<()> {
         self.driver
-            .switch_profile(&self.profile(true))
+            .switch_profile(&self.profile(true, frequency_hz, sf, power_dbm))
             .context("downlink profile")?;
         self.driver.set_dio2_as_rf_switch(true)?;
         // pinctrl spawns a process, which costs milliseconds — far too much to do
@@ -252,7 +324,7 @@ impl JoinResponder {
                 }
             };
             // The clock starts the moment the frame lands: everything below has to
-            // finish inside JOIN_ACCEPT_DELAY1.
+            // stage and fire the accept before the RX2 deadline (JOIN_ACCEPT_DELAY2).
             let rx_at = Instant::now();
             seen += 1;
             let rssi = pkt.rssi_dbm;
@@ -271,10 +343,9 @@ impl JoinResponder {
             }
             match DataFrame::parse(&pkt.payload) {
                 Ok(df) if df.is_uplink() => {
-                    let plain = self
-                        .sessions
-                        .get(&df.dev_addr)
-                        .map(|k| df.decrypt_payload(&k.nwk_skey, &k.app_skey, df.fcnt as u32));
+                    let plain = self.sessions.get(&df.dev_addr).map(|s| {
+                        df.decrypt_payload(&s.keys.nwk_skey, &s.keys.app_skey, df.fcnt as u32)
+                    });
                     let meta = format!(
                         "\"dev_addr\":\"{:08X}\",\"fcnt\":{},\"fport\":{},\"rssi_dbm\":{rssi},\"snr_db\":{snr:.1}",
                         df.dev_addr,
@@ -282,7 +353,7 @@ impl JoinResponder {
                         df.fport.map(|p| p.to_string()).unwrap_or("null".into())
                     );
                     self.record_capture("uplink", &pkt.payload, plain.as_deref(), &meta);
-                    self.handle_uplink(&df, rssi, snr, &mut on_uplink)
+                    self.handle_uplink(&df, rx_at, rssi, snr, &mut on_uplink)?;
                 }
                 _ => {
                     // Capture it anyway: an unrecognised frame is exactly what a new
@@ -358,25 +429,58 @@ impl JoinResponder {
         let accept = build_join_accept(&cred.app_key, &params);
         let keys = derive_session_keys(&cred.app_key, &params, jr.dev_nonce);
 
-        // Stage everything first, then sleep to the deadline and fire.
-        self.stage_downlink(&accept)?;
-        let staged_at = rx_at.elapsed();
+        // Answer in BOTH receive windows; whichever the device catches first wins.
+        //
+        // RX1 (JOIN_ACCEPT_DELAY1, +5 s): the uplink channel and SF, IQ-inverted, at
+        // +14 dBm. The device opens this first, it needs almost no retune from the RX we
+        // just did, and its short SF-lower preamble is trivial for RadioLib to lock — the
+        // reliable path for a close bench device. Its short airtime finishes well before
+        // RX2, so we can still make RX2.
+        //
+        // RX2 (JOIN_ACCEPT_DELAY2, +6 s): the fixed 869.525 MHz / **SF12** / +22 dBm
+        // downlink — the standards-correct RX2 (the previous code sent it at the uplink
+        // SF, which a compliant SF12 RX2 window could not hear). The high-power sub-band
+        // gives a distant device the downlink margin RX1 at +14 dBm may lack.
+        let rx1_sf = self.sf_enum();
+        let rx1_freq = self.freq_hz;
+
+        // --- RX1 ---
+        self.stage_downlink_on(rx1_freq, rx1_sf, 14, &accept)?;
+        let rx1_staged = rx_at.elapsed();
         let fire_at = rx_at + JOIN_ACCEPT_DELAY1 - TX_LEAD;
         let now = Instant::now();
         if fire_at > now {
             std::thread::sleep(fire_at - now);
         } else {
+            println!("join: RX1 window missed by {:?}", now - fire_at);
+        }
+        self.fire_downlink()?;
+        println!(
+            "join: JoinAccept fired in RX1 at +{:?} ({:.3} MHz @ 14 dBm, staging {:?})",
+            rx_at.elapsed(),
+            rx1_freq as f64 / 1e6,
+            rx1_staged
+        );
+
+        // --- RX2 --- (re-stage in the ~0.8 s gap before the RX2 deadline)
+        self.stage_downlink_on(RX2_FREQ_HZ, RX2_SF, RX2_POWER_DBM, &accept)?;
+        let rx2_staged = rx_at.elapsed();
+        let fire_at = rx_at + JOIN_ACCEPT_DELAY2 - TX_LEAD;
+        let now = Instant::now();
+        if fire_at > now {
+            std::thread::sleep(fire_at - now);
+        } else {
             println!(
-                "join: RX1 window missed by {:?} — staging took {:?}",
+                "join: RX2 window missed by {:?} — staging took {:?}",
                 now - fire_at,
-                staged_at
+                rx2_staged
             );
         }
         self.fire_downlink()?;
         println!(
-            "join: JoinAccept fired at +{:?} (staging took {:?})",
+            "join: JoinAccept fired in RX2 at +{:?} (869.525 MHz SF12 @ {RX2_POWER_DBM} dBm, staging {:?})",
             rx_at.elapsed(),
-            staged_at
+            rx2_staged
         );
 
         let joined = JoinedDevice {
@@ -392,31 +496,114 @@ impl JoinResponder {
             "join: {} accepted → DevAddr {:08X} (nonce {:04X}, rssi {rssi} dBm, snr {snr:.1} dB)",
             joined.dev_eui, joined.dev_addr, joined.dev_nonce
         );
-        self.sessions.insert(params.dev_addr, keys);
+        self.sessions.insert(
+            params.dev_addr,
+            SessionState {
+                keys,
+                nfcnt_down: 0,
+                pinned: false,
+            },
+        );
         on_join(&joined);
         Ok(())
     }
 
     fn handle_uplink(
-        &self,
+        &mut self,
         df: &DataFrame,
+        rx_at: Instant,
         rssi: i16,
         snr: f32,
         on_uplink: &mut impl FnMut(u32, u16, &[u8], i16, f32),
-    ) {
-        let Some(keys) = self.sessions.get(&df.dev_addr) else {
-            println!("uplink from unknown DevAddr {:08X}", df.dev_addr);
-            return;
+    ) -> Result<()> {
+        // Copy out the keys/pin-state so no borrow of self.sessions is held across the
+        // downlink fire path below (which needs &mut self.driver).
+        let (nwk, app, already_pinned) = match self.sessions.get(&df.dev_addr) {
+            Some(s) => (s.keys.nwk_skey, s.keys.app_skey, s.pinned),
+            None => {
+                println!("uplink from unknown DevAddr {:08X}", df.dev_addr);
+                return Ok(());
+            }
         };
         // The frame carries only the low 16 bits of the counter; this responder has
         // no rollover tracking, so the upper half is assumed zero — fine for a bench
         // session, and one of the reasons this is not a network server.
         let fcnt = df.fcnt as u32;
-        if !df.verify_mic(&keys.nwk_skey, fcnt) {
+        if !df.verify_mic(&nwk, fcnt) {
             println!("uplink {:08X} fcnt {fcnt}: MIC failed", df.dev_addr);
-            return;
+            return Ok(());
         }
-        let plain = df.decrypt_payload(&keys.nwk_skey, &keys.app_skey, fcnt);
+        let plain = df.decrypt_payload(&nwk, &app, fcnt);
         on_uplink(df.dev_addr, df.fcnt, &plain, rssi, snr);
+
+        // Channel pin (single-channel gateway): steer the device to ch0/868.1 so we
+        // hear all its payloads, not the ~1/3 that a hopping device lands on us.
+        if !already_pinned {
+            match parse_link_adr_ans(&df.fopts) {
+                Some(true) => {
+                    if let Some(s) = self.sessions.get_mut(&df.dev_addr) {
+                        s.pinned = true;
+                    }
+                    println!(
+                        "pin: {:08X} accepted LinkADRReq — pinned to 868.1 (ch0)",
+                        df.dev_addr
+                    );
+                    return Ok(());
+                }
+                Some(false) => {
+                    println!(
+                        "pin: {:08X} rejected LinkADRReq (status not all-ACK) — will retry",
+                        df.dev_addr
+                    );
+                }
+                None => {}
+            }
+            // Not yet pinned: answer this uplink's RX1 (RxDelay 1 s) with LinkADRReq.
+            self.send_channel_pin(df.dev_addr, rx_at)?;
+        }
+        Ok(())
+    }
+
+    /// Land a `LinkADRReq` in the device's data RX1 window (RxDelay = 1 s), pinning it
+    /// to the single default channel this gateway hears (ch0 = 868.1), leaving DR and
+    /// power untouched. Advances the session's NFCntDown and re-arms uplink RX.
+    fn send_channel_pin(&mut self, dev_addr: u32, rx_at: Instant) -> Result<()> {
+        let (fcnt, nwk, app) = match self.sessions.get(&dev_addr) {
+            Some(s) => (s.nfcnt_down, s.keys.nwk_skey, s.keys.app_skey),
+            None => return Ok(()),
+        };
+        let params = DownlinkParams {
+            dev_addr,
+            fcnt,
+            adr: true,
+            ack: false,
+            fpending: false,
+            fopts: link_adr_req(PIN_CHANNEL_MASK, 0x0F, 0x0F, 1).to_vec(),
+            fport: None,
+            frm_payload: Vec::new(),
+        };
+        let frame = build_data_down(&nwk, &app, &params);
+
+        // Data RX1 is the uplink channel and SF (RX1DROffset 0) — the same channel we
+        // received on, since this is a single-channel responder.
+        self.stage_downlink_on(self.freq_hz, self.sf_enum(), 14, &frame)?;
+        let fire_at = rx_at + RX1_DATA_DELAY - TX_LEAD;
+        let now = Instant::now();
+        if fire_at > now {
+            std::thread::sleep(fire_at - now);
+        } else {
+            println!("pin: RX1 (data) window missed by {:?}", now - fire_at);
+        }
+        self.fire_downlink()?;
+        println!(
+            "pin: sent LinkADRReq → {:08X} (ch0/868.1, fcnt {fcnt}) in RX1 at +{:?}",
+            dev_addr,
+            rx_at.elapsed()
+        );
+        if let Some(s) = self.sessions.get_mut(&dev_addr) {
+            s.nfcnt_down = s.nfcnt_down.wrapping_add(1);
+        }
+        self.arm_uplink_rx()?;
+        Ok(())
     }
 }
