@@ -255,13 +255,23 @@ impl JoinResponder {
             return;
         };
         use std::io::Write;
-        let ts = std::time::SystemTime::now()
+        // Millisecond resolution: whole seconds are too coarse to measure a device's
+        // command-to-transmit defer, which is a ~10 s quantity whose *tail* is the
+        // interesting part. `ts` stays whole seconds so existing readers are unaffected.
+        let since_epoch = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .unwrap_or_default();
+        let ts = since_epoch.as_secs();
+        let ts_ms = since_epoch.as_millis();
+        // The channel and SF this frame arrived on. Constant for a single-channel
+        // responder, but recording it makes each capture self-describing — so a file can
+        // be interpreted without knowing how the run was armed, and a future
+        // multi-channel receiver can log arrival channel in the same format.
+        let (freq_hz, sf) = (self.freq_hz, self.sf);
         let _ = writeln!(
             f,
-            "{{\"ts\":{ts},\"kind\":\"{kind}\",\"raw_hex\":\"{}\",\"plain_hex\":{},{meta}}}",
+            "{{\"ts\":{ts},\"ts_ms\":{ts_ms},\"rx_freq_hz\":{freq_hz},\"rx_sf\":{sf},\
+             \"kind\":\"{kind}\",\"raw_hex\":\"{}\",\"plain_hex\":{},{meta}}}",
             hex::encode(raw),
             match plain {
                 Some(p) => format!("\"{}\"", hex::encode(p)),
