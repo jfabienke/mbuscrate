@@ -371,7 +371,43 @@ pub trait JoinStore {
     /// this, a factory-reset device (DevNonce back to 0) is correctly but
     /// permanently rejected as a replay.
     fn reset_dev_nonce(&mut self, dev_eui: &[u8; 8]) -> Result<(), JoinStoreError>;
+
+    /// Return the DevAddr for `dev_eui`, allocating one durably on first use.
+    ///
+    /// **A device keeps its address across rejoins.** The same DevEUI always gets the
+    /// same DevAddr, so an autonomous rejoin does not orphan uplink routing or make an
+    /// operator chase a new address; [`DevAddrAssignment::previous`] reports what it
+    /// held before (`None` on a first-ever allocation), which is what distinguishes a
+    /// first join from a re-join at the network side.
+    ///
+    /// Durability matters as much as it does for the JoinNonce: an allocator that lives
+    /// only in memory restarts from its base on every process start, so two devices
+    /// joining in separate runs are both handed the *same* address and their uplinks
+    /// become indistinguishable. Implementations must commit before returning.
+    fn assign_dev_addr(&mut self, dev_eui: &[u8; 8]) -> Result<DevAddrAssignment, JoinStoreError>;
 }
+
+/// Outcome of [`JoinStore::assign_dev_addr`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DevAddrAssignment {
+    /// The address this device holds from now on.
+    pub dev_addr: u32,
+    /// What it held before this call: `None` if this is its first-ever allocation,
+    /// otherwise the same value as `dev_addr` (addresses are stable per device).
+    /// `Some` therefore means "this device has joined before" — a re-join.
+    pub previous: Option<u32>,
+}
+
+impl DevAddrAssignment {
+    /// True when the device already had an address, i.e. this join is a re-join.
+    pub fn is_rejoin(&self) -> bool {
+        self.previous.is_some()
+    }
+}
+
+/// First DevAddr handed out by a store. `0x26xxxxxx` is the conventional
+/// private/experimental range, matching the NetID the responder advertises.
+pub const DEV_ADDR_BASE: u32 = 0x2600_0001;
 
 /// In-memory [`JoinStore`] for tests and non-persistent bench use.
 ///
@@ -383,6 +419,9 @@ pub struct InMemoryJoinStore {
     next_join_nonce: std::collections::HashMap<[u8; 8], u32>,
     /// Window of recently-accepted DevNonces per device, for the 1.0.2 policy.
     recent: std::collections::HashMap<[u8; 8], Vec<u16>>,
+    /// Stable per-device DevAddr assignments, and the next address to hand out.
+    dev_addrs: std::collections::HashMap<[u8; 8], u32>,
+    next_dev_addr: Option<u32>,
     policy: DevNoncePolicy,
 }
 
@@ -441,6 +480,23 @@ impl JoinStore for InMemoryJoinStore {
         self.last_dev_nonce.remove(dev_eui);
         self.recent.remove(dev_eui);
         Ok(())
+    }
+
+    fn assign_dev_addr(&mut self, dev_eui: &[u8; 8]) -> Result<DevAddrAssignment, JoinStoreError> {
+        if let Some(&existing) = self.dev_addrs.get(dev_eui) {
+            // Stable across rejoins: same device, same address.
+            return Ok(DevAddrAssignment {
+                dev_addr: existing,
+                previous: Some(existing),
+            });
+        }
+        let next = self.next_dev_addr.unwrap_or(DEV_ADDR_BASE);
+        self.dev_addrs.insert(*dev_eui, next);
+        self.next_dev_addr = Some(next.wrapping_add(1));
+        Ok(DevAddrAssignment {
+            dev_addr: next,
+            previous: None,
+        })
     }
 }
 

@@ -126,7 +126,6 @@ pub struct JoinResponder {
     sf: u8,
     /// Sessions established this run, keyed by DevAddr.
     sessions: HashMap<u32, SessionState>,
-    next_dev_addr: u32,
     /// Durable 1.0.4 anti-replay state (DevNonce high-water, next JoinNonce). The
     /// JoinNonce that used to live in an in-memory field now comes from here, so it
     /// survives restarts instead of resetting.
@@ -153,16 +152,6 @@ impl JoinResponder {
             freq_hz,
             sf,
             sessions: HashMap::new(),
-            // 0x26xxxxxx is the conventional private-range DevAddr prefix.
-            //
-            // This counter is per-responder and in-memory, so it restarts at ..0001 on
-            // every construction. The join-control endpoint builds a fresh responder per
-            // arm, which means a device re-provisioned across N arms is handed the SAME
-            // DevAddr every time (observed: 9 verified joins of one meter, all
-            // 0x26000001). Harmless for a single-device bench responder — and the
-            // sessions map is likewise per-run — but a real LNS must allocate DevAddrs
-            // from durable state, or two devices joining in separate arms collide.
-            next_dev_addr: 0x2600_0001,
             store,
             capture: None,
         })
@@ -417,14 +406,28 @@ impl JoinResponder {
             }
         };
 
+        // DevAddr comes from the durable store, not an in-memory counter: it is stable
+        // for this DevEUI across rejoins and restarts, and two devices can never be
+        // handed the same address. `previous` being Some is what makes this a re-join.
+        let assignment = match self.store.assign_dev_addr(&jr.dev_eui_le) {
+            Ok(a) => a,
+            Err(e) => {
+                // Same rule as the DevNonce record: no durable state, no transmit.
+                println!(
+                    "join: {} — DevAddr allocation failed: {e}",
+                    jr.dev_eui_display()
+                );
+                return Ok(());
+            }
+        };
+
         let params = JoinAcceptParams {
             app_nonce: join_nonce,
             net_id: 0x0000_0013,
-            dev_addr: self.next_dev_addr,
+            dev_addr: assignment.dev_addr,
             dl_settings: 0,
             rx_delay: 1,
         };
-        self.next_dev_addr = self.next_dev_addr.wrapping_add(1);
 
         let accept = build_join_accept(&cred.app_key, &params);
         let keys = derive_session_keys(&cred.app_key, &params, jr.dev_nonce);
