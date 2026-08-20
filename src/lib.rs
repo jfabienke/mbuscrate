@@ -29,6 +29,24 @@
 //! 5. device-config reads the meter's `0x07` and sends a [`VerifyRequest`]
 //! 6. gateway → device-config: [`VerifyReply`] carrying the final [`JoinOutcome`]
 //!
+//! ## Autonomous rejoin (out-of-band, no orchestration)
+//! A device provisioned **OTAA + ADR-on** self-heals: when downlink contact is lost it
+//! runs the LoRaWAN ADR-ACK back-off (widen DR/channels/power) and ultimately emits a
+//! fresh JoinRequest — with *no optical head present*, no [`ArmRequest`], no
+//! [`FiredNotice`], and no way to read the meter's `0x07`. Only the gateway witnesses it.
+//! The gateway answers from its **standing provisioning** (known DevEUI→AppKey, persistent
+//! — not the 120 s arm window) and reports the event as a single [`RejoinObserved`] on the
+//! [`topics::rejoin`] topic. Because no optical head confirms it, the resulting
+//! [`JoinOutcome::RejoinedGatewaySide`] is **gateway-attested only** — it is *not*
+//! [`JoinOutcome::is_confirmed`].
+//!
+//! Corollary for the responder's downlink policy: the heal is triggered by downlink
+//! starvation, so the gateway should answer `ADRACKReq` with a MAC/empty downlink whenever
+//! it *hears* the device — which suppresses needless rejoins exactly when the link is fine,
+//! and (since a downlink is only possible in the RX window of an uplink it heard) leaves the
+//! heal to engage on its own when the device is genuinely out of contact. Self-correcting;
+//! no scheduling required.
+//!
 //! ## Key custody
 //! Credentials (the AppKey) are **never** carried in this protocol. They are
 //! provisioned out-of-band and held by the gateway; every message here references a
@@ -104,6 +122,28 @@ pub struct VerifyReply {
     pub outcome: JoinOutcome,
 }
 
+/// gateway → device-config / backend: an **unsolicited** rejoin was observed for a
+/// provisioned device — no arm, no fire, no optical head present (§ *Autonomous rejoin*).
+///
+/// This is the self-heal path: the gateway answered a JoinRequest from its standing
+/// provisioning and assigned a fresh DevAddr. There is no device-side `0x07` readback to
+/// reconcile against, so this event stands on the gateway's attestation alone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RejoinObserved {
+    pub dev_eui: DevEuiHex,
+    /// DevAddr the device held *before* this rejoin, from the gateway's durable store.
+    /// `None` when unknown — including until a durable per-DevEUI allocator exists (a
+    /// value must never be fabricated from an in-memory counter).
+    pub prev_dev_addr: Option<u32>,
+    /// DevAddr assigned in the JoinAccept the gateway just sent.
+    pub new_dev_addr: u32,
+    /// When the rejoin was observed (unix seconds).
+    pub ts_unix: u64,
+    /// Uplink RSSI (dBm) / SNR (dB) of the JoinRequest — link-budget diagnostics.
+    pub rssi_dbm: Option<i16>,
+    pub snr_db: Option<f32>,
+}
+
 /// The end-to-end result both sides agree on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -121,6 +161,13 @@ pub enum JoinOutcome {
     /// The meter's `0x07` DevAddr matches the gateway's assignment — joined and
     /// confirmed on both ends.
     VerifiedBothSides { dev_addr: u32 },
+    /// An **autonomous** (self-heal) rejoin the gateway answered from standing
+    /// provisioning — see [`RejoinObserved`]. Gateway-attested only: no optical head was
+    /// present to confirm it device-side, so it is joined-and-real but *not*
+    /// [`is_confirmed`](JoinOutcome::is_confirmed). The out-of-band counterpart of
+    /// [`JoinedGatewayOnly`](JoinOutcome::JoinedGatewayOnly), which arises inside an
+    /// orchestrated attempt.
+    RejoinedGatewaySide { dev_addr: u32 },
 }
 
 impl JoinOutcome {
@@ -143,8 +190,22 @@ impl JoinOutcome {
     }
 
     /// Whether the join is confirmed end-to-end (the only fully-successful state).
+    ///
+    /// `RejoinedGatewaySide` is deliberately **not** confirmed: a self-heal has no optical
+    /// witness, so it is real gateway-side but unverified device-side.
     pub fn is_confirmed(&self) -> bool {
         matches!(self, JoinOutcome::VerifiedBothSides { .. })
+    }
+
+    /// Whether the device is joined on the gateway but **not** confirmed device-side —
+    /// the "real gateway-side, unverified" states: an orchestrated
+    /// [`JoinedGatewayOnly`](JoinOutcome::JoinedGatewayOnly) or an out-of-band
+    /// [`RejoinedGatewaySide`](JoinOutcome::RejoinedGatewaySide).
+    pub fn is_joined_gateway_side(&self) -> bool {
+        matches!(
+            self,
+            JoinOutcome::JoinedGatewayOnly { .. } | JoinOutcome::RejoinedGatewaySide { .. }
+        )
     }
 }
 
@@ -172,6 +233,11 @@ pub mod topics {
     }
     pub fn verify_reply(gateway_id: &str) -> String {
         format!("join/{gateway_id}/verify_reply")
+    }
+    /// gateway → device-config / backend: an unsolicited [`RejoinObserved`](super::RejoinObserved)
+    /// (out-of-band self-heal; no arm/fire/verify context).
+    pub fn rejoin(gateway_id: &str) -> String {
+        format!("join/{gateway_id}/rejoin")
     }
 }
 
@@ -249,5 +315,53 @@ mod tests {
             topics::status("gw-pi5-01", "04B648FC80257775"),
             "join/gw-pi5-01/status/04B648FC80257775"
         );
+        assert_eq!(topics::rejoin("gw-pi5-01"), "join/gw-pi5-01/rejoin");
+    }
+
+    #[test]
+    fn rejoin_gateway_side_is_joined_but_not_confirmed() {
+        let r = JoinOutcome::RejoinedGatewaySide {
+            dev_addr: 0x2600_0007,
+        };
+        // Real gateway-side, but no optical witness → not end-to-end confirmed.
+        assert!(!r.is_confirmed());
+        assert!(r.is_joined_gateway_side());
+        // The orchestrated gateway-only state groups with it; the confirmed/failed ones don't.
+        assert!(JoinOutcome::JoinedGatewayOnly {
+            assigned_dev_addr: 0x2600_0007
+        }
+        .is_joined_gateway_side());
+        assert!(!JoinOutcome::VerifiedBothSides {
+            dev_addr: 0x2600_0007
+        }
+        .is_joined_gateway_side());
+        assert!(!JoinOutcome::NotHeard.is_joined_gateway_side());
+    }
+
+    #[test]
+    fn rejoin_observed_round_trips_with_unknown_prev_addr() {
+        // prev_dev_addr is None until the durable per-DevEUI allocator lands.
+        let ev = RejoinObserved {
+            dev_eui: "04B648FC80257775".into(),
+            prev_dev_addr: None,
+            new_dev_addr: 0x2600_0007,
+            ts_unix: 1_787_140_769,
+            rssi_dbm: Some(-98),
+            snr_db: Some(3.5),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"prev_dev_addr\":null"));
+        assert!(json.contains("\"new_dev_addr\":637534215")); // 0x26000007
+        let back: RejoinObserved = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn rejoined_gateway_side_tags_snake_case() {
+        let json = serde_json::to_string(&JoinOutcome::RejoinedGatewaySide {
+            dev_addr: 0x2600_0007,
+        })
+        .unwrap();
+        assert!(json.contains("\"outcome\":\"rejoined_gateway_side\""));
     }
 }
