@@ -126,16 +126,22 @@ pub struct VerifyReply {
 /// provisioned device — no arm, no fire, no optical head present (§ *Autonomous rejoin*).
 ///
 /// This is the self-heal path: the gateway answered a JoinRequest from its standing
-/// provisioning and assigned a fresh DevAddr. There is no device-side `0x07` readback to
-/// reconcile against, so this event stands on the gateway's attestation alone.
+/// provisioning and (re)confirmed the device's DevAddr. There is no device-side `0x07`
+/// readback to reconcile against, so this event stands on the gateway's attestation alone.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RejoinObserved {
     pub dev_eui: DevEuiHex,
-    /// DevAddr the device held *before* this rejoin, from the gateway's durable store.
-    /// `None` when unknown — including until a durable per-DevEUI allocator exists (a
-    /// value must never be fabricated from an in-memory counter).
+    /// DevAddr the device held *before* this event, from the gateway's durable store.
+    /// `None` only on the device's very first join (never seen before). The gateway
+    /// assigns addresses **stably per device**, so on a rejoin this equals
+    /// [`new_dev_addr`](Self::new_dev_addr) — i.e. `prev_dev_addr.is_some()` means "has
+    /// joined before", **not** "the address changed". (A value is never fabricated from a
+    /// non-durable counter; it comes from the gateway's persistent per-DevEUI store.)
     pub prev_dev_addr: Option<u32>,
-    /// DevAddr assigned in the JoinAccept the gateway just sent.
+    /// DevAddr in the JoinAccept the gateway just sent. **Stable per device**: a rejoin
+    /// does not rotate the address, so on a rejoin this equals
+    /// [`prev_dev_addr`](Self::prev_dev_addr). Stability avoids orphaning uplink routing
+    /// when a device self-heals.
     pub new_dev_addr: u32,
     /// When the rejoin was observed (unix seconds).
     pub ts_unix: u64,
@@ -339,8 +345,8 @@ mod tests {
     }
 
     #[test]
-    fn rejoin_observed_round_trips_with_unknown_prev_addr() {
-        // prev_dev_addr is None until the durable per-DevEUI allocator lands.
+    fn rejoin_observed_round_trips_first_join() {
+        // First join: never seen before, so prev_dev_addr is None.
         let ev = RejoinObserved {
             dev_eui: "04B648FC80257775".into(),
             prev_dev_addr: None,
@@ -353,6 +359,25 @@ mod tests {
         assert!(json.contains("\"prev_dev_addr\":null"));
         assert!(json.contains("\"new_dev_addr\":637534215")); // 0x26000007
         let back: RejoinObserved = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn rejoin_keeps_stable_dev_addr() {
+        // Stable-per-device addressing: on a re-join prev == new. "Has joined before" is
+        // prev_dev_addr.is_some(), NOT prev != new (which stays false — no rotation).
+        let ev = RejoinObserved {
+            dev_eui: "04B648FC80257775".into(),
+            prev_dev_addr: Some(0x2600_0007),
+            new_dev_addr: 0x2600_0007,
+            ts_unix: 1_787_227_200,
+            rssi_dbm: Some(-101),
+            snr_db: Some(1.0),
+        };
+        assert!(ev.prev_dev_addr.is_some(), "device has joined before");
+        assert_eq!(ev.prev_dev_addr, Some(ev.new_dev_addr), "address is stable");
+        let back: RejoinObserved =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         assert_eq!(ev, back);
     }
 
