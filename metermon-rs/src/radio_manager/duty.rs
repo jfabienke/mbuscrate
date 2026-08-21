@@ -14,30 +14,57 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// The EU868 sub-bands this gateway transmits in.
+/// EU868 sub-bands, as the full ETSI table rather than the two we happened to use first.
+///
+/// An earlier version of this knew only g1 and g3, which would have **refused legal
+/// transmissions**: LoRaWAN's optional EU868 channels at 867.1–867.9 MHz fall in `G`
+/// (865–868 MHz, 1 %), and an incomplete table reports them as `UnknownBand`. Since the
+/// safe default here is to refuse, an incomplete table is not merely imprecise — it
+/// silently disables channels the network is entitled to use.
+///
+/// The gaps between bands (868.6–868.7, 869.2–869.4, 869.65–869.7) carry no allowance and
+/// are refused deliberately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubBand {
-    /// 868.0–868.6 MHz — 1 %. LoRaWAN uplink channels and our wM-Bus band.
+    /// 863–865 MHz, 0.1 %.
+    LowSrd,
+    /// 865–868 MHz, 1 % — includes the optional LoRaWAN channels at 867.1–867.9.
+    G,
+    /// 868.0–868.6 MHz, 1 % — the three mandatory LoRaWAN join channels.
     G1,
-    /// 869.4–869.65 MHz — 10 %. RX2 lives here, which is why RX2 may run at full power.
+    /// 868.7–869.2 MHz, 0.1 % — **wM-Bus mode C (868.95) lives here.**
+    G2,
+    /// 869.4–869.65 MHz, 10 % — RX2, which is why it may run at full power.
     G3,
+    /// 869.7–870 MHz, 1 %.
+    G4,
 }
 
+/// `(low_hz, high_hz, band)`, inclusive of both edges. Matches the driver's backstop table.
+const EU868_BANDS: &[(u32, u32, SubBand)] = &[
+    (863_000_000, 865_000_000, SubBand::LowSrd),
+    (865_000_000, 868_000_000, SubBand::G),
+    (868_000_000, 868_600_000, SubBand::G1),
+    (868_700_000, 869_200_000, SubBand::G2),
+    (869_400_000, 869_650_000, SubBand::G3),
+    (869_700_000, 870_000_000, SubBand::G4),
+];
+
 impl SubBand {
-    /// The sub-band a carrier falls in, or `None` if we have no rule for it (in which case
-    /// the caller must refuse rather than assume).
+    /// The sub-band a carrier falls in, or `None` in a gap or outside EU868 — in which case
+    /// the caller must refuse rather than assume an allowance.
     pub fn for_frequency(hz: u32) -> Option<Self> {
-        match hz {
-            868_000_000..=868_600_000 => Some(SubBand::G1),
-            869_400_000..=869_650_000 => Some(SubBand::G3),
-            _ => None,
-        }
+        EU868_BANDS
+            .iter()
+            .find(|(lo, hi, _)| hz >= *lo && hz <= *hi)
+            .map(|(_, _, b)| *b)
     }
 
     /// Permitted fraction of any observation window.
     pub fn limit(&self) -> f64 {
         match self {
-            SubBand::G1 => 0.01,
+            SubBand::LowSrd | SubBand::G2 => 0.001,
+            SubBand::G | SubBand::G1 | SubBand::G4 => 0.01,
             SubBand::G3 => 0.10,
         }
     }
@@ -159,8 +186,16 @@ mod tests {
     fn sub_bands_are_identified_from_the_carrier() {
         assert_eq!(SubBand::for_frequency(868_100_000), Some(SubBand::G1)); // LoRaWAN ch0
         assert_eq!(SubBand::for_frequency(868_500_000), Some(SubBand::G1)); // ch2
-        assert_eq!(SubBand::for_frequency(868_950_000), None); // wM-Bus mode C: no rule held
         assert_eq!(SubBand::for_frequency(869_525_000), Some(SubBand::G3)); // RX2
+                                                                            // The bug this table replaced: 867.x are STANDARD optional LoRaWAN channels and an
+                                                                            // incomplete table refused them, silently disabling channels we may legally use.
+        assert_eq!(SubBand::for_frequency(867_100_000), Some(SubBand::G));
+        assert_eq!(SubBand::for_frequency(867_900_000), Some(SubBand::G));
+        // wM-Bus mode C sits in g2 at 0.1% — we only receive there, but the rule exists.
+        assert_eq!(SubBand::for_frequency(868_950_000), Some(SubBand::G2));
+        // Gaps between bands carry no allowance and are refused, not guessed.
+        assert_eq!(SubBand::for_frequency(868_650_000), None);
+        assert_eq!(SubBand::for_frequency(869_300_000), None);
         assert_eq!(SubBand::for_frequency(433_000_000), None);
     }
 
