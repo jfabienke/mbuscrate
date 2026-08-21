@@ -36,6 +36,7 @@ mod sweep;
 mod sx1262_probe;
 #[cfg(feature = "radio")]
 mod sx1262_rx;
+mod thermal;
 mod upsync;
 
 use anyhow::Result;
@@ -148,6 +149,24 @@ enum Cmd {
         shadow: bool,
     },
     /// Show the device manager's stored device table and recent events (no radio).
+    /// Report SoC temperature, fan speed and ARM clock. With `--watch` it samples
+    /// continuously — the tool for a thermal soak test, e.g. measuring what stacking a
+    /// concentrator HAT over the cooler costs.
+    Thermal {
+        /// Sample continuously instead of printing one snapshot and exiting.
+        #[arg(long)]
+        watch: bool,
+        /// Seconds between samples in `--watch`.
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+        /// Stop after this many seconds (0 = run until interrupted).
+        #[arg(long, default_value_t = 0)]
+        seconds: u64,
+        /// Emit one JSON object per sample instead of the human table, for logging a soak
+        /// run to a file and analysing it later.
+        #[arg(long)]
+        json: bool,
+    },
     Devices {
         /// redb device-manager store written by `monitor` (open it with the monitor stopped).
         #[arg(long, default_value = "metermon-devices.redb")]
@@ -437,6 +456,12 @@ fn main() -> Result<()> {
             sweep_hours,
             shadow,
         } => run_monitor(&config, report, keys.as_deref(), &db, sweep_hours, shadow),
+        Cmd::Thermal {
+            watch,
+            interval,
+            seconds,
+            json,
+        } => run_thermal(watch, interval, seconds, json),
         Cmd::Devices {
             db,
             events,
@@ -688,6 +713,89 @@ fn run_sweep(_config_path: &str, _db: &str, _seconds: u64) -> Result<()> {
 }
 
 /// Show the device manager store (device table + recent events). Host-independent.
+/// Print SoC thermal/fan state once, or sample it continuously.
+///
+/// The watch mode is the instrument for a thermal soak: run it before and after stacking a
+/// HAT over the cooler and compare the steady-state temperature, fan duty and clock. It
+/// also reports the peak and whether the SoC ever throttled, which is the number that
+/// actually decides whether an underclock is needed.
+fn run_thermal(watch: bool, interval: u64, seconds: u64, json: bool) -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let sample = |t: &thermal::SocThermal| {
+        if json {
+            let mut v = t.to_json_value();
+            v["ts"] = serde_json::json!(devices::now_unix());
+            v["status"] = serde_json::json!(t.status().as_str());
+            println!("{v}");
+        } else {
+            println!("{}  {}", devices::now_unix(), t.summary());
+        }
+    };
+
+    let first = thermal::SocThermal::read();
+    if !watch {
+        sample(&first);
+        if first.cpu_temp_c.is_none() {
+            eprintln!(
+                "note: no thermal sysfs here — this reports the *host* SoC, so run it on the gateway"
+            );
+        }
+        return Ok(());
+    }
+
+    let start = Instant::now();
+    let interval = Duration::from_secs(interval.max(1));
+    let mut peak = f32::MIN;
+    let mut peak_at = 0u64;
+    let mut throttled_ever = false;
+    let mut stalled_ever = false;
+    let mut n = 0u64;
+    let mut sum = 0.0f64;
+
+    loop {
+        let t = thermal::SocThermal::read();
+        sample(&t);
+        if let Some(c) = t.cpu_temp_c {
+            if c > peak {
+                peak = c;
+                peak_at = start.elapsed().as_secs();
+            }
+            sum += c as f64;
+            n += 1;
+        }
+        match t.status() {
+            thermal::ThermalStatus::Throttling => throttled_ever = true,
+            thermal::ThermalStatus::FanStalled => stalled_ever = true,
+            _ => {}
+        }
+        if seconds > 0 && start.elapsed().as_secs() >= seconds {
+            break;
+        }
+        std::thread::sleep(interval);
+    }
+
+    if n > 0 {
+        println!("\n===== thermal soak summary =====");
+        println!("samples   : {n} over {}s", start.elapsed().as_secs());
+        println!("mean      : {:.1} °C", sum / n as f64);
+        println!("peak      : {peak:.1} °C (at +{peak_at}s)");
+        println!(
+            "throttled : {}",
+            if throttled_ever {
+                "YES — the SoC lost clock; add cooling or underclock"
+            } else {
+                "no"
+            }
+        );
+        if stalled_ever {
+            println!("fan       : STALLED at least once — commanded but not turning");
+        }
+        println!("================================");
+    }
+    Ok(())
+}
+
 fn run_devices(db: &str, events: usize, prune_ghosts: bool) -> Result<()> {
     let dm = devices::DeviceManager::open_readonly(db)?;
     if prune_ghosts {
@@ -1199,6 +1307,15 @@ fn run_monitor(
                 // boot still trips the watchdog rather than waiting forever for a first frame.
                 let frame_age = last_frame_at.map(|t| t.elapsed().as_secs());
                 let stall_age = frame_age.unwrap_or(uptime);
+                // SoC thermals: a throttling or fan-stalled gateway degrades silently, so
+                // surface it in the log as well as the health topic. Warn only on the
+                // actionable states to keep an unattended log readable.
+                let soc = thermal::SocThermal::read();
+                let soc_status = soc.status();
+                if soc_status.is_alarm() {
+                    log::warn!("thermal: {}", soc.summary());
+                }
+
                 let gw = health::GatewayHealth {
                     gwid: cfg.gwid.clone(),
                     status: "online",
@@ -1218,8 +1335,10 @@ fn run_monitor(
                     meters_seen: stats.len(),
                     crc_pass_pct: (total > 0).then(|| (ok * 100 / total) as u8),
                     keys_held: nkeys,
-                    cpu_temp_c: health::read_cpu_temp_c(),
+                    cpu_temp_c: soc.cpu_temp_c.or_else(health::read_cpu_temp_c),
                     load_avg_1m: health::read_load_avg_1m(),
+                    thermal_status: soc_status.as_str(),
+                    soc,
                 };
                 if let Some(p) = publisher.as_mut() {
                     if let Err(e) = p.publish_to(&health_topic, &gw.to_json()) {

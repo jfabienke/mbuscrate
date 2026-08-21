@@ -82,6 +82,18 @@ pub struct GatewayHealth {
     // --- system (Linux/Pi; None where unavailable, e.g. off-device) ---
     pub cpu_temp_c: Option<f32>,
     pub load_avg_1m: Option<f32>,
+
+    // --- SoC thermal / fan (see `crate::thermal`) ---
+    /// Fan speed, commanded duty, cooling step and clock. Flattened into the health JSON
+    /// so a dashboard sees `fan_rpm`/`cpu_freq_mhz` alongside the radio fields rather than
+    /// nested. `cpu_temp_c` above is kept for backward compatibility with existing
+    /// consumers and carries the same reading.
+    #[serde(flatten)]
+    pub soc: crate::thermal::SocThermal,
+    /// Classification of `soc` — "ok" / "warm" / "hot" / "throttling" / "fan-stalled".
+    /// This is the field to alarm on; a throttling or fan-stalled gateway degrades
+    /// silently otherwise.
+    pub thermal_status: &'static str,
 }
 
 impl GatewayHealth {
