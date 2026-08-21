@@ -877,7 +877,7 @@ mod tests {
         let dm = DeviceManager::open(&tmp_db(), 20, 600).unwrap();
         let mut o = obs(74644444, true, false);
         o.mode = "C".into();
-        o.freq_offset_hz = 305;
+        o.freq_offset_hz = Some(305);
         dm.record_frame(&o).unwrap();
 
         let txn = dm.db.begin_read().unwrap();
@@ -885,7 +885,24 @@ mod tests {
         let raw = dtab.get(74644444u32).unwrap().unwrap();
         let rec: DeviceRecord = serde_json::from_str(raw.value()).unwrap();
         assert_eq!(rec.mode, "C");
-        assert_eq!(rec.last_freq_offset_hz, 305);
+        assert_eq!(rec.last_freq_offset_hz, Some(305));
+    }
+
+    #[test]
+    fn an_unmeasured_offset_is_stored_as_none_not_zero() {
+        // The bug this replaced: GFSK has no frequency-error register on the SX126x, so
+        // every wM-Bus frame reported "+0 Hz" -- a measurement the chip never made.
+        let dm = DeviceManager::open(&tmp_db(), 20, 600).unwrap();
+        let mut o = obs(74644445, true, false);
+        o.mode = "C".into();
+        o.freq_offset_hz = None;
+        dm.record_frame(&o).unwrap();
+
+        let txn = dm.db.begin_read().unwrap();
+        let dtab = txn.open_table(DEVICES).unwrap();
+        let raw = dtab.get(74644445u32).unwrap().unwrap();
+        let rec: DeviceRecord = serde_json::from_str(raw.value()).unwrap();
+        assert_eq!(rec.last_freq_offset_hz, None);
     }
 
     /// Count events of a given kind for a meter (test helper).
