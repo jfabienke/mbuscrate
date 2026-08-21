@@ -1,0 +1,26 @@
+[package]
+name = "mbus-core"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.81"          # core::error::Error
+license = "MIT OR Apache-2.0"
+description = "Protocol core for M-Bus / wireless M-Bus and LoRaWAN: parsing, decoding and cryptography with no hardware, no OS and no clock. `no_std` + `alloc`."
+repository = "https://github.com/jfabienke/mbuscrate"
+
+[dependencies]
+# Everything here must be no_std-capable. A dependency that needs std belongs in
+# mbus-rs, not in this crate — that rule is what keeps the split honest.
+aes    = { version = "0.8", optional = true }
+cmac   = { version = "0.7", optional = true }
+subtle = { version = "2.6", default-features = false, optional = true }
+
+[features]
+default = ["std", "crypto"]
+# `std` adds the standard library on top of the core. The crate is written
+# no_std-first; this feature only turns on std-specific conveniences.
+std = []
+# LoRaWAN / OMS cryptography. Pulls RustCrypto, all no_std-capable.
+crypto = ["dep:aes", "dep:cmac", "dep:subtle"]
+
+[dev-dependencies]
+hex = "0.4"

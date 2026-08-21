@@ -36,7 +36,13 @@ pub mod constants;
 pub mod error;
 pub mod instrumentation;
 pub mod logging;
-pub mod lorawan;
+/// LoRaWAN 1.0.x join and data-frame cryptography.
+///
+/// Moved to the `mbus-core` crate, which builds `no_std` + `alloc` for microcontrollers.
+/// Re-exported here so every existing `mbus_rs::lorawan::…` path keeps working — the
+/// split is an internal reorganisation, not an API break.
+#[cfg(feature = "crypto")]
+pub use mbus_core::lorawan;
 pub mod mbus;
 pub mod mbus_device_manager;
 pub mod payload;

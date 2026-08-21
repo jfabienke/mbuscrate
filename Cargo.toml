@@ -1,3 +1,11 @@
+[workspace]
+members = [".", "mbus-core"]
+# metermon-rs stays OUT of the workspace, as it was before the split. It carries an
+# optional path dependency on a sibling repo that is not checked out in this repo's CI,
+# and workspace members share dependency resolution — making it a member would make a
+# default CI build depend on a directory that may not exist.
+exclude = ["metermon-rs"]
+
 [package]
 name = "mbus-rs"
 version = "1.0.0"
@@ -8,6 +16,9 @@ repository = "https://github.com/jfabienke/mbus-rs"
 license = "MIT"
 
 [dependencies]
+# Protocol core: no_std + alloc, no hardware, no OS, no clock. See mbus-core/src/lib.rs
+# for the rule that keeps the split honest.
+mbus-core = { path = "mbus-core", default-features = false, features = ["std", "crypto"] }
 hex = "0.4"
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }

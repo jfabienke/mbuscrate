@@ -1,3 +1,10 @@
+# Its own workspace root, as it was before mbus-core was split out. metermon-rs
+# carries an optional path dependency on a sibling repo that is not always checked
+# out; workspace members share dependency resolution, so joining the parent
+# workspace would make a default build of this repo depend on a directory that may
+# not exist.
+[workspace]
+
 [package]
 name = "metermon-rs"
 version = "0.1.0"

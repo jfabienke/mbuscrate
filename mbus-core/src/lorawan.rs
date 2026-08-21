@@ -24,7 +24,9 @@
 //! FCnt. The `_le` suffixes below are a reminder that these are wire-order bytes,
 //! not display order: an EUI shown as `70:B3:D5:...` is transmitted reversed.
 
-#![cfg(feature = "crypto")]
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
@@ -44,8 +46,8 @@ pub enum LoRaWanError {
     InvalidField(&'static str),
 }
 
-impl std::fmt::Display for LoRaWanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for LoRaWanError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::TooShort { needed, actual } => {
                 write!(f, "frame too short: needed {needed}, got {actual}")
@@ -59,7 +61,7 @@ impl std::fmt::Display for LoRaWanError {
     }
 }
 
-impl std::error::Error for LoRaWanError {}
+impl core::error::Error for LoRaWanError {}
 
 /// MHDR message types (bits 7:5).
 pub const MTYPE_JOIN_REQUEST: u8 = 0x00;
@@ -344,9 +346,20 @@ pub enum JoinAdmission {
 }
 
 /// Error from a [`JoinStore`] backend.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("join store: {0}")]
+///
+/// Hand-written rather than derived: `thiserror` would be the crate's only
+/// non-cryptographic dependency, and a one-field newtype does not justify one in a core
+/// whose portability rests on having almost nothing to port.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinStoreError(pub String);
+
+impl core::fmt::Display for JoinStoreError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "join store: {}", self.0)
+    }
+}
+
+impl core::error::Error for JoinStoreError {}
 
 /// Durable per-device join state — the persistence a 1.0.4 network side requires.
 ///
@@ -379,10 +392,10 @@ pub trait JoinStore {
 /// the gap the redb-backed store closes — so production must not use this.
 #[derive(Debug, Default)]
 pub struct InMemoryJoinStore {
-    last_dev_nonce: std::collections::HashMap<[u8; 8], u16>,
-    next_join_nonce: std::collections::HashMap<[u8; 8], u32>,
+    last_dev_nonce: alloc::collections::BTreeMap<[u8; 8], u16>,
+    next_join_nonce: alloc::collections::BTreeMap<[u8; 8], u32>,
     /// Window of recently-accepted DevNonces per device, for the 1.0.2 policy.
-    recent: std::collections::HashMap<[u8; 8], Vec<u16>>,
+    recent: alloc::collections::BTreeMap<[u8; 8], Vec<u16>>,
     policy: DevNoncePolicy,
 }
 
