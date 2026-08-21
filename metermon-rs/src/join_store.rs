@@ -11,16 +11,22 @@
 //! JoinAccept. See docs/design/lorawan-join-persistence.md.
 
 use mbus_rs::lorawan::{
-    admit_dev_nonce, admit_dev_nonce_windowed, DevNoncePolicy, DevNonceVerdict, JoinAdmission,
-    JoinStore, JoinStoreError,
+    admit_dev_nonce, admit_dev_nonce_windowed, DevAddrAssignment, DevNoncePolicy, DevNonceVerdict,
+    JoinAdmission, JoinStore, JoinStoreError, DEV_ADDR_BASE,
 };
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::Path;
 use std::sync::Arc;
 
 /// Per-device join state: `dev_eui` hex (matching the store's other string keys) ->
 /// JSON `{"last_dev_nonce":u16,"next_join_nonce":u32,"seen":bool,"recent_nonces":[u16]}`.
 const JOIN_STATE: TableDefinition<&str, &str> = TableDefinition::new("join_state");
+
+/// DevAddr allocator high-water: the single key `"next"` -> the next address to hand
+/// out. Its own table rather than a reserved key in [`JOIN_STATE`], so it can never be
+/// confused with a DevEUI-keyed [`JoinRecord`].
+const DEV_ADDR_ALLOC: TableDefinition<&str, u64> = TableDefinition::new("dev_addr_alloc");
+const ALLOC_KEY: &str = "next";
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct JoinRecord {
@@ -35,6 +41,11 @@ struct JoinRecord {
     /// an empty window and get seeded from `last_dev_nonce` on their next join.
     #[serde(default)]
     recent_nonces: Vec<u16>,
+    /// The DevAddr allocated to this device, stable across rejoins. `#[serde(default)]`
+    /// so records written before the allocator existed load as unallocated and get an
+    /// address on their next join.
+    #[serde(default)]
+    dev_addr: Option<u32>,
 }
 
 pub struct RedbJoinStore {
@@ -171,9 +182,15 @@ impl JoinStore for RedbJoinStore {
         let existing = self.read(dev_eui)?;
         let rec = JoinRecord {
             last_dev_nonce: 0,
-            next_join_nonce: existing.map(|r| r.next_join_nonce.max(1)).unwrap_or(1),
+            next_join_nonce: existing
+                .as_ref()
+                .map(|r| r.next_join_nonce.max(1))
+                .unwrap_or(1),
             seen: false,
             recent_nonces: Vec::new(),
+            // Keep the address: a re-provisioned device is still the same device, and
+            // dropping it here would both orphan routing and leak an address.
+            dev_addr: existing.and_then(|r| r.dev_addr),
         };
         let json = serde_json::to_string(&rec).map_err(err)?;
         let w = self.db.begin_write().map_err(err)?;
@@ -184,6 +201,51 @@ impl JoinStore for RedbJoinStore {
         }
         w.commit().map_err(err)?;
         Ok(())
+    }
+
+    fn assign_dev_addr(&mut self, dev_eui: &[u8; 8]) -> Result<DevAddrAssignment, JoinStoreError> {
+        let existing = self.read(dev_eui)?;
+        if let Some(addr) = existing.as_ref().and_then(|r| r.dev_addr) {
+            // Already allocated: the device keeps its address across rejoins, and the
+            // presence of one is exactly what makes this a re-join.
+            return Ok(DevAddrAssignment {
+                dev_addr: addr,
+                previous: Some(addr),
+            });
+        }
+
+        let mut rec = existing.unwrap_or_default();
+        // Allocate and record in ONE write transaction: a crash between bumping the
+        // high-water and storing the device's address would otherwise either leak an
+        // address or, worse, hand the same one out twice.
+        let w = self.db.begin_write().map_err(err)?;
+        let assigned;
+        {
+            let mut alloc = w.open_table(DEV_ADDR_ALLOC).map_err(err)?;
+            let next = alloc
+                .get(ALLOC_KEY)
+                .map_err(err)?
+                .map(|v| v.value() as u32)
+                .unwrap_or(DEV_ADDR_BASE);
+            assigned = next;
+            alloc
+                .insert(ALLOC_KEY, next.wrapping_add(1) as u64)
+                .map_err(err)?;
+
+            rec.dev_addr = Some(assigned);
+            if rec.next_join_nonce == 0 {
+                rec.next_join_nonce = 1;
+            }
+            let json = serde_json::to_string(&rec).map_err(err)?;
+            let mut t = w.open_table(JOIN_STATE).map_err(err)?;
+            t.insert(key(dev_eui).as_str(), json.as_str())
+                .map_err(err)?;
+        }
+        w.commit().map_err(err)?; // durable before the caller transmits a JoinAccept
+        Ok(DevAddrAssignment {
+            dev_addr: assigned,
+            previous: None,
+        })
     }
 }
 
@@ -301,6 +363,113 @@ mod tests {
         let adm = s.admit_join(&eui, 0).unwrap();
         // ...but the JoinNonce keeps climbing (must never go backwards).
         assert_eq!(adm, JoinAdmission::Admitted { join_nonce: 3 });
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod dev_addr_tests {
+    use super::*;
+
+    fn temp_db(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("mbus_devaddr_test_{name}.redb"));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn two_devices_never_share_an_address() {
+        // The bug this replaces: an in-memory counter restarting per responder handed
+        // 0x26000001 to every device that joined in a separate window.
+        let path = temp_db("distinct");
+        let mut s = RedbJoinStore::open(&path).unwrap();
+        let a = s.assign_dev_addr(&[0xAA; 8]).unwrap();
+        let b = s.assign_dev_addr(&[0xBB; 8]).unwrap();
+        assert_eq!(a.dev_addr, DEV_ADDR_BASE);
+        assert_eq!(b.dev_addr, DEV_ADDR_BASE + 1);
+        assert_ne!(a.dev_addr, b.dev_addr);
+        assert_eq!(a.previous, None); // both first-ever allocations
+        assert_eq!(b.previous, None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_device_keeps_its_address_across_rejoins_and_reports_the_previous() {
+        let path = temp_db("stable");
+        let mut s = RedbJoinStore::open(&path).unwrap();
+        let first = s.assign_dev_addr(&[0xCC; 8]).unwrap();
+        assert_eq!(first.previous, None);
+        assert!(!first.is_rejoin());
+
+        let again = s.assign_dev_addr(&[0xCC; 8]).unwrap();
+        assert_eq!(again.dev_addr, first.dev_addr, "address must be stable");
+        assert_eq!(again.previous, Some(first.dev_addr));
+        assert!(
+            again.is_rejoin(),
+            "a device that already had one is re-joining"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn allocation_survives_a_restart() {
+        // The whole point: reopening must not restart the counter at the base and
+        // re-issue an address already in use.
+        let path = temp_db("restart");
+        let first = {
+            let mut s = RedbJoinStore::open(&path).unwrap();
+            s.assign_dev_addr(&[0x11; 8]).unwrap().dev_addr
+        };
+        {
+            let mut s = RedbJoinStore::open(&path).unwrap(); // "restart"
+            let same = s.assign_dev_addr(&[0x11; 8]).unwrap();
+            assert_eq!(same.dev_addr, first, "known device keeps its address");
+            assert_eq!(same.previous, Some(first));
+
+            let fresh = s.assign_dev_addr(&[0x22; 8]).unwrap();
+            assert_ne!(fresh.dev_addr, first, "a new device must not reuse it");
+            assert_eq!(fresh.dev_addr, first + 1, "high-water survived the restart");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_dev_nonce_reset_keeps_the_address() {
+        // Re-provisioning a factory-reset device is still the same device: dropping the
+        // address would orphan routing and leak an address from the pool.
+        let path = temp_db("reset");
+        let mut s = RedbJoinStore::open(&path).unwrap();
+        let before = s.assign_dev_addr(&[0x33; 8]).unwrap().dev_addr;
+        s.admit_join(&[0x33; 8], 7).unwrap();
+        s.reset_dev_nonce(&[0x33; 8]).unwrap();
+        let after = s.assign_dev_addr(&[0x33; 8]).unwrap();
+        assert_eq!(after.dev_addr, before);
+        assert_eq!(after.previous, Some(before));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn records_written_before_the_allocator_existed_get_an_address() {
+        // Forward-compat: an existing deployment's join_state rows have no dev_addr
+        // field. They must load (serde default) and allocate on next join, not fail.
+        let path = temp_db("migrate");
+        let mut s = RedbJoinStore::open(&path).unwrap();
+        let eui = [0x44u8; 8];
+        // Write a legacy-shaped record: no dev_addr key at all.
+        let legacy = r#"{"last_dev_nonce":5,"next_join_nonce":3,"seen":true,"recent_nonces":[5]}"#;
+        let w = s.db.begin_write().unwrap();
+        {
+            let mut t = w.open_table(JOIN_STATE).unwrap();
+            t.insert(key(&eui).as_str(), legacy).unwrap();
+        }
+        w.commit().unwrap();
+
+        let a = s.assign_dev_addr(&eui).unwrap();
+        assert_eq!(a.previous, None, "legacy record had no address");
+        assert_eq!(a.dev_addr, DEV_ADDR_BASE);
+        // ...and the pre-existing DevNonce state must be preserved, not clobbered.
+        assert_eq!(s.last_dev_nonce(&eui), Some(5));
         let _ = std::fs::remove_file(&path);
     }
 }
