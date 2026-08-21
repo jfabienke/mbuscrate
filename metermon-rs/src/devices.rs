@@ -64,9 +64,15 @@ struct DeviceRecord {
     /// written before mode tracking existed).
     #[serde(default)]
     mode: String,
-    /// Last AFC-measured carrier offset from the 868.95 MHz center, in Hz.
+    /// Last measured carrier offset from the 868.95 MHz centre, in Hz, or `None` where
+    /// the hardware does not measure it.
+    ///
+    /// **`None` on an SX126x in GFSK**: the frequency-error registers belong to the LoRa
+    /// modem and there is no GFSK equivalent. This was `i32` filled with a default 0,
+    /// so the `off(Hz)` column reported "exactly zero" for every meter we have ever
+    /// seen — a measurement the chip never made.
     #[serde(default)]
-    last_freq_offset_hz: i32,
+    last_freq_offset_hz: Option<i32>,
     /// Quirk ids applied to this device's decodes (vendor-layers P5): a consumer of
     /// the store can tell an overridden reading from a standard one. Empty for
     /// records written before quirk tracking existed.
@@ -154,8 +160,9 @@ pub struct Observation {
     pub reading: Option<String>,
     /// Radio mode this frame was received on ("C" today — single-channel mode-C RX).
     pub mode: String,
-    /// AFC-measured carrier offset from the 868.95 MHz center for this frame, in Hz.
-    pub freq_offset_hz: i32,
+    /// Measured carrier offset from the 868.95 MHz centre for this frame, in Hz, or
+    /// `None` where the hardware does not measure it (always `None` for GFSK on SX126x).
+    pub freq_offset_hz: Option<i32>,
     /// Vendor quirk ids that fired while decoding this frame (vendor-layers P5).
     pub applied_quirks: Vec<String>,
 }
@@ -630,7 +637,9 @@ impl DeviceManager {
                     r.manufacturer,
                     r.type_name,
                     r.last_rssi,
-                    r.last_freq_offset_hz,
+                    r.last_freq_offset_hz
+                        .map(|v| format!("{v:+}"))
+                        .unwrap_or_else(|| "-".into()),
                     if r.has_key { "yes" } else { "-" },
                 );
             }
@@ -723,7 +732,7 @@ impl DeviceManager {
                         last_reading: od.last_reading.clone(),
                         // Old SQLite dumps predate mode/frequency/quirk tracking.
                         mode: String::new(),
-                        last_freq_offset_hz: 0,
+                        last_freq_offset_hz: None,
                         applied_quirks: Vec::new(),
                     },
                 };
@@ -858,7 +867,7 @@ mod tests {
             has_key,
             reading: None,
             mode: "C".into(),
-            freq_offset_hz: 0,
+            freq_offset_hz: None,
             applied_quirks: Vec::new(),
         }
     }
