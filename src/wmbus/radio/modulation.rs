@@ -261,6 +261,22 @@ pub struct TimeOnAir {
 }
 
 /// Encoding types for different wM-Bus modes
+///
+/// This enum describes the *cost* of each encoding, which is all the time-on-air
+/// calculation needs. The chip-level codecs themselves are not implemented: the gateway
+/// only receives, and mode C is NRZ, so nothing has ever needed to encode or decode
+/// Manchester or 3-out-of-6.
+///
+/// If mode S or mode T transmit is ever implemented, do not write them from scratch —
+/// a never-compiled draft (`manchester_encode` / `three_out_of_six_encode` / `nrz_encode`)
+/// was deleted along with the rest of the orphaned modules. Recover it with:
+///
+/// ```text
+/// git show 47a53bc:src/wmbus/encoding.rs
+/// ```
+///
+/// Treat it as a starting point rather than working code: it never type-checked, and it
+/// carried a duplicate of this enum which is the copy that should survive.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EncodingType {
     /// Manchester encoding (S-mode): 2 chips per bit

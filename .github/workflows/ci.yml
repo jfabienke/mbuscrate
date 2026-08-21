@@ -106,3 +106,9 @@ jobs:
       # README: that is a consequence of the API allocating, and only heapless removes it.
       - name: Panic-freedom ratchet
         run: ./mbus-core/panic-probe/check-panic-free.sh
+
+      # Undeclared .rs files are invisible to rustc -- not dead code, simply not part of
+      # the crate. Six accumulated here unnoticed over eleven months because no tool in
+      # the pipeline had any reason to object.
+      - name: No orphaned modules
+        run: ./scripts/check-orphan-modules.sh
