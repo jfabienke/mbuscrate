@@ -19,7 +19,14 @@ pub enum SourceFrame {
     Wmbus {
         bytes: Vec<u8>,
         rssi_dbm: i16,
-        freq_off_hz: i32,
+        /// Frequency error in Hz, or `None` where the hardware does not measure it.
+        ///
+        /// **`None` for every wM-Bus frame on an SX126x.** The chip's frequency-error
+        /// registers (0x076B) belong to the LoRa modem; there is no GFSK equivalent. This
+        /// was previously `unwrap_or(0)`, which reported "error is exactly zero" — a
+        /// suspiciously precise measurement — where the truth is "not measured". A value
+        /// the chip did not produce must not look like one it did.
+        freq_off_hz: Option<i32>,
     },
     Lora {
         bytes: Vec<u8>,
@@ -116,7 +123,7 @@ impl Rfm69Source {
             .map(|p| SourceFrame::Wmbus {
                 bytes: p.data,
                 rssi_dbm: p.rssi_dbm,
-                freq_off_hz: p.freq_error_hz.unwrap_or(0),
+                freq_off_hz: p.freq_error_hz,
             }))
     }
 
@@ -374,7 +381,7 @@ impl Sx1262Source {
             frame = Some(SourceFrame::Wmbus {
                 bytes: buf,
                 rssi_dbm,
-                freq_off_hz: 0,
+                freq_off_hz: None,
             });
         }
         // Clear everything seen (preamble/sync events included) so DIO1 releases
