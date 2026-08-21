@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_whose_START_is_clipped_is_blanked() {
+    fn a_frame_whose_start_is_clipped_is_blanked() {
         // The reason overlaps() takes the frame start, not the moment of delivery: this
         // frame is handed up after the window closes, but its opening bytes were stepped on.
         let base = t0();
@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_whose_END_is_clipped_is_blanked() {
+    fn a_frame_whose_end_is_clipped_is_blanked() {
         let base = t0();
         let mut b = Blanking::new(ms(60_000));
         b.register(TxWindow::new(RadioId::Lora, base + ms(300), ms(200)));
