@@ -29,6 +29,7 @@ mod lora_rx;
 mod mock_backend;
 mod profiles;
 mod publish;
+mod radio_manager;
 mod source;
 mod sweep;
 #[cfg(feature = "radio")]
