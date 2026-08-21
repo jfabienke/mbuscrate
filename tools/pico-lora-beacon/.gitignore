@@ -1,1 +1,5 @@
-build/
+# CMake build trees. These must never be committed: the Pico SDK bakes ABSOLUTE
+# source paths into CMakeFiles/*.dir/, so an object-file path here reached 277
+# characters and broke `git checkout` on Windows ("Filename too long", limit 260),
+# which failed the whole CI test matrix while the Linux jobs passed.
+build*/
