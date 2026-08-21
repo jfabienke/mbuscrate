@@ -13,6 +13,10 @@ repository = "https://github.com/jfabienke/mbuscrate"
 aes    = { version = "0.8", optional = true }
 cmac   = { version = "0.7", optional = true }
 subtle = { version = "2.6", default-features = false, optional = true }
+# Logging is the caller's choice, not the core's: no `log`, no `defmt` unless asked.
+# With this feature the public types gain `defmt::Format`, so an Embassy gateway can
+# emit them over RTT without the core taking a logging dependency in any other build.
+defmt  = { version = "0.3", optional = true }
 
 [features]
 default = ["std", "crypto"]
@@ -21,6 +25,11 @@ default = ["std", "crypto"]
 std = []
 # LoRaWAN / OMS cryptography. Pulls RustCrypto, all no_std-capable.
 crypto = ["dep:aes", "dep:cmac", "dep:subtle"]
+# `defmt::Format` on the public types, for Embassy/RTT logging.
+# `defmt/alloc` is needed only because the public types still carry `Vec`/`String`.
+# The heapless work removes that dependency: fixed-capacity types implement `Format`
+# natively, so this becomes plain `dep:defmt`.
+defmt = ["dep:defmt", "defmt/alloc"]
 
 [dev-dependencies]
 hex = "0.4"

@@ -582,7 +582,16 @@ impl JoinResponder {
             fport: None,
             frm_payload: Vec::new(),
         };
-        let frame = build_data_down(&nwk, &app, &params);
+        // `build_data_down` now reports an over-long FOpts as an error rather than
+        // panicking. Ours is a fixed 5-byte LinkADRReq so this cannot fire, but the
+        // responder must not abort a session on a downlink it failed to build.
+        let frame = match build_data_down(&nwk, &app, &params) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("pin: {dev_addr:08X} — could not build LinkADRReq: {e}");
+                return Ok(());
+            }
+        };
 
         // Data RX1 is the uplink channel and SF (RX1DROffset 0) — the same channel we
         // received on, since this is a single-channel responder.

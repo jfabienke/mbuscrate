@@ -35,6 +35,7 @@ use cmac::{Cmac, Mac};
 
 /// Errors from parsing or authenticating a LoRaWAN frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum LoRaWanError {
     /// Frame is shorter than its own structure requires.
     TooShort { needed: usize, actual: usize },
@@ -86,7 +87,11 @@ fn aes_decrypt_block(key: &[u8; 16], block: &mut [u8; 16]) {
 }
 
 fn cmac16(key: &[u8; 16], data: &[u8]) -> [u8; 16] {
-    let mut mac = <Cmac<Aes128> as Mac>::new_from_slice(key).expect("128-bit key");
+    // `new` rather than `new_from_slice().expect(..)`: the key is a `&[u8; 16]`, so the
+    // length is guaranteed by the type and the Result could never be Err. Taking the
+    // infallible constructor removes a panic path that only existed because the fallible
+    // API was the more obvious one to reach for.
+    let mut mac = <Cmac<Aes128> as Mac>::new(GenericArray::from_slice(key));
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
@@ -99,6 +104,7 @@ fn mic4(key: &[u8; 16], data: &[u8]) -> [u8; 4] {
 
 /// Session keys derived at join, held by both sides and never transmitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct SessionKeys {
     pub nwk_skey: [u8; 16],
     pub app_skey: [u8; 16],
@@ -110,6 +116,7 @@ pub struct SessionKeys {
 /// EUIs are kept in **wire order** (little-endian). Use [`JoinRequest::dev_eui_display`]
 /// for the conventional big-endian rendering.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct JoinRequest {
     pub join_eui_le: [u8; 8],
     pub dev_eui_le: [u8; 8],
@@ -178,6 +185,7 @@ pub fn eui_display(le: &[u8; 8]) -> String {
 
 /// Everything the network chooses when accepting a join.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct JoinAcceptParams {
     /// Network-chosen nonce, 24-bit. Must differ per join for the session keys to differ.
     pub app_nonce: u32,
@@ -272,6 +280,7 @@ pub fn derive_session_keys(
 
 /// Result of checking a JoinRequest's DevNonce against the highest one accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum DevNonceVerdict {
     /// First-ever, or strictly greater than the last accepted — accept.
     Fresh,
@@ -338,6 +347,7 @@ pub fn admit_dev_nonce_windowed(
 
 /// Outcome of admitting a whole join through a [`JoinStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum JoinAdmission {
     /// Accepted: the DevNonce was recorded and this JoinNonce reserved, both durably.
     Admitted { join_nonce: u32 },
@@ -459,6 +469,7 @@ impl JoinStore for InMemoryJoinStore {
 
 /// A parsed data frame (uplink or downlink), before authentication.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct DataFrame {
     pub mhdr: u8,
     pub dev_addr: u32,
@@ -605,11 +616,20 @@ pub struct DownlinkParams {
 /// [`DataFrame::verify_mic`] checks — so a frame built here round-trips through
 /// [`DataFrame::parse`] + `verify_mic`. FOpts are transmitted in the clear (LoRaWAN
 /// 1.0.x); only `frm_payload` is encrypted.
-pub fn build_data_down(nwk_skey: &[u8; 16], app_skey: &[u8; 16], p: &DownlinkParams) -> Vec<u8> {
-    assert!(
-        p.fopts.len() <= 15,
-        "FOpts must fit the 4-bit FOptsLen field"
-    );
+pub fn build_data_down(
+    nwk_skey: &[u8; 16],
+    app_skey: &[u8; 16],
+    p: &DownlinkParams,
+) -> Result<Vec<u8>, LoRaWanError> {
+    // FOptsLen is a 4-bit field, so anything longer cannot be represented on air. This
+    // was an `assert!`, i.e. a panic in a library called from a gateway that must not
+    // die because a caller built an over-long MAC command. A protocol limit is a normal
+    // error, not an unrecoverable condition.
+    if p.fopts.len() > 15 {
+        return Err(LoRaWanError::InvalidField(
+            "FOpts exceeds the 4-bit FOptsLen field",
+        ));
+    }
     let mhdr = MTYPE_UNCONFIRMED_DOWN << 5;
     let fctrl = (if p.adr { 0x80 } else { 0 })
         | (if p.ack { 0x20 } else { 0 })
@@ -650,7 +670,7 @@ pub fn build_data_down(nwk_skey: &[u8; 16], app_skey: &[u8; 16], p: &DownlinkPar
     buf.extend_from_slice(&b0);
     buf.extend_from_slice(&frame);
     frame.extend_from_slice(&mic4(nwk_skey, &buf));
-    frame
+    Ok(frame)
 }
 
 /// The `LinkADRReq` MAC command (CID 0x03), as the 5 FOpts bytes.
@@ -1118,7 +1138,7 @@ mod tests {
             fport: None,
             frm_payload: Vec::new(),
         };
-        let frame = build_data_down(&NWK_SKEY, &APP_SKEY, &p);
+        let frame = build_data_down(&NWK_SKEY, &APP_SKEY, &p).expect("valid params");
 
         // It must parse as a *downlink* and authenticate with dir=1 under NwkSKey.
         let df = DataFrame::parse(&frame).unwrap();
@@ -1145,11 +1165,39 @@ mod tests {
             fport: Some(1),
             frm_payload: payload.clone(),
         };
-        let frame = build_data_down(&NWK_SKEY, &APP_SKEY, &p);
+        let frame = build_data_down(&NWK_SKEY, &APP_SKEY, &p).expect("valid params");
         let df = DataFrame::parse(&frame).unwrap();
         assert!(df.verify_mic(&NWK_SKEY, 7));
         // Decrypting the downlink with the same keys/counter recovers the plaintext.
         assert_eq!(df.decrypt_payload(&NWK_SKEY, &APP_SKEY, 7), payload);
+    }
+
+    #[test]
+    fn over_long_fopts_is_an_error_not_a_panic() {
+        // Was an assert!, i.e. a panic in a library a gateway links against. FOptsLen is
+        // 4 bits, so >15 cannot go on air — a protocol limit, which is a normal error.
+        let p = DownlinkParams {
+            dev_addr: 0x2600_0001,
+            fcnt: 0,
+            adr: true,
+            ack: false,
+            fpending: false,
+            fopts: alloc::vec![0u8; 16],
+            fport: None,
+            frm_payload: Vec::new(),
+        };
+        assert_eq!(
+            build_data_down(&NWK_SKEY, &APP_SKEY, &p),
+            Err(LoRaWanError::InvalidField(
+                "FOpts exceeds the 4-bit FOptsLen field"
+            ))
+        );
+        // 15 is the boundary and must still succeed.
+        let ok = DownlinkParams {
+            fopts: alloc::vec![0u8; 15],
+            ..p
+        };
+        assert!(build_data_down(&NWK_SKEY, &APP_SKEY, &ok).is_ok());
     }
 
     #[test]
