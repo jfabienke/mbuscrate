@@ -19,10 +19,14 @@ description = "Rust reimplementation of the epulse `metermon` wM-Bus gateway, bu
 mbus-rs = { path = "..", features = ["crypto"] }
 
 # Shared wire contract for the MQTT LoRaWAN join-control protocol (arm/verify/status).
-# Sibling of the mbus-rs repo root; keys never cross these topics. Optional and gated
-# behind the `join-control` feature: the sibling crate is not checked out in this repo's
-# CI, so a default build must not reference it.
-lorawan-join-control = { path = "../../lorawan-join-control", optional = true }
+# Keys never cross these topics.
+#
+# Vendored into this repo (workspace member at ../lorawan-join-control), no longer a
+# sibling directory outside it. The old `../../lorawan-join-control` path had no git
+# remote behind it, so CI could not resolve it -- and because cargo resolves path
+# dependencies even when the owning feature is off, that failed the whole build rather
+# than just skipping this feature.
+lorawan-join-control = { path = "../lorawan-join-control", optional = true }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

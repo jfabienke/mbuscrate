@@ -52,6 +52,17 @@ jobs:
         cargo fmt --all -- --check
         cargo clippy --features radio --all-targets -- -D warnings
         cargo test   --features radio --verbose
+    # `join-control` on top of `radio`: the MQTT arm/verify endpoint and its wire
+    # contract. This could not be built by any CI until the contract crate was vendored
+    # into the workspace -- it was a path dep on a sibling repo with no git remote, which
+    # failed the build outright rather than skipping the feature. Building it here is the
+    # point of vendoring it; without this step the feature is exactly as unguarded as the
+    # radio code was before the gate above existed.
+    - name: metermon-rs (join-control)
+      working-directory: metermon-rs
+      run: |
+        cargo clippy --features join-control --all-targets -- -D warnings
+        cargo test   --features join-control --verbose
 
   audit:
     runs-on: ubuntu-latest
