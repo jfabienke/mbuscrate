@@ -1,0 +1,13 @@
+# Target labels
+ pioasmBuild
+# Source files and their labels
+/Users/jvindahl/Development/mbuscrate/tools/pico-lora-beacon/build2/pico-sdk/src/rp2_common/pico_status_led/CMakeFiles/pioasmBuild
+/Users/jvindahl/Development/mbuscrate/tools/pico-lora-beacon/build2/pico-sdk/src/rp2_common/pico_status_led/CMakeFiles/pioasmBuild.rule
+/Users/jvindahl/Development/mbuscrate/tools/pico-lora-beacon/build2/pico-sdk/src/rp2_common/pico_status_led/CMakeFiles/pioasmBuild-complete.rule
+/Users/jvindahl/Development/mbuscrate/tools/pico-lora-beacon/build2/pico-sdk/src/rp2_common/pico_status_led/pioasm/src/pioasmBuild-stamp/pioasmBuild-build.rule
+/Users/jvindahl/Development/mbuscrate/tools/pico-lora-beacon/build2/pico-sdk/src/rp2_common/pico_status_led/pioasm/src/pioasmBuild-stamp/pioasmBuild-configure.rule
+/Users/jvindahl/Development/mbuscrate/tools/pico-lora-beacon/build2/pico-sdk/src/rp2_common/pico_status_led/pioasm/src/pioasmBuild-stamp/pioasmBuild-download.rule
+/Users/jvindahl/Development/mbuscrate/tools/pico-lora-beacon/build2/pico-sdk/src/rp2_common/pico_status_led/pioasm/src/pioasmBuild-stamp/pioasmBuild-install.rule
+/Users/jvindahl/Development/mbuscrate/tools/pico-lora-beacon/build2/pico-sdk/src/rp2_common/pico_status_led/pioasm/src/pioasmBuild-stamp/pioasmBuild-mkdir.rule
+/Users/jvindahl/Development/mbuscrate/tools/pico-lora-beacon/build2/pico-sdk/src/rp2_common/pico_status_led/pioasm/src/pioasmBuild-stamp/pioasmBuild-patch.rule
+/Users/jvindahl/Development/mbuscrate/tools/pico-lora-beacon/build2/pico-sdk/src/rp2_common/pico_status_led/pioasm/src/pioasmBuild-stamp/pioasmBuild-update.rule

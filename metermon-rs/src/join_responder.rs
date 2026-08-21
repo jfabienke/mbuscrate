@@ -17,7 +17,8 @@
 use anyhow::{Context, Result};
 use mbus_rs::lorawan::{
     build_data_down, build_join_accept, derive_session_keys, link_adr_req, parse_link_adr_ans,
-    DataFrame, DownlinkParams, JoinAcceptParams, JoinAdmission, JoinRequest, SessionKeys,
+    DataFrame, DownlinkParams, FOpts, JoinAcceptParams, JoinAdmission, JoinRequest, Payload,
+    SessionKeys,
 };
 use mbus_rs::wmbus::radio::driver::{LoRaProfile, RadioProfile, Sx126xDriver};
 use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
@@ -497,8 +498,8 @@ impl JoinResponder {
         );
 
         let joined = JoinedDevice {
-            dev_eui: jr.dev_eui_display(),
-            join_eui: jr.join_eui_display(),
+            dev_eui: jr.dev_eui_display().to_string(),
+            join_eui: jr.join_eui_display().to_string(),
             dev_addr: params.dev_addr,
             dev_nonce: jr.dev_nonce,
             rssi_dbm: rssi,
@@ -591,11 +592,27 @@ impl JoinResponder {
             adr: true,
             ack: false,
             fpending: false,
-            fopts: link_adr_req(PIN_CHANNEL_MASK, 0x0F, 0x0F, 1).to_vec(),
+            // A 5-byte LinkADRReq into a 15-byte FOpts: the length is a compile-time
+            // fact, so this cannot fail. `unwrap_or_default` rather than `expect` keeps
+            // the gateway panic-free, and an empty FOpts would produce a harmless
+            // no-op downlink rather than a crash if that ever stopped being true.
+            fopts: FOpts::from_slice(&link_adr_req(PIN_CHANNEL_MASK, 0x0F, 0x0F, 1))
+                .unwrap_or_default(),
             fport: None,
-            frm_payload: Vec::new(),
+            frm_payload: Payload::new(),
         };
-        let frame = build_data_down(&nwk, &app, &params);
+        // `build_data_down` reports a frame it cannot represent as an error rather than
+        // panicking. Over-long FOpts is now caught by the `FOpts` type itself; what
+        // remains here is the PHY-maximum check, which ours cannot trip with a 5-byte
+        // command and no payload — but the responder must not abort a session over a
+        // downlink it failed to build.
+        let frame = match build_data_down(&nwk, &app, &params) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("pin: {dev_addr:08X} — could not build LinkADRReq: {e}");
+                return Ok(());
+            }
+        };
 
         // Data RX1 is the uplink channel and SF (RX1DROffset 0) — the same channel we
         // received on, since this is a single-channel responder.

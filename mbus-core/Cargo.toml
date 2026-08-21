@@ -1,0 +1,37 @@
+[package]
+name = "mbus-core"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.81"          # core::error::Error
+license = "MIT OR Apache-2.0"
+description = "Protocol core for M-Bus / wireless M-Bus and LoRaWAN: parsing, decoding and cryptography with no hardware, no OS and no clock. `no_std`, no heap, no panics."
+repository = "https://github.com/jfabienke/mbuscrate"
+
+[dependencies]
+# Everything here must be no_std-capable. A dependency that needs std belongs in
+# mbus-rs, not in this crate — that rule is what keeps the split honest.
+aes    = { version = "0.8", optional = true }
+cmac   = { version = "0.7", optional = true }
+subtle = { version = "2.6", default-features = false, optional = true }
+# Fixed-capacity collections. Every capacity in this crate is dictated by the LoRaWAN
+# spec (see the constants in `lorawan`), not chosen for convenience, so the bounds are
+# protocol facts rather than tuning knobs.
+heapless = "0.8"
+# Logging is the caller's choice, not the core's: no `log`, no `defmt` unless asked.
+# With this feature the public types gain `defmt::Format`, so an Embassy gateway can
+# emit them over RTT without the core taking a logging dependency in any other build.
+defmt  = { version = "0.3", optional = true }
+
+[features]
+default = ["std", "crypto"]
+# `std` adds the standard library on top of the core. The crate is written
+# no_std-first; this feature only turns on std-specific conveniences.
+std = []
+# LoRaWAN / OMS cryptography. Pulls RustCrypto, all no_std-capable.
+crypto = ["dep:aes", "dep:cmac", "dep:subtle"]
+# `defmt::Format` on the public types, for Embassy/RTT logging. No `defmt/alloc`:
+# the public types are fixed-capacity and implement `Format` natively.
+defmt = ["dep:defmt", "heapless/defmt-03"]
+
+[dev-dependencies]
+hex = "0.4"

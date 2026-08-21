@@ -36,7 +36,21 @@ pub mod constants;
 pub mod error;
 pub mod instrumentation;
 pub mod logging;
-pub mod lorawan;
+/// LoRaWAN 1.0.x join and data-frame cryptography.
+///
+/// The protocol half lives in the `mbus-core` crate, which builds `no_std` with no heap
+/// for microcontrollers. The durable join store stays here, because it is storage: it
+/// needs `String` and a map, and the core's rule is that anything needing `std` belongs
+/// in `mbus-rs`. Both halves are re-exported under this one path, so every existing
+/// `mbus_rs::lorawan::…` import keeps working — the split is an internal reorganisation,
+/// not an API break.
+#[cfg(feature = "crypto")]
+pub mod lorawan {
+    pub use crate::lorawan_store::*;
+    pub use mbus_core::lorawan::*;
+}
+#[cfg(feature = "crypto")]
+mod lorawan_store;
 pub mod mbus;
 pub mod mbus_device_manager;
 pub mod payload;

@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "mbus-core-panic-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# A bare-metal binary that links mbus-core and NOTHING else, so the linker map is
+# evidence rather than inference. `cargo build` of a library cannot prove panic-freedom:
+# an rlib leaves panic machinery unresolved, so grepping it finds nothing whether or not
+# the code can panic. Only a fully linked binary settles it.
+
+[dependencies]
+mbus-core = { path = "..", default-features = false, features = ["crypto"] }
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "z"
+codegen-units = 1
