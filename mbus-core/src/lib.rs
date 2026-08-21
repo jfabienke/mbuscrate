@@ -43,3 +43,7 @@
 
 #[cfg(feature = "crypto")]
 pub mod lorawan;
+
+// Not behind `crypto`: the wire format is not cryptography, and a device that only
+// checks CRCs should not have to pull AES in to do it.
+pub mod wmbus;

@@ -144,6 +144,15 @@ pub enum WMBusError {
     Network(String),
 }
 
+// Lives here rather than in `error.rs` so that module stays a leaf. `error.rs` reaching
+// into `wmbus::handle` was the one edge making MBusError depend on the radio stack —
+// harmless today, intractable once half the tree lives in `mbus-core`.
+impl From<WMBusError> for crate::error::MBusError {
+    fn from(err: WMBusError) -> Self {
+        crate::error::MBusError::WMBusError(format!("{err}"))
+    }
+}
+
 /// Configuration for wM-Bus operation
 #[derive(Debug, Clone)]
 pub struct WMBusConfig {
