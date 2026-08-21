@@ -1,5 +1,9 @@
 # Build artifacts
 /target
+# Nested build trees too, not just the workspace root: 816 artifact files from
+# mbus-core/panic-probe/target were committed because `/target` anchors to the repo
+# root and matched none of them.
+target/
 
 # Coverage files
 *.profraw
