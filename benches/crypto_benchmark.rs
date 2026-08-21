@@ -75,7 +75,7 @@ fn bench_block_crc(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::new("multi_block", size), &data, |b, data| {
             b.iter(|| {
-                let _ = verify_blocks(black_box(data), false);
+                let _ = verify_blocks(black_box(data));
             })
         });
     }
@@ -188,7 +188,7 @@ fn bench_frame_validation_pipeline(c: &mut Criterion) {
         b.iter(|| {
             // Extract payload for block validation
             let payload = &multiblock_frame[10..multiblock_frame.len() - 2];
-            let _ = verify_blocks(black_box(payload), false);
+            let _ = verify_blocks(black_box(payload));
         })
     });
 

@@ -63,14 +63,14 @@ fn test_multi_block_validation() {
     payload.extend_from_slice(&block2_crc.to_be_bytes()); // big-endian, as transmitted
 
     // Verify blocks
-    let blocks = verify_blocks(&payload, false).unwrap();
+    let blocks = verify_blocks(&payload).unwrap();
     assert_eq!(blocks.len(), 2);
     assert!(blocks[0].crc_valid);
     assert!(blocks[1].crc_valid);
 
     // Test with corrupted CRC (deterministic bit-flip of block 1's low CRC byte)
     payload[15] ^= 0xFF; // Corrupt block 1 CRC
-    let blocks = verify_blocks(&payload, false).unwrap();
+    let blocks = verify_blocks(&payload).unwrap();
     assert!(!blocks[0].crc_valid);
     assert!(blocks[1].crc_valid);
 }

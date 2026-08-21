@@ -7,5 +7,6 @@
 //! dependencies at all, so it proves the move/build/ratchet pipeline end to end before
 //! anything load-bearing follows it.
 
+pub mod block;
 pub mod crc;
 pub mod frame;
