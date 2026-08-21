@@ -4,7 +4,9 @@ members = [".", "mbus-core"]
 # optional path dependency on a sibling repo that is not checked out in this repo's CI,
 # and workspace members share dependency resolution — making it a member would make a
 # default CI build depend on a directory that may not exist.
-exclude = ["metermon-rs"]
+# The panic probe is its own workspace: it needs `panic = "abort"` and a bare-metal
+# target profile that must not apply to the host crates.
+exclude = ["metermon-rs", "mbus-core/panic-probe"]
 
 [package]
 name = "mbus-rs"

@@ -507,6 +507,15 @@ dependencies = [
 
 [[package]]
 name = "defmt"
+version = "0.3.100"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0963443817029b2024136fc4dd07a5107eb8f977eaf18fcd1fdeb11306b64ad"
+dependencies = [
+ "defmt 1.1.1",
+]
+
+[[package]]
+name = "defmt"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2953bfe4f93bbd20cc71198842756f77d161884c99ebbabc41d80231ded88d1"
@@ -543,7 +552,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05144944c117db54127a8ac17a3c9a28d55e7047bfddb950bcd20b4a94c79b10"
 dependencies = [
  "critical-section",
- "defmt",
+ "defmt 1.1.1",
 ]
 
 [[package]]
@@ -786,7 +795,7 @@ version = "0.2.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "668b7183bd07af9a4885f5c35b0cc5c83c4607a913c16b7e17291832910d2dcc"
 dependencies = [
- "defmt",
+ "defmt 1.1.1",
  "jiff-core",
  "jiff-static",
  "log",
@@ -801,7 +810,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7feca88439efe53da3754500c1851dedf3cb36c524dd5cf8225cc0794de95d09"
 dependencies = [
- "defmt",
+ "defmt 1.1.1",
 ]
 
 [[package]]
@@ -870,6 +879,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mbus-core"
+version = "1.0.0"
+dependencies = [
+ "aes",
+ "cmac",
+ "defmt 0.3.100",
+ "hex",
+ "subtle",
+]
+
+[[package]]
 name = "mbus-rs"
 version = "1.0.0"
 dependencies = [
@@ -890,7 +910,7 @@ dependencies = [
  "criterion",
  "critical-section",
  "ctr",
- "defmt",
+ "defmt 1.1.1",
  "defmt-rtt",
  "env_logger",
  "hex",
@@ -898,6 +918,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
+ "mbus-core",
  "nix",
  "nom",
  "once_cell",

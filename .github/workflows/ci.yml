@@ -88,3 +88,10 @@ jobs:
         run: cargo build -p mbus-core --target thumbv6m-none-eabi --no-default-features --features crypto
       - name: mbus-core host tests
         run: cargo test -p mbus-core
+
+      # Ratchet, not a pass/fail gate: fails if panic-freedom changes in EITHER direction,
+      # so a regression cannot land silently and an improvement cannot land without
+      # updating the recorded state. Currently records "can panic" -- see the probe's
+      # README: that is a consequence of the API allocating, and only heapless removes it.
+      - name: Panic-freedom ratchet
+        run: ./mbus-core/panic-probe/check-panic-free.sh
