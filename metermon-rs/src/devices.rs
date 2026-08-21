@@ -64,9 +64,15 @@ struct DeviceRecord {
     /// written before mode tracking existed).
     #[serde(default)]
     mode: String,
-    /// Last AFC-measured carrier offset from the 868.95 MHz center, in Hz.
+    /// Last measured carrier offset from the 868.95 MHz centre, in Hz, or `None` where
+    /// the hardware does not measure it.
+    ///
+    /// **`None` on an SX126x in GFSK**: the frequency-error registers belong to the LoRa
+    /// modem and there is no GFSK equivalent. This was `i32` filled with a default 0,
+    /// so the `off(Hz)` column reported "exactly zero" for every meter we have ever
+    /// seen — a measurement the chip never made.
     #[serde(default)]
-    last_freq_offset_hz: i32,
+    last_freq_offset_hz: Option<i32>,
     /// Quirk ids applied to this device's decodes (vendor-layers P5): a consumer of
     /// the store can tell an overridden reading from a standard one. Empty for
     /// records written before quirk tracking existed.
@@ -154,8 +160,9 @@ pub struct Observation {
     pub reading: Option<String>,
     /// Radio mode this frame was received on ("C" today — single-channel mode-C RX).
     pub mode: String,
-    /// AFC-measured carrier offset from the 868.95 MHz center for this frame, in Hz.
-    pub freq_offset_hz: i32,
+    /// Measured carrier offset from the 868.95 MHz centre for this frame, in Hz, or
+    /// `None` where the hardware does not measure it (always `None` for GFSK on SX126x).
+    pub freq_offset_hz: Option<i32>,
     /// Vendor quirk ids that fired while decoding this frame (vendor-layers P5).
     pub applied_quirks: Vec<String>,
 }
@@ -630,7 +637,9 @@ impl DeviceManager {
                     r.manufacturer,
                     r.type_name,
                     r.last_rssi,
-                    r.last_freq_offset_hz,
+                    r.last_freq_offset_hz
+                        .map(|v| format!("{v:+}"))
+                        .unwrap_or_else(|| "-".into()),
                     if r.has_key { "yes" } else { "-" },
                 );
             }
@@ -723,7 +732,7 @@ impl DeviceManager {
                         last_reading: od.last_reading.clone(),
                         // Old SQLite dumps predate mode/frequency/quirk tracking.
                         mode: String::new(),
-                        last_freq_offset_hz: 0,
+                        last_freq_offset_hz: None,
                         applied_quirks: Vec::new(),
                     },
                 };
@@ -858,7 +867,7 @@ mod tests {
             has_key,
             reading: None,
             mode: "C".into(),
-            freq_offset_hz: 0,
+            freq_offset_hz: None,
             applied_quirks: Vec::new(),
         }
     }
@@ -868,7 +877,7 @@ mod tests {
         let dm = DeviceManager::open(&tmp_db(), 20, 600).unwrap();
         let mut o = obs(74644444, true, false);
         o.mode = "C".into();
-        o.freq_offset_hz = 305;
+        o.freq_offset_hz = Some(305);
         dm.record_frame(&o).unwrap();
 
         let txn = dm.db.begin_read().unwrap();
@@ -876,7 +885,24 @@ mod tests {
         let raw = dtab.get(74644444u32).unwrap().unwrap();
         let rec: DeviceRecord = serde_json::from_str(raw.value()).unwrap();
         assert_eq!(rec.mode, "C");
-        assert_eq!(rec.last_freq_offset_hz, 305);
+        assert_eq!(rec.last_freq_offset_hz, Some(305));
+    }
+
+    #[test]
+    fn an_unmeasured_offset_is_stored_as_none_not_zero() {
+        // The bug this replaced: GFSK has no frequency-error register on the SX126x, so
+        // every wM-Bus frame reported "+0 Hz" -- a measurement the chip never made.
+        let dm = DeviceManager::open(&tmp_db(), 20, 600).unwrap();
+        let mut o = obs(74644445, true, false);
+        o.mode = "C".into();
+        o.freq_offset_hz = None;
+        dm.record_frame(&o).unwrap();
+
+        let txn = dm.db.begin_read().unwrap();
+        let dtab = txn.open_table(DEVICES).unwrap();
+        let raw = dtab.get(74644445u32).unwrap().unwrap();
+        let rec: DeviceRecord = serde_json::from_str(raw.value()).unwrap();
+        assert_eq!(rec.last_freq_offset_hz, None);
     }
 
     /// Count events of a given kind for a meter (test helper).

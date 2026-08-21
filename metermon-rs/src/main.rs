@@ -29,6 +29,7 @@ mod lora_rx;
 mod mock_backend;
 mod profiles;
 mod publish;
+mod radio_manager;
 mod source;
 mod sweep;
 #[cfg(feature = "radio")]
@@ -1162,12 +1163,15 @@ fn run_monitor(
                     }
                 }
 
+                let off_s = freq_offset
+                    .map(|v| format!("{v:+}Hz"))
+                    .unwrap_or_else(|| "n/a".into());
                 match &reading {
                     Some(r) => log::info!(
-                        "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz reading=[{r}]"
+                        "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={off_s} reading=[{r}]"
                     ),
                     None => log::info!(
-                        "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={freq_offset}Hz"
+                        "frame meter={meter} type={ft} CI={ci} crc_ok={crc_ok} key={has_key} rssi={rssi}dBm off={off_s}"
                     ),
                 }
             } else {
@@ -2147,8 +2151,11 @@ fn run_capture(
                     writeln!(file, "{}", hex::encode(&frame))?;
                     file.flush()?;
                     n += 1;
+                    let off_s = off
+                        .map(|v| format!("{v:+}Hz"))
+                        .unwrap_or_else(|| "n/a".into());
                     log::info!(
-                        "frame {n}: meter={} {} bytes rssi={rssi}dBm off={off}Hz  {}",
+                        "frame {n}: meter={} {} bytes rssi={rssi}dBm off={off_s}  {}",
                         addr.map(|a| a.to_string()).unwrap_or("?".into()),
                         frame.len(),
                         hex::encode(&frame)
