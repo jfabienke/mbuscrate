@@ -3,10 +3,29 @@
 //! Two SX126x-continuous-RX pathologies stranded a gateway once: the radio
 //! re-reading the same buffer region yields byte-identical frames, and the rapid
 //! SPI-read storm that produces can drive a transaction into an unkillable `D`
-//! state. A *genuine* retransmission from the same meter increments its access
-//! number, so its bytes differ — byte-identical frames back-to-back are always a
-//! stale re-read, never a real second frame. Detecting a sustained run of them
-//! lets the capture loop bail *before* the storm wedges the radio.
+//! state. Detecting a sustained run of them lets the capture loop bail *before*
+//! the storm wedges the radio.
+//!
+//! # Why this compares only the IMMEDIATELY PRECEDING frame — do not widen it
+//!
+//! An earlier version of this note justified the filter by claiming a genuine
+//! retransmission always differs because the meter increments its access number.
+//! **That claim is false, and acting on it would be destructive.** Measured over a
+//! 15-minute capture of 564 real frames: **408 of them are byte-identical to an
+//! earlier, non-consecutive frame.** Many meters repeat a telegram verbatim across
+//! transmissions; the access number does not increment on every send on every make.
+//!
+//! So widening this to a window, a set, or a hash table would delete roughly
+//! **72 % of genuine traffic** while looking like a tidy generalisation. Only the
+//! back-to-back case is safe, and it is safe for a different reason than the one
+//! originally given: a stale buffer re-read arrives with no gap because nothing was
+//! received in between, whereas a real repeat is separated by another meter's frame
+//! or by the transmit interval.
+//!
+//! The independent measurement also showed **zero** byte-identical consecutive
+//! frames on a receiver that returns to standby and restarts RX from the buffer base
+//! after each frame — i.e. this guard compensates for a specific driver behaviour,
+//! not for anything meters do.
 
 /// What to do with a freshly received raw frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
