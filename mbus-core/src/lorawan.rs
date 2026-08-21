@@ -24,14 +24,46 @@
 //! FCnt. The `_le` suffixes below are a reminder that these are wire-order bytes,
 //! not display order: an EUI shown as `70:B3:D5:...` is transmitted reversed.
 
-use alloc::format;
-use alloc::string::String;
-use alloc::vec::Vec;
-
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes128;
 use cmac::{Cmac, Mac};
+
+// ============================ Capacities ============================
+//
+// Every bound here is a LoRaWAN protocol fact, not a tuning choice — which is the only
+// reason fixed capacities are safe: a frame that does not fit was never representable on
+// air. Where a combination *can* overflow (see [`build_data_down`]) the excess is a normal
+// error, never a truncation and never a panic.
+
+/// Largest PHYPayload LoRaWAN puts on air.
+pub const PHY_PAYLOAD_MAX: usize = 255;
+
+/// FOptsLen is a 4-bit field in FCtrl, so MAC commands in the FHDR cannot exceed this.
+pub const FOPTS_MAX: usize = 15;
+
+/// Largest FRMPayload: [`PHY_PAYLOAD_MAX`] less MHDR(1), the minimum FHDR(7), FPort(1)
+/// and MIC(4). Regional limits are lower still (EU868 tops out at 222 on DR7); this is
+/// the absolute structural bound, so nothing legal is refused.
+pub const FRM_PAYLOAD_MAX: usize = PHY_PAYLOAD_MAX - 1 - 7 - 1 - 4;
+
+/// A JoinAccept without a CFList is exactly this long: MHDR(1) + one AES block(16).
+pub const JOIN_ACCEPT_LEN: usize = 17;
+
+/// Bytes of a JoinRequest covered by the MIC: MHDR(1) JoinEUI(8) DevEUI(8) DevNonce(2).
+const JOIN_REQUEST_SIGNED_LEN: usize = 19;
+
+/// `XX:XX:...` for 8 bytes — 16 hex digits and 7 separators.
+pub const EUI_DISPLAY_LEN: usize = 23;
+
+/// A complete frame ready for the radio.
+pub type Frame = heapless::Vec<u8, PHY_PAYLOAD_MAX>;
+/// MAC commands carried in the FHDR.
+pub type FOpts = heapless::Vec<u8, FOPTS_MAX>;
+/// An application payload, encrypted or not.
+pub type Payload = heapless::Vec<u8, FRM_PAYLOAD_MAX>;
+/// An EUI in display form; see [`eui_display`].
+pub type EuiString = heapless::String<EUI_DISPLAY_LEN>;
 
 /// Errors from parsing or authenticating a LoRaWAN frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,19 +118,27 @@ fn aes_decrypt_block(key: &[u8; 16], block: &mut [u8; 16]) {
     cipher.decrypt_block(GenericArray::from_mut_slice(block));
 }
 
-fn cmac16(key: &[u8; 16], data: &[u8]) -> [u8; 16] {
+/// First four bytes of the CMAC — every LoRaWAN MIC.
+fn mic4(key: &[u8; 16], data: &[u8]) -> [u8; 4] {
+    mic4_parts(key, &[data])
+}
+
+/// [`mic4`] over several slices in sequence, without joining them first.
+///
+/// LoRaWAN MICs are computed over `B0 || frame`, and the frame is itself several fields.
+/// Concatenating them needed a heap buffer sized at run time; CMAC is a streaming
+/// construction, so feeding the parts in order gives the identical result with no buffer
+/// and no allocation.
+fn mic4_parts(key: &[u8; 16], parts: &[&[u8]]) -> [u8; 4] {
     // `new` rather than `new_from_slice().expect(..)`: the key is a `&[u8; 16]`, so the
     // length is guaranteed by the type and the Result could never be Err. Taking the
     // infallible constructor removes a panic path that only existed because the fallible
     // API was the more obvious one to reach for.
     let mut mac = <Cmac<Aes128> as Mac>::new(GenericArray::from_slice(key));
-    mac.update(data);
-    mac.finalize().into_bytes().into()
-}
-
-/// First four bytes of the CMAC — every LoRaWAN MIC.
-fn mic4(key: &[u8; 16], data: &[u8]) -> [u8; 4] {
-    let full = cmac16(key, data);
+    for p in parts {
+        mac.update(p);
+    }
+    let full: [u8; 16] = mac.finalize().into_bytes().into();
     [full[0], full[1], full[2], full[3]]
 }
 
@@ -122,8 +162,9 @@ pub struct JoinRequest {
     pub dev_eui_le: [u8; 8],
     pub dev_nonce: u16,
     mic: [u8; 4],
-    /// MHDR..DevNonce — the exact bytes the MIC covers.
-    signed: Vec<u8>,
+    /// MHDR..DevNonce — the exact bytes the MIC covers. A JoinRequest is fixed-length, so
+    /// this is an array rather than a growable buffer: the size is known at compile time.
+    signed: [u8; JOIN_REQUEST_SIGNED_LEN],
 }
 
 impl JoinRequest {
@@ -144,14 +185,16 @@ impl JoinRequest {
         }
         let mut join_eui_le = [0u8; 8];
         let mut dev_eui_le = [0u8; 8];
+        let mut signed = [0u8; JOIN_REQUEST_SIGNED_LEN];
         join_eui_le.copy_from_slice(&frame[1..9]);
         dev_eui_le.copy_from_slice(&frame[9..17]);
+        signed.copy_from_slice(&frame[..JOIN_REQUEST_SIGNED_LEN]);
         Ok(Self {
             join_eui_le,
             dev_eui_le,
             dev_nonce: u16::from_le_bytes([frame[17], frame[18]]),
             mic: [frame[19], frame[20], frame[21], frame[22]],
-            signed: frame[..19].to_vec(),
+            signed,
         })
     }
 
@@ -164,23 +207,32 @@ impl JoinRequest {
     }
 
     /// DevEUI in conventional display order (big-endian, colon-separated).
-    pub fn dev_eui_display(&self) -> String {
+    pub fn dev_eui_display(&self) -> EuiString {
         eui_display(&self.dev_eui_le)
     }
 
     /// JoinEUI in conventional display order.
-    pub fn join_eui_display(&self) -> String {
+    pub fn join_eui_display(&self) -> EuiString {
         eui_display(&self.join_eui_le)
     }
 }
 
 /// Render a wire-order (little-endian) EUI big-endian, colon-separated.
-pub fn eui_display(le: &[u8; 8]) -> String {
-    le.iter()
-        .rev()
-        .map(|b| format!("{b:02X}"))
-        .collect::<Vec<_>>()
-        .join(":")
+pub fn eui_display(le: &[u8; 8]) -> EuiString {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut s = EuiString::new();
+    for (i, b) in le.iter().rev().enumerate() {
+        // Exactly EUI_DISPLAY_LEN chars are pushed into a string of that capacity, so no
+        // push can fail. The Results are discarded rather than unwrapped deliberately: an
+        // `expect` here would be a panic path in a display helper, and the worst possible
+        // consequence of a capacity slip is a short string, not a dead gateway.
+        if i > 0 {
+            let _ = s.push(':');
+        }
+        let _ = s.push(HEX[(b >> 4) as usize] as char);
+        let _ = s.push(HEX[(b & 0x0F) as usize] as char);
+    }
+    s
 }
 
 /// Everything the network chooses when accepting a join.
@@ -218,29 +270,29 @@ impl Default for JoinAcceptParams {
 /// The encryption is inverted by LoRaWAN's own convention: the network applies the
 /// AES **decrypt** operation, so a device holding only an encrypt primitive can
 /// recover it. Getting this backwards produces a frame the device silently ignores.
-pub fn build_join_accept(app_key: &[u8; 16], p: &JoinAcceptParams) -> Vec<u8> {
+/// Returns the frame as a fixed array: the body is AppNonce(3) NetID(3) DevAddr(4)
+/// DLSettings(1) RxDelay(1) MIC(4) — exactly one 16-byte AES block, by construction, plus
+/// MHDR. Nothing here is variable-length, so nothing needs to allocate.
+pub fn build_join_accept(app_key: &[u8; 16], p: &JoinAcceptParams) -> [u8; JOIN_ACCEPT_LEN] {
     let mhdr = MTYPE_JOIN_ACCEPT << 5;
-    let mut plain = Vec::with_capacity(16);
-    plain.extend_from_slice(&p.app_nonce.to_le_bytes()[..3]);
-    plain.extend_from_slice(&p.net_id.to_le_bytes()[..3]);
-    plain.extend_from_slice(&p.dev_addr.to_le_bytes());
-    plain.push(p.dl_settings);
-    plain.push(p.rx_delay);
 
-    // MIC covers MHDR and the *plaintext* body.
-    let mut signed = Vec::with_capacity(1 + plain.len());
-    signed.push(mhdr);
-    signed.extend_from_slice(&plain);
-    let mic = mic4(app_key, &signed);
-    plain.extend_from_slice(&mic); // exactly one 16-byte block
-
+    // The 12-byte plaintext body, then the MIC appended to fill the block.
     let mut block = [0u8; 16];
-    block.copy_from_slice(&plain);
+    block[0..3].copy_from_slice(&p.app_nonce.to_le_bytes()[..3]);
+    block[3..6].copy_from_slice(&p.net_id.to_le_bytes()[..3]);
+    block[6..10].copy_from_slice(&p.dev_addr.to_le_bytes());
+    block[10] = p.dl_settings;
+    block[11] = p.rx_delay;
+
+    // MIC covers MHDR and the *plaintext* body, streamed rather than concatenated.
+    let mic = mic4_parts(app_key, &[&[mhdr], &block[..12]]);
+    block[12..16].copy_from_slice(&mic);
+
     aes_decrypt_block(app_key, &mut block);
 
-    let mut out = Vec::with_capacity(17);
-    out.push(mhdr);
-    out.extend_from_slice(&block);
+    let mut out = [0u8; JOIN_ACCEPT_LEN];
+    out[0] = mhdr;
+    out[1..].copy_from_slice(&block);
     out
 }
 
@@ -345,128 +397,6 @@ pub fn admit_dev_nonce_windowed(
     }
 }
 
-/// Outcome of admitting a whole join through a [`JoinStore`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum JoinAdmission {
-    /// Accepted: the DevNonce was recorded and this JoinNonce reserved, both durably.
-    Admitted { join_nonce: u32 },
-    /// Rejected as a DevNonce replay; nothing was changed.
-    Replay { last: u16, seen: u16 },
-}
-
-/// Error from a [`JoinStore`] backend.
-///
-/// Hand-written rather than derived: `thiserror` would be the crate's only
-/// non-cryptographic dependency, and a one-field newtype does not justify one in a core
-/// whose portability rests on having almost nothing to port.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JoinStoreError(pub String);
-
-impl core::fmt::Display for JoinStoreError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "join store: {}", self.0)
-    }
-}
-
-impl core::error::Error for JoinStoreError {}
-
-/// Durable per-device join state — the persistence a 1.0.4 network side requires.
-///
-/// Implemented by the gateway (redb-backed in production, in memory for tests). The
-/// single `admit_join` operation must be atomic and durable *before it returns*, so
-/// the caller can rely on "recorded" being true before it transmits a JoinAccept —
-/// the durable-before-live ordering that closes both replay windows.
-pub trait JoinStore {
-    /// Atomically, for `dev_eui`: apply [`admit_dev_nonce`]; if Fresh, record the
-    /// DevNonce and reserve the next (strictly increasing) JoinNonce, both durable
-    /// on return, and report `Admitted`; if Replay, change nothing and report it.
-    fn admit_join(
-        &mut self,
-        dev_eui: &[u8; 8],
-        dev_nonce: u16,
-    ) -> Result<JoinAdmission, JoinStoreError>;
-
-    /// Highest DevNonce recorded for `dev_eui`, or `None` if never seen.
-    fn last_dev_nonce(&self, dev_eui: &[u8; 8]) -> Option<u16>;
-
-    /// Clear a device's DevNonce high-water for a legitimate re-provision. Without
-    /// this, a factory-reset device (DevNonce back to 0) is correctly but
-    /// permanently rejected as a replay.
-    fn reset_dev_nonce(&mut self, dev_eui: &[u8; 8]) -> Result<(), JoinStoreError>;
-}
-
-/// In-memory [`JoinStore`] for tests and non-persistent bench use.
-///
-/// Correct while the process lives; it does not survive a restart, which is exactly
-/// the gap the redb-backed store closes — so production must not use this.
-#[derive(Debug, Default)]
-pub struct InMemoryJoinStore {
-    last_dev_nonce: alloc::collections::BTreeMap<[u8; 8], u16>,
-    next_join_nonce: alloc::collections::BTreeMap<[u8; 8], u32>,
-    /// Window of recently-accepted DevNonces per device, for the 1.0.2 policy.
-    recent: alloc::collections::BTreeMap<[u8; 8], Vec<u16>>,
-    policy: DevNoncePolicy,
-}
-
-impl InMemoryJoinStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// With an explicit anti-replay policy (the default is
-    /// [`DevNoncePolicy::RandomWindow`], correct for the 1.0.2 fleet).
-    pub fn with_policy(policy: DevNoncePolicy) -> Self {
-        Self {
-            policy,
-            ..Self::default()
-        }
-    }
-}
-
-impl JoinStore for InMemoryJoinStore {
-    fn admit_join(
-        &mut self,
-        dev_eui: &[u8; 8],
-        dev_nonce: u16,
-    ) -> Result<JoinAdmission, JoinStoreError> {
-        let last_hi = self.last_dev_nonce.get(dev_eui).copied();
-        let verdict = match self.policy {
-            DevNoncePolicy::Counter => admit_dev_nonce(last_hi, dev_nonce),
-            DevNoncePolicy::RandomWindow { .. } => {
-                let recent = self.recent.get(dev_eui).map(Vec::as_slice).unwrap_or(&[]);
-                admit_dev_nonce_windowed(recent, last_hi, dev_nonce)
-            }
-        };
-        if let DevNonceVerdict::Replay { last, seen } = verdict {
-            return Ok(JoinAdmission::Replay { last, seen });
-        }
-        self.last_dev_nonce.insert(*dev_eui, dev_nonce);
-        if let DevNoncePolicy::RandomWindow { keep } = self.policy {
-            let w = self.recent.entry(*dev_eui).or_default();
-            w.push(dev_nonce);
-            if w.len() > keep {
-                let excess = w.len() - keep;
-                w.drain(0..excess);
-            }
-        }
-        let jn = self.next_join_nonce.entry(*dev_eui).or_insert(1);
-        let join_nonce = *jn;
-        *jn = join_nonce.wrapping_add(1) & 0x00FF_FFFF;
-        Ok(JoinAdmission::Admitted { join_nonce })
-    }
-
-    fn last_dev_nonce(&self, dev_eui: &[u8; 8]) -> Option<u16> {
-        self.last_dev_nonce.get(dev_eui).copied()
-    }
-
-    fn reset_dev_nonce(&mut self, dev_eui: &[u8; 8]) -> Result<(), JoinStoreError> {
-        self.last_dev_nonce.remove(dev_eui);
-        self.recent.remove(dev_eui);
-        Ok(())
-    }
-}
-
 /// A parsed data frame (uplink or downlink), before authentication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -475,12 +405,11 @@ pub struct DataFrame {
     pub dev_addr: u32,
     pub fctrl: u8,
     pub fcnt: u16,
-    pub fopts: Vec<u8>,
+    pub fopts: FOpts,
     pub fport: Option<u8>,
     /// Still encrypted; see [`DataFrame::decrypt_payload`].
-    pub frm_payload: Vec<u8>,
+    pub frm_payload: Payload,
     mic: [u8; 4],
-    signed: Vec<u8>,
 }
 
 impl DataFrame {
@@ -502,20 +431,24 @@ impl DataFrame {
             });
         }
         let body_end = frame.len() - 4;
-        let (fport, frm_payload) = if body_end > header_len {
-            (
-                Some(frame[header_len]),
-                frame[header_len + 1..body_end].to_vec(),
-            )
+        let (fport, payload_bytes) = if body_end > header_len {
+            (Some(frame[header_len]), &frame[header_len + 1..body_end])
         } else {
-            (None, Vec::new())
+            (None, &frame[0..0])
         };
+        // A frame longer than the PHY maximum cannot have come off a LoRaWAN radio, so
+        // this rejects rather than truncates. `fopts` cannot overflow — FOptsLen is four
+        // bits and FOPTS_MAX is 15 — but it is checked the same way rather than assumed.
+        let fopts = FOpts::from_slice(&frame[8..header_len])
+            .map_err(|_| LoRaWanError::InvalidField("FOpts exceeds the 4-bit FOptsLen field"))?;
+        let frm_payload = Payload::from_slice(payload_bytes)
+            .map_err(|_| LoRaWanError::InvalidField("FRMPayload exceeds the PHY maximum"))?;
         Ok(Self {
             mhdr: frame[0],
             dev_addr: u32::from_le_bytes([frame[1], frame[2], frame[3], frame[4]]),
             fctrl,
             fcnt: u16::from_le_bytes([frame[6], frame[7]]),
-            fopts: frame[8..header_len].to_vec(),
+            fopts,
             fport,
             frm_payload,
             mic: [
@@ -524,7 +457,6 @@ impl DataFrame {
                 frame[body_end + 2],
                 frame[body_end + 3],
             ],
-            signed: frame[..body_end].to_vec(),
         })
     }
 
@@ -538,18 +470,41 @@ impl DataFrame {
     /// `fcnt_full` is the 32-bit counter: the frame carries only its low 16 bits, so
     /// the caller supplies the upper half it is tracking. Getting that wrong fails the
     /// MIC in a way indistinguishable from a forgery, which is why it is explicit.
+    /// Length of the MIC-covered region: the whole frame bar the MIC itself. Reconstructed
+    /// from the parsed fields rather than stored — keeping a copy of the signed bytes
+    /// alongside `fopts` and `frm_payload` duplicated up to 251 bytes of every frame.
+    fn signed_len(&self) -> usize {
+        // MHDR(1) DevAddr(4) FCtrl(1) FCnt(2) = 8, then the variable tail.
+        8 + self.fopts.len() + usize::from(self.fport.is_some()) + self.frm_payload.len()
+    }
+
     pub fn verify_mic(&self, nwk_skey: &[u8; 16], fcnt_full: u32) -> bool {
         let mut b0 = [0u8; 16];
         b0[0] = 0x49;
         b0[5] = if self.is_uplink() { 0 } else { 1 };
         b0[6..10].copy_from_slice(&self.dev_addr.to_le_bytes());
         b0[10..14].copy_from_slice(&fcnt_full.to_le_bytes());
-        b0[15] = self.signed.len() as u8;
+        b0[15] = self.signed_len() as u8;
 
-        let mut buf = Vec::with_capacity(16 + self.signed.len());
-        buf.extend_from_slice(&b0);
-        buf.extend_from_slice(&self.signed);
-        mic4(nwk_skey, &buf) == self.mic
+        // B0 || MHDR || DevAddr || FCtrl || FCnt || FOpts || [FPort] || FRMPayload,
+        // streamed into CMAC in wire order instead of concatenated into a buffer.
+        let dev_addr = self.dev_addr.to_le_bytes();
+        let fcnt = self.fcnt.to_le_bytes();
+        let fport = self.fport.map(|p| [p]).unwrap_or_default();
+        let fport_part: &[u8] = if self.fport.is_some() { &fport } else { &[] };
+        mic4_parts(
+            nwk_skey,
+            &[
+                &b0,
+                &[self.mhdr],
+                &dev_addr,
+                &[self.fctrl],
+                &fcnt,
+                &self.fopts,
+                fport_part,
+                &self.frm_payload,
+            ],
+        ) == self.mic
     }
 
     /// Decrypt FRMPayload. Uses AppSKey for application ports, NwkSKey for port 0
@@ -560,14 +515,16 @@ impl DataFrame {
         nwk_skey: &[u8; 16],
         app_skey: &[u8; 16],
         fcnt_full: u32,
-    ) -> Vec<u8> {
+    ) -> Payload {
         let key = if self.fport == Some(0) {
             nwk_skey
         } else {
             app_skey
         };
         let dir = if self.is_uplink() { 0u8 } else { 1u8 };
-        let mut out = Vec::with_capacity(self.frm_payload.len());
+        // Output is exactly as long as the input, which is already a `Payload`, so no push
+        // can fail. Discarded rather than unwrapped: decryption must not be a panic path.
+        let mut out = Payload::new();
         for (i, chunk) in self.frm_payload.chunks(16).enumerate() {
             let mut a = [0u8; 16];
             a[0] = 0x01;
@@ -577,7 +534,7 @@ impl DataFrame {
             a[15] = (i + 1) as u8;
             aes_encrypt_block(key, &mut a);
             for (b, s) in chunk.iter().zip(a.iter()) {
-                out.push(b ^ s);
+                let _ = out.push(b ^ s);
             }
         }
         out
@@ -603,11 +560,11 @@ pub struct DownlinkParams {
     /// More data pending (frame-pending bit).
     pub fpending: bool,
     /// MAC commands carried in the FHDR, in the clear (1.0.x). ≤15 bytes.
-    pub fopts: Vec<u8>,
+    pub fopts: FOpts,
     /// Application port; `None` for a MAC-only downlink (FOpts carries everything).
     pub fport: Option<u8>,
     /// Application payload; encrypted with AppSKey (or NwkSKey for port 0).
-    pub frm_payload: Vec<u8>,
+    pub frm_payload: Payload,
 }
 
 /// Build an Unconfirmed Data Down frame, MIC'd with the network session key.
@@ -620,15 +577,22 @@ pub fn build_data_down(
     nwk_skey: &[u8; 16],
     app_skey: &[u8; 16],
     p: &DownlinkParams,
-) -> Result<Vec<u8>, LoRaWanError> {
-    // FOptsLen is a 4-bit field, so anything longer cannot be represented on air. This
-    // was an `assert!`, i.e. a panic in a library called from a gateway that must not
-    // die because a caller built an over-long MAC command. A protocol limit is a normal
-    // error, not an unrecoverable condition.
-    if p.fopts.len() > 15 {
+) -> Result<Frame, LoRaWanError> {
+    // FOptsLen is a 4-bit field, so anything longer cannot be represented on air. The
+    // `FOpts` type now enforces this at construction, but the check stays: a type bound
+    // and a protocol rule agreeing is not a reason to stop stating the rule, and this is
+    // the error a caller reads. It was originally an `assert!`, i.e. a panic in a library
+    // called from a gateway that must not die because a caller built an over-long command.
+    if p.fopts.len() > FOPTS_MAX {
         return Err(LoRaWanError::InvalidField(
             "FOpts exceeds the 4-bit FOptsLen field",
         ));
+    }
+    // FOpts and FRMPayload are individually within their limits, but their *sum* plus the
+    // header and MIC can still exceed the PHY maximum (12 + 15 + 242 = 269). That is a
+    // real, reachable overflow, so it is refused here rather than truncated on air.
+    if 12 + p.fopts.len() + p.frm_payload.len() > PHY_PAYLOAD_MAX {
+        return Err(LoRaWanError::InvalidField("frame exceeds the PHY maximum"));
     }
     let mhdr = MTYPE_UNCONFIRMED_DOWN << 5;
     let fctrl = (if p.adr { 0x80 } else { 0 })
@@ -636,14 +600,18 @@ pub fn build_data_down(
         | (if p.fpending { 0x10 } else { 0 })
         | (p.fopts.len() as u8 & 0x0F);
 
-    let mut frame = Vec::with_capacity(12 + p.fopts.len() + p.frm_payload.len());
-    frame.push(mhdr);
-    frame.extend_from_slice(&p.dev_addr.to_le_bytes());
-    frame.push(fctrl);
-    frame.extend_from_slice(&(p.fcnt as u16).to_le_bytes());
-    frame.extend_from_slice(&p.fopts);
+    // Every push below is inside the capacity the length check above just proved, so the
+    // Results cannot be Err. They are discarded rather than unwrapped so that no path
+    // through a frame builder can panic; a caller that exceeds the limit already got the
+    // explicit error.
+    let mut frame = Frame::new();
+    let _ = frame.push(mhdr);
+    let _ = frame.extend_from_slice(&p.dev_addr.to_le_bytes());
+    let _ = frame.push(fctrl);
+    let _ = frame.extend_from_slice(&(p.fcnt as u16).to_le_bytes());
+    let _ = frame.extend_from_slice(&p.fopts);
     if let Some(port) = p.fport {
-        frame.push(port);
+        let _ = frame.push(port);
         let key = if port == 0 { nwk_skey } else { app_skey };
         for (i, chunk) in p.frm_payload.chunks(16).enumerate() {
             let mut a = [0u8; 16];
@@ -654,22 +622,20 @@ pub fn build_data_down(
             a[15] = (i + 1) as u8;
             aes_encrypt_block(key, &mut a);
             for (b, s) in chunk.iter().zip(a.iter()) {
-                frame.push(b ^ s);
+                let _ = frame.push(b ^ s);
             }
         }
     }
 
-    // MIC over B0(dir=1) || frame, per EN/LoRaWAN 1.0.x.
+    // MIC over B0(dir=1) || frame, per EN/LoRaWAN 1.0.x — streamed, not concatenated.
     let mut b0 = [0u8; 16];
     b0[0] = 0x49;
     b0[5] = 1; // downlink
     b0[6..10].copy_from_slice(&p.dev_addr.to_le_bytes());
     b0[10..14].copy_from_slice(&p.fcnt.to_le_bytes());
     b0[15] = frame.len() as u8;
-    let mut buf = Vec::with_capacity(16 + frame.len());
-    buf.extend_from_slice(&b0);
-    buf.extend_from_slice(&frame);
-    frame.extend_from_slice(&mic4(nwk_skey, &buf));
+    let mic = mic4_parts(nwk_skey, &[&b0, &frame]);
+    let _ = frame.extend_from_slice(&mic);
     Ok(frame)
 }
 
@@ -882,11 +848,10 @@ mod tests {
             dev_addr: params.dev_addr,
             fctrl: 0,
             fcnt,
-            fopts: vec![],
+            fopts: FOpts::new(),
             fport: Some(1),
-            frm_payload: payload.to_vec(),
+            frm_payload: Payload::from_slice(payload).unwrap(),
             mic: [0; 4],
-            signed: vec![],
         };
         let encrypted = stub.decrypt_payload(&keys.nwk_skey, &keys.app_skey, fcnt as u32);
         frame.extend_from_slice(&encrypted);
@@ -919,7 +884,7 @@ mod tests {
         frame.extend_from_slice(&[0xAA, 0xBB, 0xCC]); // FOpts
         frame.extend_from_slice(&[1, 2, 3, 4]); // MIC
         let f = DataFrame::parse(&frame).unwrap();
-        assert_eq!(f.fopts, vec![0xAA, 0xBB, 0xCC]);
+        assert_eq!(&f.fopts[..], &[0xAA, 0xBB, 0xCC][..]);
         assert_eq!(f.fport, None);
         assert!(f.frm_payload.is_empty());
         assert_eq!(f.fcnt, 9);
@@ -937,55 +902,6 @@ mod tests {
             admit_dev_nonce(Some(5), 4),
             DevNonceVerdict::Replay { last: 5, seen: 4 }
         );
-    }
-
-    #[test]
-    fn in_memory_store_admits_advances_and_rejects_replays() {
-        let mut s = InMemoryJoinStore::new();
-        let eui = [0x00, 0x04, 0xA3, 0x0B, 0x00, 0xFF, 0x00, 0x01];
-
-        // First join: admitted, JoinNonce starts at 1.
-        assert_eq!(
-            s.admit_join(&eui, 0).unwrap(),
-            JoinAdmission::Admitted { join_nonce: 1 }
-        );
-        // Next fresh DevNonce: admitted, JoinNonce advances — never repeats.
-        assert_eq!(
-            s.admit_join(&eui, 1).unwrap(),
-            JoinAdmission::Admitted { join_nonce: 2 }
-        );
-        // Replayed DevNonce (equal): rejected, and nothing advanced.
-        assert_eq!(
-            s.admit_join(&eui, 1).unwrap(),
-            JoinAdmission::Replay { last: 1, seen: 1 }
-        );
-        // A later fresh one still gets JoinNonce 3, proving the replay did not burn one.
-        assert_eq!(
-            s.admit_join(&eui, 2).unwrap(),
-            JoinAdmission::Admitted { join_nonce: 3 }
-        );
-        assert_eq!(s.last_dev_nonce(&eui), Some(2));
-    }
-
-    #[test]
-    fn reset_clears_the_window_so_a_used_nonce_can_recur() {
-        // Under the default (1.0.2 windowed) policy, a *reused* nonce is the replay
-        // to guard against — not a merely-lower one. reset() clears the window so a
-        // re-provisioned device may legitimately draw the same value again.
-        let mut s = InMemoryJoinStore::new();
-        let eui = [1, 2, 3, 4, 5, 6, 7, 8];
-        s.admit_join(&eui, 100).unwrap();
-        // Replaying the exact nonce is rejected...
-        assert!(matches!(
-            s.admit_join(&eui, 100).unwrap(),
-            JoinAdmission::Replay { .. }
-        ));
-        // ...until an explicit re-provision clears the remembered window.
-        s.reset_dev_nonce(&eui).unwrap();
-        assert!(matches!(
-            s.admit_join(&eui, 100).unwrap(),
-            JoinAdmission::Admitted { .. }
-        ));
     }
 
     #[test]
@@ -1018,105 +934,6 @@ mod tests {
     }
 
     #[test]
-    fn windowed_store_admits_a_non_monotonic_random_sequence() {
-        // A realistic LMIC-style random draw with values rising and falling: every
-        // distinct value must be admitted, and JoinNonce advances once per admit.
-        let mut s = InMemoryJoinStore::new();
-        let eui = [0xEEu8; 8];
-        let seq = [40_000u16, 12_000, 55_000, 3, 12_001, 41_000];
-        for (i, &n) in seq.iter().enumerate() {
-            assert_eq!(
-                s.admit_join(&eui, n).unwrap(),
-                JoinAdmission::Admitted {
-                    join_nonce: (i + 1) as u32
-                },
-                "fresh random DevNonce {n} must be admitted",
-            );
-        }
-        // Replaying any earlier value is now a replay, JoinNonce not burned.
-        assert!(matches!(
-            s.admit_join(&eui, 12_000).unwrap(),
-            JoinAdmission::Replay { seen: 12_000, .. }
-        ));
-        assert_eq!(
-            s.admit_join(&eui, 99).unwrap(),
-            JoinAdmission::Admitted { join_nonce: 7 }
-        );
-    }
-
-    #[test]
-    fn window_forgets_beyond_keep_so_a_very_old_nonce_may_recur() {
-        // Bounded history: once a nonce falls out of the last `keep`, it is no longer
-        // remembered — acceptable because meter join cadence is rare and the MIC
-        // still binds every request. keep=2 makes the boundary easy to see.
-        let mut s = InMemoryJoinStore::with_policy(DevNoncePolicy::RandomWindow { keep: 2 });
-        let eui = [7u8; 8];
-        s.admit_join(&eui, 10).unwrap(); // window [10]
-        s.admit_join(&eui, 20).unwrap(); // window [10,20]
-        s.admit_join(&eui, 30).unwrap(); // window [20,30] — 10 evicted
-                                         // 10 is no longer remembered, so it is admitted again.
-        assert!(matches!(
-            s.admit_join(&eui, 10).unwrap(),
-            JoinAdmission::Admitted { .. }
-        ));
-        // 30 is still in the window, so it is still a replay.
-        assert!(matches!(
-            s.admit_join(&eui, 30).unwrap(),
-            JoinAdmission::Replay { .. }
-        ));
-    }
-
-    #[test]
-    fn counter_policy_still_enforces_strict_increase() {
-        // Opt-in 1.0.4 hardening remains available and unchanged.
-        let mut s = InMemoryJoinStore::with_policy(DevNoncePolicy::Counter);
-        let eui = [3u8; 8];
-        assert!(matches!(
-            s.admit_join(&eui, 5).unwrap(),
-            JoinAdmission::Admitted { .. }
-        ));
-        assert!(matches!(
-            s.admit_join(&eui, 4).unwrap(),
-            JoinAdmission::Replay { .. }
-        ));
-        assert!(matches!(
-            s.admit_join(&eui, 6).unwrap(),
-            JoinAdmission::Admitted { .. }
-        ));
-    }
-
-    #[test]
-    fn join_nonce_is_per_device() {
-        let mut s = InMemoryJoinStore::new();
-        let a = [0xAAu8; 8];
-        let b = [0xBBu8; 8];
-        // Each device gets its own monotonic sequence starting at 1.
-        assert_eq!(
-            s.admit_join(&a, 0).unwrap(),
-            JoinAdmission::Admitted { join_nonce: 1 }
-        );
-        assert_eq!(
-            s.admit_join(&b, 0).unwrap(),
-            JoinAdmission::Admitted { join_nonce: 1 }
-        );
-        assert_eq!(
-            s.admit_join(&a, 1).unwrap(),
-            JoinAdmission::Admitted { join_nonce: 2 }
-        );
-    }
-
-    // --- Downlink / MAC-command (channel pin) ---
-
-    const NWK_SKEY: [u8; 16] = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
-        0x10,
-    ];
-    const APP_SKEY: [u8; 16] = [
-        0xF0, 0xE0, 0xD0, 0xC0, 0xB0, 0xA0, 0x90, 0x80, 0x70, 0x60, 0x50, 0x40, 0x30, 0x20, 0x10,
-        0x00,
-    ];
-
-    #[test]
     fn link_adr_req_pins_channel_zero_without_touching_dr_or_power() {
         // ChMask=0x0001 (only 868.1), DR/power = "no change" (0xF), NbTrans=1.
         assert_eq!(
@@ -1127,7 +944,7 @@ mod tests {
 
     #[test]
     fn data_down_with_link_adr_req_round_trips_and_mic_verifies() {
-        let fopts = link_adr_req(0x0001, 0x0F, 0x0F, 1).to_vec();
+        let fopts = FOpts::from_slice(&link_adr_req(0x0001, 0x0F, 0x0F, 1)).unwrap();
         let p = DownlinkParams {
             dev_addr: 0x2600_0001,
             fcnt: 0,
@@ -1136,7 +953,7 @@ mod tests {
             fpending: false,
             fopts: fopts.clone(),
             fport: None,
-            frm_payload: Vec::new(),
+            frm_payload: Payload::new(),
         };
         let frame = build_data_down(&NWK_SKEY, &APP_SKEY, &p).expect("valid params");
 
@@ -1161,43 +978,61 @@ mod tests {
             adr: true,
             ack: false,
             fpending: false,
-            fopts: Vec::new(),
+            fopts: FOpts::new(),
             fport: Some(1),
-            frm_payload: payload.clone(),
+            frm_payload: Payload::from_slice(&payload).unwrap(),
         };
         let frame = build_data_down(&NWK_SKEY, &APP_SKEY, &p).expect("valid params");
         let df = DataFrame::parse(&frame).unwrap();
         assert!(df.verify_mic(&NWK_SKEY, 7));
         // Decrypting the downlink with the same keys/counter recovers the plaintext.
-        assert_eq!(df.decrypt_payload(&NWK_SKEY, &APP_SKEY, 7), payload);
+        assert_eq!(
+            &df.decrypt_payload(&NWK_SKEY, &APP_SKEY, 7)[..],
+            &payload[..]
+        );
     }
 
     #[test]
-    fn over_long_fopts_is_an_error_not_a_panic() {
-        // Was an assert!, i.e. a panic in a library a gateway links against. FOptsLen is
-        // 4 bits, so >15 cannot go on air — a protocol limit, which is a normal error.
+    fn over_long_fopts_cannot_be_constructed_at_all() {
+        // This was an `assert!` (a panic in a library a gateway links against), then a
+        // runtime `Err`. With `FOpts` fixed at FOPTS_MAX the invalid state is now
+        // unrepresentable: the 4-bit FOptsLen limit is enforced by the type, so the error
+        // moves from build time to construction time and cannot be bypassed by a caller
+        // who ignores a Result.
+        assert!(FOpts::from_slice(&[0u8; 16]).is_err());
+        // 15 is the boundary and must still succeed, end to end.
+        let ok = DownlinkParams {
+            dev_addr: 0x2600_0001,
+            fcnt: 0,
+            adr: true,
+            ack: false,
+            fpending: false,
+            fopts: FOpts::from_slice(&[0u8; 15]).unwrap(),
+            fport: None,
+            frm_payload: Payload::new(),
+        };
+        assert!(build_data_down(&NWK_SKEY, &APP_SKEY, &ok).is_ok());
+    }
+
+    #[test]
+    fn a_frame_over_the_phy_maximum_is_an_error_not_a_truncation() {
+        // FOpts and FRMPayload are each individually legal, but 12 + 15 + 242 = 269 > 255.
+        // This is the one overflow the type system cannot catch, so it must be refused
+        // rather than silently truncated onto the air.
         let p = DownlinkParams {
             dev_addr: 0x2600_0001,
             fcnt: 0,
             adr: true,
             ack: false,
             fpending: false,
-            fopts: alloc::vec![0u8; 16],
-            fport: None,
-            frm_payload: Vec::new(),
+            fopts: FOpts::from_slice(&[0u8; 15]).unwrap(),
+            fport: Some(1),
+            frm_payload: Payload::from_slice(&[0u8; FRM_PAYLOAD_MAX]).unwrap(),
         };
         assert_eq!(
             build_data_down(&NWK_SKEY, &APP_SKEY, &p),
-            Err(LoRaWanError::InvalidField(
-                "FOpts exceeds the 4-bit FOptsLen field"
-            ))
+            Err(LoRaWanError::InvalidField("frame exceeds the PHY maximum"))
         );
-        // 15 is the boundary and must still succeed.
-        let ok = DownlinkParams {
-            fopts: alloc::vec![0u8; 15],
-            ..p
-        };
-        assert!(build_data_down(&NWK_SKEY, &APP_SKEY, &ok).is_ok());
     }
 
     #[test]
@@ -1216,4 +1051,15 @@ mod tests {
         // Unknown leading CID stops the walk safely.
         assert_eq!(parse_link_adr_ans(&[0x7F, 0x03, 0x07]), None);
     }
+
+    // --- Downlink / MAC-command (channel pin) ---
+
+    const NWK_SKEY: [u8; 16] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10,
+    ];
+    const APP_SKEY: [u8; 16] = [
+        0xF0, 0xE0, 0xD0, 0xC0, 0xB0, 0xA0, 0x90, 0x80, 0x70, 0x60, 0x50, 0x40, 0x30, 0x20, 0x10,
+        0x00,
+    ];
 }

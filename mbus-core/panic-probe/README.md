@@ -10,7 +10,17 @@ Run `./check-panic-free.sh`. It is a **ratchet**: it compares reality against th
 `EXPECT_PANIC_FREE` and fails if they differ in *either* direction, so the state cannot
 regress silently and an improvement cannot land without updating the record.
 
-## The finding: panic-freedom and no-heap are the same task
+## Status: panic-free and heap-free (2026-08-21)
+
+The core links for `thumbv6m-none-eabi` with **no global allocator and no reachable panic
+path**. `EXPECT_PANIC_FREE=1`. The bump allocator this probe used to carry is gone — it
+existed only to make the heap dependency visible, and there is no longer one to show.
+
+Verified three ways rather than asserted: the trap symbol is present in the handler, the
+code under test is genuinely linked (`.text` ≈ 8 kB, not a GC'd stub), and an injected
+out-of-bounds index still fails the link.
+
+## How it was reached: panic-freedom and no-heap are the same task
 
 Measured 2026-08-21 by bisecting the exercised entry points:
 
@@ -22,22 +32,20 @@ Measured 2026-08-21 by bisecting the exercised entry points:
 | `DataFrame::parse` | **can panic** |
 | a bare `Vec::push`, nothing else | **can panic** |
 
-That last row is the whole answer. On stable `no_std` + `alloc`, allocation failure is a
+That last row was the whole answer. On stable `no_std` + `alloc`, allocation failure is a
 panic by construction: `Vec` growth calls `handle_alloc_error`, which is divergent and
-pulls the panic handler in. **Every `Vec`-returning function in the public API is therefore
-a panic path**, no matter how carefully its own logic avoids indexing or unwrapping.
+pulls the panic handler in. **Every `Vec`-returning function in the public API was
+therefore a panic path**, however carefully its own logic avoided indexing or unwrapping.
 
-So the two remaining items on the no_std plan are not independent:
+So the two remaining items on the no_std plan were never independent:
 
-* the hand-written panic sites we already removed (`new_from_slice().expect(..)`, the
+* the hand-written panic sites removed earlier (`new_from_slice().expect(..)`, the
   `FOptsLen` overflow) were real and worth removing, but they were never the binding
   constraint;
-* **panic-freedom is unreachable until the API stops allocating** — i.e. until the
-  heapless work lands and `Vec<u8>` becomes `heapless::Vec<u8, N>`.
+* **panic-freedom was unreachable until the API stopped allocating.**
 
-`EXPECT_PANIC_FREE` flips to `1` in the same commit that makes that true. The bump
-allocator in `src/main.rs` should be deletable then, and the probe failing to build without
-it is the regression test.
+Replacing `Vec`/`String` with fixed-capacity `heapless` types removed the allocator, and
+the panic paths went with it. One change, both properties.
 
 ## Two earlier versions of this check were wrong, and both reported success
 

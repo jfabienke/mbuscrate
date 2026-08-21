@@ -28,8 +28,9 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 # Current recorded state. 0 = mbus-core can still panic; 1 = proven panic-free.
-# Flip to 1 in the same commit that makes it true (see README: this requires heapless).
-EXPECT_PANIC_FREE=0
+# Flipped to 1 when the heapless work removed the last allocation: with no `Vec`, there
+# is no `handle_alloc_error`, and that was the only remaining panic path.
+EXPECT_PANIC_FREE=1
 
 TARGET=thumbv6m-none-eabi
 BIN="target/$TARGET/release/mbus-core-panic-probe"

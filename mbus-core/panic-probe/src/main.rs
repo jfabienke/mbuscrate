@@ -7,37 +7,7 @@
 #![no_std]
 #![no_main]
 
-use core::alloc::{GlobalAlloc, Layout};
 use core::panic::PanicInfo;
-
-/// A bump allocator that never frees.
-///
-/// Its presence is itself a measurement: **`mbus-core` cannot link on bare metal without
-/// a global allocator**, because the public API still carries `Vec`/`String`. That is the
-/// concrete form of "not yet no-heap" — the link fails with
-/// `no global memory allocator found` before any panic analysis can even begin.
-///
-/// Once the heapless work lands this stub should be deletable, and the probe failing to
-/// build without it is the regression test for that.
-struct Bump;
-
-static mut ARENA: [u8; 4096] = [0; 4096];
-static mut NEXT: usize = 0;
-
-unsafe impl GlobalAlloc for Bump {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        let start = (NEXT + l.align() - 1) & !(l.align() - 1);
-        if start + l.size() > ARENA.len() {
-            return core::ptr::null_mut();
-        }
-        NEXT = start + l.size();
-        core::ptr::addr_of_mut!(ARENA[start])
-    }
-    unsafe fn dealloc(&self, _: *mut u8, _: Layout) {}
-}
-
-#[global_allocator]
-static ALLOC: Bump = Bump;
 
 /// Deliberately minimal: no formatting, no unwinding. If the build succeeds and the map
 /// is clean, nothing on the exercised paths reached for a panic.
