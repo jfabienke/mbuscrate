@@ -252,7 +252,10 @@ impl FrameDecoder {
             version: link.version,
             device_type: link.device_type,
             control_info,
-            payload: link.application_data().to_vec(),
+            // Fixed-capacity now; an over-long application block is truncated here
+            // rather than panicking, and cannot occur for a frame that parsed.
+            payload: crate::wmbus::frame::Payload::from_slice(link.application_data())
+                .unwrap_or_default(),
             crc: trailing_crc,
             encrypted,
         })

@@ -64,6 +64,13 @@ type UnsolicitedCallback = Arc<dyn Fn(&WMBusFrame) + Send + Sync>;
 /// the packet (see [`Sx126xDriver::process_irqs_with_mode`]): GFSK payloads are parsed as
 /// wM-Bus frames; LoRa payloads are surfaced **raw** with their radio metadata (no payload
 /// decoding happens here). Delivered over [`WMBusHandle::recv_item`].
+/// The `Wmbus` variant is much larger than `Lora` because `WMBusFrame` now carries its
+/// payload in a fixed-capacity buffer (245 bytes) rather than a `Vec`. That is the
+/// deliberate cost of making the parser allocation-free. Boxing the variant would even
+/// the sizes out, but at the price of one heap allocation per received frame in the hot
+/// receive path — the exact thing the fixed capacity exists to avoid. Items are consumed
+/// immediately rather than accumulated, so the size penalty is a transient stack cost.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ReceivedItem {
     /// A parsed wM-Bus frame received on the GFSK modem.
@@ -1060,14 +1067,14 @@ mod tests {
     }
 
     /// A complete, CRC-valid wM-Bus radio frame that `parse_wmbus_frame` accepts.
-    fn valid_wmbus_bytes() -> Vec<u8> {
+    fn valid_wmbus_bytes() -> crate::wmbus::frame::FrameBytes {
         WMBusFrame::build(0x44, 0x6815, 0x74280561, 0x37, 0x01, 0x8E, &[0x01, 0x02])
     }
 
     #[test]
     fn routes_gfsk_valid_to_wmbus_and_malformed_to_none() {
         // A valid GFSK payload parses into a wM-Bus item...
-        match route_packet(gfsk_packet(valid_wmbus_bytes())) {
+        match route_packet(gfsk_packet(valid_wmbus_bytes().to_vec())) {
             Some(ReceivedItem::Wmbus { frame, rssi_dbm }) => {
                 assert_eq!(frame.device_address, 0x74280561);
                 assert_eq!(rssi_dbm, -70);
@@ -1100,7 +1107,7 @@ mod tests {
     fn mixed_order_lora_wmbus_lora_routes_each_correctly() {
         let items: Vec<_> = [
             lora_packet(),
-            gfsk_packet(valid_wmbus_bytes()),
+            gfsk_packet(valid_wmbus_bytes().to_vec()),
             lora_packet(),
         ]
         .into_iter()
@@ -1121,7 +1128,7 @@ mod tests {
         // Two LoRa items ahead of the wM-Bus frame in the stream.
         handle.inject_item(route_packet(lora_packet()).unwrap());
         handle.inject_item(route_packet(lora_packet()).unwrap());
-        handle.inject_item(route_packet(gfsk_packet(valid_wmbus_bytes())).unwrap());
+        handle.inject_item(route_packet(gfsk_packet(valid_wmbus_bytes().to_vec())).unwrap());
 
         let (frame, rssi) = handle.recv_frame(Some(1000)).await.unwrap();
         assert_eq!(frame.device_address, 0x74280561);
@@ -1184,7 +1191,7 @@ mod tests {
 
         // Base GFSK: a wM-Bus frame arrives -> Wmbus item.
         scheduler.switch_to(&wmbus()).await.unwrap();
-        probe.queue_rx(valid_wmbus_bytes());
+        probe.queue_rx(valid_wmbus_bytes().to_vec());
         items.push(handle.poll_once_test().await.unwrap());
 
         // Scheduler switches to LoRa: a raw payload arrives -> Lora item.
@@ -1194,7 +1201,7 @@ mod tests {
 
         // Back to GFSK: another wM-Bus frame -> Wmbus item.
         scheduler.switch_to(&wmbus()).await.unwrap();
-        probe.queue_rx(valid_wmbus_bytes());
+        probe.queue_rx(valid_wmbus_bytes().to_vec());
         items.push(handle.poll_once_test().await.unwrap());
 
         // Reception followed the scheduler's switches, in order: Wmbus, Lora, Wmbus.

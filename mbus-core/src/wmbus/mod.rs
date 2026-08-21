@@ -8,3 +8,4 @@
 //! anything load-bearing follows it.
 
 pub mod crc;
+pub mod frame;

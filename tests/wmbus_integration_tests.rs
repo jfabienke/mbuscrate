@@ -46,7 +46,10 @@ impl MockHal {
     }
 
     /// Create a test wM-Bus frame
-    pub fn create_test_frame(device_address: u32, payload: &[u8]) -> Vec<u8> {
+    pub fn create_test_frame(
+        device_address: u32,
+        payload: &[u8],
+    ) -> mbus_rs::wmbus::frame::FrameBytes {
         WMBusFrame::build(
             0x44,   // Control field
             0x1568, // Manufacturer ID (Engelmann)
@@ -187,7 +190,7 @@ async fn test_wmbus_frame_round_trip() {
     assert_eq!(parsed_frame.version, 0x37);
     assert_eq!(parsed_frame.device_type, 0x01);
     assert_eq!(parsed_frame.control_info, 0x8E);
-    assert_eq!(parsed_frame.payload, original_payload);
+    assert_eq!(&parsed_frame.payload[..], &original_payload[..]);
 
     // Verify CRC is valid
     assert!(parsed_frame.verify_crc());
@@ -238,7 +241,7 @@ async fn test_wmbus_handle_frame_transmission() {
         version: 0x37,
         device_type: 0x01,
         control_info: 0x8E,
-        payload: vec![0x01, 0x02, 0x03],
+        payload: mbus_rs::wmbus::frame::Payload::from_slice(&[0x01, 0x02, 0x03]).unwrap(),
         crc: 0, // Will be calculated
         encrypted: false,
     };
@@ -384,9 +387,9 @@ async fn test_simulated_device_discovery() {
     let hal = MockHal::new();
 
     // Add some simulated devices
-    hal.add_rx_frame(MockHal::create_test_frame(0x11111111, &[0x01, 0x02]));
-    hal.add_rx_frame(MockHal::create_test_frame(0x22222222, &[0x03, 0x04]));
-    hal.add_rx_frame(MockHal::create_test_frame(0x33333333, &[0x05, 0x06]));
+    hal.add_rx_frame(MockHal::create_test_frame(0x11111111, &[0x01, 0x02]).to_vec());
+    hal.add_rx_frame(MockHal::create_test_frame(0x22222222, &[0x03, 0x04]).to_vec());
+    hal.add_rx_frame(MockHal::create_test_frame(0x33333333, &[0x05, 0x06]).to_vec());
 
     let config = WMBusConfig {
         discovery_timeout_ms: 100, // Short timeout for testing

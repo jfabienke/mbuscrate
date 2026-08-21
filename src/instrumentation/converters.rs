@@ -201,7 +201,7 @@ pub fn from_wmbus_frame(
     }
 
     inst.frame_statistics.last_frame_time = Some(SystemTime::now());
-    inst.raw_payload = Some(frame.payload.clone());
+    inst.raw_payload = Some(frame.payload.to_vec());
 
     inst
 }
@@ -427,7 +427,7 @@ mod tests {
             version: 0x01,
             device_type: 0x07, // Water
             control_info: 0x72,
-            payload: vec![1, 2, 3],
+            payload: crate::wmbus::frame::Payload::from_slice(&[1, 2, 3]).unwrap(),
             crc: 0x1234,
             encrypted: false,
         };

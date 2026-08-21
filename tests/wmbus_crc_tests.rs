@@ -150,7 +150,7 @@ fn test_wmbus_frame_round_trip() {
         version: 0x37,
         device_type: 0x01,
         control_info: 0x8E,
-        payload: vec![0xAA, 0xBB, 0xCC],
+        payload: mbus_rs::wmbus::frame::Payload::from_slice(&[0xAA, 0xBB, 0xCC]).unwrap(),
         crc: 0, // Will be calculated
         encrypted: false,
     };
