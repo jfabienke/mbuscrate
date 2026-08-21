@@ -87,7 +87,7 @@ fn test_wmbus_frame_crc_validation() {
     corrupted_frame[len - 1] ^= 0x01; // Corrupt CRC
 
     match parse_wmbus_frame(&corrupted_frame) {
-        Err(ParseError::InvalidCrc) => {} // Expected
+        Err(ParseError::InvalidCrc { .. }) => {} // Expected
         Ok(_) => panic!("Corrupted frame should not parse successfully"),
         Err(e) => panic!("Expected InvalidCrc error, got {e:?}"),
     }

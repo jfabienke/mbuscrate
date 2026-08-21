@@ -34,7 +34,6 @@
 //! ```
 
 use crate::error::MBusError;
-use crate::instrumentation::stats::{update_device_error, ErrorType};
 use crate::vendors::{dispatch_crc_tolerance, CrcErrorContext, CrcErrorType, VendorRegistry};
 use crate::wmbus::crc::read_crc_be;
 use log::{debug, warn};
@@ -290,11 +289,13 @@ pub fn process_type_a_blocks(payload: &[u8], encrypted: bool) -> Result<Vec<u8>,
 ///
 /// Enhanced version that integrates with vendor extension system
 /// to tolerate known manufacturer-specific CRC issues.
+// The `device_id` parameter was dropped: its only use was keying the per-device stats
+// call that lived in the CRC-failure arm. Callers that want to attribute block-CRC
+// failures read `crc_valid` off the returned `BlockInfo`s, which carry it already.
 pub fn verify_blocks_with_vendor(
     payload: &[u8],
     encrypted: bool,
     manufacturer_id: Option<&str>,
-    device_id: Option<&str>,
     registry: Option<&VendorRegistry>,
 ) -> Result<Vec<BlockInfo>, MBusError> {
     if payload.is_empty() {
@@ -354,10 +355,11 @@ pub fn verify_blocks_with_vendor(
                         crc_valid = true; // Tolerate the error
                     }
                     _ => {
-                        // Track block CRC error
-                        if let Some(dev_id) = device_id {
-                            update_device_error(dev_id, ErrorType::BlockCrc);
-                        }
+                        // No stats call here. Every returned `BlockInfo` already carries
+                        // `crc_valid`, so a caller that wants to count block-CRC failures
+                        // reads them off the result — the parser recording them itself was
+                        // duplicating information it was about to return anyway, and made
+                        // a pure function mutate process-wide state.
                         warn!(
                             "Block {} CRC mismatch: expected 0x{:04X}, got 0x{:04X}",
                             blocks.len(),

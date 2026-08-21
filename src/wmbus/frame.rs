@@ -22,7 +22,6 @@
 //! The CRC is CRC-16/EN-13757 (poly 0x3D65, init 0x0000, xorout 0xFFFF); see
 //! [`crate::wmbus::crc`] for the canonical implementation and its check value.
 
-use crate::instrumentation::stats::{update_device_error, update_device_success, ErrorType};
 use crate::vendors;
 use crate::wmbus::crc::read_crc_be;
 use thiserror::Error;
@@ -46,8 +45,19 @@ pub struct WMBusFrame {
 pub enum ParseError {
     #[error("Invalid length field")]
     InvalidLength,
+    /// Link-layer CRC did not verify.
+    ///
+    /// Carries the device address when the frame got far enough to parse one, so a
+    /// caller can attribute the failure. It is `None` for compact frames, which are
+    /// keyed by signature rather than address.
+    ///
+    /// The address is here so that this module does not have to reach for global
+    /// statistics: it used to call `update_device_error` directly, which made a pure
+    /// parser mutate process-wide state and allocate a `String` key on every failed
+    /// frame. Reporting what happened and letting the caller record it is both testable
+    /// and portable -- `mbus-core` has neither a stats registry nor an allocator.
     #[error("Invalid CRC")]
-    InvalidCrc,
+    InvalidCrc { device_address: Option<u32> },
     #[error("Buffer too short")]
     BufferTooShort,
 }
@@ -244,9 +254,9 @@ pub fn parse_wmbus_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
     // CRC covers the ciphertext and is valid on a correctly received frame. (Previously
     // encrypted frames skipped this and accepted corrupted ciphertext as a valid frame.)
     if !verify_wmbus_crc(raw_bytes) {
-        let device_id = format!("{device_address:08X}");
-        update_device_error(&device_id, ErrorType::Crc);
-        return Err(ParseError::InvalidCrc);
+        return Err(ParseError::InvalidCrc {
+            device_address: Some(device_address),
+        });
     }
 
     // Extract payload (everything between CI field and CRC)
@@ -260,10 +270,6 @@ pub fn parse_wmbus_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
 
     // Extract CRC from last 2 bytes (big-endian, as transmitted)
     let crc = read_crc_be(&raw_bytes[raw_bytes.len() - 2..]);
-
-    // Track successful frame parsing
-    let device_id = format!("{device_address:08X}");
-    update_device_success(&device_id);
 
     Ok(WMBusFrame {
         length,
@@ -305,9 +311,12 @@ fn parse_compact_frame(raw_bytes: &[u8]) -> Result<WMBusFrame, ParseError> {
     // Extract signature (used to lookup cached device info)
     let signature = u16::from_le_bytes([raw_bytes[3], raw_bytes[4]]);
 
-    // Verify CRC
+    // Verify CRC. Compact frames are keyed by signature, so there is no address to
+    // attribute this to.
     if !verify_wmbus_crc(raw_bytes) {
-        return Err(ParseError::InvalidCrc);
+        return Err(ParseError::InvalidCrc {
+            device_address: None,
+        });
     }
 
     // Extract payload (everything between signature and CRC)
@@ -468,5 +477,48 @@ impl WMBusFrame {
     pub fn verify_crc(&self) -> bool {
         let frame_bytes = self.to_bytes();
         verify_wmbus_crc(&frame_bytes)
+    }
+}
+
+#[cfg(test)]
+mod seam_tests {
+    use super::*;
+
+    /// The point of the inversion: a CRC failure is now an inspectable *value*.
+    ///
+    /// Previously this path called `update_device_error` into a process-wide registry
+    /// and returned a unit variant, so the only way to observe which device failed was
+    /// to read global state — which no unit test can do reliably in parallel, and which
+    /// a `no_std` build has nowhere to put.
+    #[test]
+    fn a_crc_failure_reports_the_device_it_belongs_to() {
+        const ADDR: u32 = 0x7428_0561;
+        let frame = WMBusFrame::build(
+            0x44,
+            0x1568,
+            ADDR,
+            0x37,
+            0x01,
+            0x8E,
+            &[0x01, 0x02, 0x03, 0x04],
+        );
+        let good = parse_wmbus_frame(&frame).expect("well-formed frame should parse");
+        let addr = good.device_address;
+        assert_eq!(addr, ADDR);
+
+        // Corrupt the CRC so verification fails but the header still parses.
+        let mut bad = frame.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0x01;
+        match parse_wmbus_frame(&bad) {
+            Err(ParseError::InvalidCrc { device_address }) => {
+                assert_eq!(
+                    device_address,
+                    Some(addr),
+                    "the failure must name the device it came from"
+                );
+            }
+            other => panic!("expected InvalidCrc, got {other:?}"),
+        }
     }
 }

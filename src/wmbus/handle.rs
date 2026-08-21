@@ -38,6 +38,7 @@
 //! }
 //! ```
 
+use crate::instrumentation::stats::{update_device_error, update_device_success, ErrorType};
 use crate::wmbus::frame::{ParseError, WMBusFrame};
 use crate::wmbus::radio::driver::{
     DeviceErrors, DriverError, LbtConfig, LoRaRxInfo, ModeTaggedPacket, RadioStats,
@@ -96,8 +97,20 @@ fn route_packet(packet: ModeTaggedPacket) -> Option<ReceivedItem> {
     } = packet;
     match mode {
         PacketType::Gfsk => match crate::wmbus::frame::parse_wmbus_frame(&payload) {
-            Ok(frame) => Some(ReceivedItem::Wmbus { frame, rssi_dbm }),
+            Ok(frame) => {
+                // Per-device statistics are recorded here rather than inside the parser.
+                // The parser is pure and portable; this is the layer that owns a process
+                // and can afford a registry and a String key.
+                update_device_success(&format!("{:08X}", frame.device_address));
+                Some(ReceivedItem::Wmbus { frame, rssi_dbm })
+            }
             Err(e) => {
+                if let crate::wmbus::frame::ParseError::InvalidCrc {
+                    device_address: Some(addr),
+                } = e
+                {
+                    update_device_error(&format!("{addr:08X}"), ErrorType::Crc);
+                }
                 log::debug!("Dropping unparseable wM-Bus frame: {e:?}");
                 None
             }
