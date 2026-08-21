@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn missing_temperature_is_unknown_not_ok() {
         assert_eq!(assess(&snap(None, None, None)), ThermalStatus::Unknown);
-        assert_eq!(ThermalStatus::Unknown.is_alarm(), false);
+        assert!(!ThermalStatus::Unknown.is_alarm());
     }
 
     #[test]
