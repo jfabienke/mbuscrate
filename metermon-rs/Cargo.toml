@@ -18,6 +18,16 @@ description = "Rust reimplementation of the epulse `metermon` wM-Bus gateway, bu
 # The library under test. `crypto` is required for Mode 5/7/9 decryption.
 mbus-rs = { path = "..", features = ["crypto"] }
 
+# Shared wire contract for the MQTT LoRaWAN join-control protocol (arm/verify/status).
+# Keys never cross these topics.
+#
+# Vendored into this repo (workspace member at ../lorawan-join-control), no longer a
+# sibling directory outside it. The old `../../lorawan-join-control` path had no git
+# remote behind it, so CI could not resolve it -- and because cargo resolves path
+# dependencies even when the owning feature is off, that failed the whole build rather
+# than just skipping this feature.
+lorawan-join-control = { path = "../lorawan-join-control", optional = true }
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rumqttc = "0.24"
@@ -38,3 +48,9 @@ default = []
 # (rppal is Linux-only), so it is OFF by default: the decode core, file-replay source,
 # and MQTT publisher all build and test on any host without it.
 radio = ["mbus-rs/rfm69", "mbus-rs/raspberry-pi", "dep:rppal"]
+# The LoRaWAN join-control endpoint and its mock-backend driver. Pulls in the shared
+# `lorawan-join-control` wire-schema crate (a sibling path dep, absent from repo CI) and
+# implies `radio` because the gateway endpoint drives the RF join responder. The
+# host-only backend driver (`join-control-backend`) is pure MQTT but lives behind this
+# same feature because it needs the schema crate.
+join-control = ["dep:lorawan-join-control", "radio"]

@@ -786,6 +786,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "lorawan-join-control"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "mbus-core"
 version = "1.0.0"
 dependencies = [
@@ -850,6 +857,7 @@ dependencies = [
  "env_logger",
  "hex",
  "log",
+ "lorawan-join-control",
  "mbus-rs",
  "redb",
  "rppal",
