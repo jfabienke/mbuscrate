@@ -148,7 +148,7 @@ fn benchmark_checksum_operations(c: &mut Criterion) {
         control: 0x08,
         address: 0x01,
         control_information: 0x72,
-        data: vec![0xAA; 100],
+        data: mbus_rs::mbus::frame::FrameData::from_slice(&[0xAA; 100]).unwrap(),
         checksum: 0, // Will be calculated
         more_records_follow: false,
     };

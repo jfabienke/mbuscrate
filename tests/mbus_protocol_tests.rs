@@ -1,5 +1,5 @@
 use mbus_rs::constants::{MBUS_CONTROL_INFO_RESP_FIXED, MBUS_CONTROL_INFO_RESP_VARIABLE};
-use mbus_rs::mbus::frame::{MBusFrame, MBusFrameType};
+use mbus_rs::mbus::frame::{FrameData, MBusFrame, MBusFrameType};
 use mbus_rs::{
     error::MBusError,
     mbus::mbus_protocol::{MBusProtocol, MBusProtocolState, StateMachine},
@@ -39,9 +39,9 @@ async fn test_state_machine_receive_data() {
         frame_type: MBusFrameType::Long,
         control: 0x08,
         address: 0x01,
-        control_information: 0x72,          // RSP_UD
-        data: vec![0x01, 0x00, 0x00, 0x00], // Some test data
-        checksum: 0x7C,                     // 0x08 + 0x01 + 0x72 + 0x01 = 0x7C
+        control_information: 0x72, // RSP_UD
+        data: FrameData::from_slice(&[0x01, 0x00, 0x00, 0x00]).unwrap(), // Some test data
+        checksum: 0x7C,            // 0x08 + 0x01 + 0x72 + 0x01 = 0x7C
         more_records_follow: false,
     };
     let result = sm.receive_data(&frame).await;
@@ -114,13 +114,13 @@ async fn test_frame_handler_pack_frame() {
         control: 0x7B,
         address: 0x01,
         control_information: 0,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0x7C,
         more_records_follow: false,
     };
     let packed = handler.pack_frame(&frame);
     // Expect packed short frame
-    assert_eq!(packed, vec![0x10, 0x7B, 0x01, 0x7C, 0x16]);
+    assert_eq!(&packed[..], &[0x10, 0x7B, 0x01, 0x7C, 0x16][..]);
 }
 
 #[tokio::test]
@@ -132,7 +132,7 @@ async fn test_frame_handler_verify_frame() {
         control: 0x7B,
         address: 0x01,
         control_information: 0,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0x7C,
         more_records_follow: false,
     };
@@ -149,7 +149,7 @@ async fn test_frame_handler_send_frame() {
         control: 0,
         address: 0,
         control_information: 0,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0,
         more_records_follow: false,
     };
@@ -190,7 +190,7 @@ async fn test_record_parser_parse_records_variable() {
     let mut parser = mbus_rs::mbus::mbus_protocol::RecordParser::new();
     let frame = MBusFrame {
         control_information: MBUS_CONTROL_INFO_RESP_VARIABLE,
-        data: vec![0x03, 0x60, 0x00], // Mock DIF/VIF for volume
+        data: FrameData::from_slice(&[0x03, 0x60, 0x00]).unwrap(), // Mock DIF/VIF for volume
         frame_type: MBusFrameType::Short,
         control: 0,
         address: 0,
@@ -209,7 +209,7 @@ async fn test_record_parser_parse_records_fixed() {
     let mut parser = mbus_rs::mbus::mbus_protocol::RecordParser::new();
     let frame = MBusFrame {
         control_information: MBUS_CONTROL_INFO_RESP_FIXED,
-        data: vec![
+        data: FrameData::from_slice(&[
             0x01, 0x00, 0x00, 0x00, // Device ID (BCD)
             0x21, 0x04, // Manufacturer (0x0421 minimum valid)
             0x01, // Version
@@ -218,7 +218,8 @@ async fn test_record_parser_parse_records_fixed() {
             0x00, // Status
             0x00, 0x00, // Signature
             0x00, 0x00, 0x00, 0x00, // Counter value
-        ], // Mock fixed data (16 bytes)
+        ])
+        .unwrap(), // Mock fixed data (16 bytes)
         frame_type: MBusFrameType::Short,
         control: 0,
         address: 0,

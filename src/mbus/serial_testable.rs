@@ -4,7 +4,7 @@
 //! that can work with either real serial ports or mock implementations.
 
 use crate::error::MBusError;
-use crate::mbus::frame::{pack_frame, parse_frame, MBusFrame};
+use crate::mbus::frame::{pack_frame, parse_frame, FrameData, MBusFrame};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -163,7 +163,7 @@ mod tests {
             control: 0,
             address: 0,
             control_information: 0,
-            data: vec![],
+            data: FrameData::new(),
             checksum: 0,
             more_records_follow: false,
         };
@@ -185,7 +185,7 @@ mod tests {
             control: 0x53,
             address: 0x01,
             control_information: 0,
-            data: vec![],
+            data: FrameData::new(),
             checksum: 0x54,
             more_records_follow: false,
         };
@@ -253,7 +253,7 @@ mod tests {
         let frame = handle.recv_frame().await.unwrap();
         assert_eq!(frame.frame_type, MBusFrameType::Long);
         assert_eq!(frame.data.len(), 3);
-        assert_eq!(frame.data, vec![0x01, 0x02, 0x03]);
+        assert_eq!(&frame.data[..], &[0x01, 0x02, 0x03]);
     }
 
     #[tokio::test]
@@ -293,7 +293,7 @@ mod tests {
             control: 0x53,
             address: 0x01,
             control_information: 0,
-            data: vec![],
+            data: FrameData::new(),
             checksum: 0x54,
             more_records_follow: false,
         };
@@ -338,7 +338,7 @@ mod tests {
             control: 0,
             address: 0,
             control_information: 0,
-            data: vec![],
+            data: FrameData::new(),
             checksum: 0,
             more_records_follow: false,
         };

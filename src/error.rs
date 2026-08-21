@@ -80,3 +80,25 @@ pub enum MBusError {
     #[error("Wireless M-Bus error: {0}")]
     WMBusError(String),
 }
+
+/// Lift an allocation-free core error into the crate's richer error type.
+///
+/// This is the boundary the split is built around: `mbus-core` returns
+/// [`mbus_core::error::ProtocolError`] with `&'static str` context, and everything above
+/// it keeps the `String`-carrying variants it already uses at 96 call sites.
+impl From<mbus_core::error::ProtocolError> for MBusError {
+    fn from(err: mbus_core::error::ProtocolError) -> Self {
+        use mbus_core::error::ProtocolError as P;
+        match err {
+            P::InvalidChecksum {
+                expected,
+                calculated,
+            } => MBusError::InvalidChecksum {
+                expected,
+                calculated,
+            },
+            P::InvalidHexString => MBusError::InvalidHexString,
+            P::InvalidField(name) => MBusError::FrameParseError(name.to_string()),
+        }
+    }
+}

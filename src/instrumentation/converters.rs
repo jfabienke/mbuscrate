@@ -377,6 +377,7 @@ pub fn from_vendor_device_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mbus::frame::FrameData;
     use crate::mbus::frame::MBusFrameType;
 
     #[test]
@@ -386,7 +387,7 @@ mod tests {
             control: 0x08,
             address: 1,
             control_information: 0x72,
-            data: vec![],
+            data: FrameData::new(),
             checksum: 0,
             more_records_follow: false,
         };

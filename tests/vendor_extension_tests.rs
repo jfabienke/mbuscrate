@@ -1,5 +1,6 @@
 //! Comprehensive tests for the vendor extension system
 
+use mbus_rs::mbus::frame::FrameData;
 use mbus_rs::{
     from_mbus_frame, from_vendor_device_info, DeviceType, MBusError, MBusFrame, MBusRecord,
     MBusRecordValue, ProtocolType, VendorDataRecord, VendorDeviceInfo, VendorExtension,
@@ -426,7 +427,7 @@ fn test_integration_with_mbus_frame() {
         control: 0x08,
         address: 1,
         control_information: 0x72,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0,
         more_records_follow: false,
     };

@@ -52,7 +52,7 @@ fn test_application_busy_error() {
     match result {
         Ok((_remaining, frame)) => {
             assert_eq!(frame.control_information, 0x70); // Error general
-            assert_eq!(frame.data, vec![0x08]); // Application busy
+            assert_eq!(&frame.data[..], &[0x08][..]); // Application busy
         }
         Err(e) => panic!("Failed to parse: {e:?}"),
     }

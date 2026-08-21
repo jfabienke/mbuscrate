@@ -1,5 +1,5 @@
 use mbus_rs::mbus::frame::{
-    pack_frame, pack_select_frame, parse_frame, verify_frame, MBusFrame, MBusFrameType,
+    pack_frame, pack_select_frame, parse_frame, verify_frame, FrameData, MBusFrame, MBusFrameType,
 };
 
 #[test]
@@ -9,7 +9,7 @@ fn test_pack_select_frame() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0,
         more_records_follow: false,
     };
@@ -25,7 +25,7 @@ fn test_pack_select_frame() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0,
         more_records_follow: false,
     };
@@ -38,7 +38,7 @@ fn test_pack_select_frame() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0,
         more_records_follow: false,
     };
@@ -73,7 +73,7 @@ fn test_verify_frame_checksum() {
         control: 0,
         address: 0,
         control_information: 0,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0,
         more_records_follow: false,
     };
@@ -85,7 +85,7 @@ fn test_verify_frame_checksum() {
         control: 0x53,
         address: 0x01,
         control_information: 0,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0x54, // Correct: 0x53 + 0x01 = 0x54
         more_records_follow: false,
     };
@@ -97,7 +97,7 @@ fn test_verify_frame_checksum() {
         control: 0x53,
         address: 0x01,
         control_information: 0,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0x55, // Wrong checksum
         more_records_follow: false,
     };
@@ -109,7 +109,7 @@ fn test_verify_frame_checksum() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0x54, // 0x53 + 0x01 + 0x00 = 0x54
         more_records_follow: false,
     };
@@ -121,7 +121,7 @@ fn test_verify_frame_checksum() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: vec![0x01, 0x02, 0x03],
+        data: FrameData::from_slice(&[0x01, 0x02, 0x03]).unwrap(),
         checksum: 0x5A, // 0x53 + 0x01 + 0x00 + 0x01 + 0x02 + 0x03 = 0x5A
         more_records_follow: false,
     };
@@ -136,12 +136,12 @@ fn test_pack_frame_various_types() {
         control: 0,
         address: 0,
         control_information: 0,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0,
         more_records_follow: false,
     };
     let packed = pack_frame(&ack_frame);
-    assert_eq!(packed, vec![0xE5]);
+    assert_eq!(&packed[..], &[0xE5][..]);
 
     // Test packing Short frame
     let short_frame = MBusFrame {
@@ -149,12 +149,12 @@ fn test_pack_frame_various_types() {
         control: 0x53,
         address: 0x01,
         control_information: 0,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0x54,
         more_records_follow: false,
     };
     let packed = pack_frame(&short_frame);
-    assert_eq!(packed, vec![0x10, 0x53, 0x01, 0x54, 0x16]);
+    assert_eq!(&packed[..], &[0x10, 0x53, 0x01, 0x54, 0x16][..]);
 
     // Test packing Control frame
     let control_frame = MBusFrame {
@@ -162,14 +162,14 @@ fn test_pack_frame_various_types() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0x54,
         more_records_follow: false,
     };
     let packed = pack_frame(&control_frame);
     assert_eq!(
-        packed,
-        vec![0x68, 0x03, 0x03, 0x68, 0x53, 0x01, 0x00, 0x54, 0x16]
+        &packed[..],
+        &[0x68, 0x03, 0x03, 0x68, 0x53, 0x01, 0x00, 0x54, 0x16][..]
     );
 
     // Test packing Long frame with data
@@ -178,7 +178,7 @@ fn test_pack_frame_various_types() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: vec![0x01, 0x02, 0x03, 0x04, 0x05],
+        data: FrameData::from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]).unwrap(),
         checksum: 0x00, // ignored: pack_frame computes it (C+A+CI+data = 0x63)
         more_records_follow: false,
     };
@@ -189,7 +189,7 @@ fn test_pack_frame_various_types() {
         0x01, 0x02, 0x03, 0x04, 0x05, // Data
         0x63, 0x16, // Checksum (0x53+0x01+0x00+0x01+..+0x05) and stop
     ];
-    assert_eq!(packed, expected);
+    assert_eq!(&packed[..], &expected[..]);
 }
 
 #[test]
@@ -218,7 +218,7 @@ fn test_frame_max_length() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: data.clone(),
+        data: FrameData::from_slice(&data).unwrap(),
         checksum: 0, // Will be calculated
         more_records_follow: false,
     };
@@ -243,7 +243,7 @@ fn test_empty_data_frames() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0x54,
         more_records_follow: false,
     };
@@ -263,9 +263,9 @@ fn pack_short_frame_computes_checksum() {
         control: 0x5B,
         address: 0x01,
         control_information: 0,
-        data: vec![],
+        data: FrameData::from_slice(&[]).unwrap(),
         checksum: 0,
         more_records_follow: false,
     };
-    assert_eq!(pack_frame(&frame), vec![0x10, 0x5B, 0x01, 0x5C, 0x16]);
+    assert_eq!(&pack_frame(&frame)[..], &[0x10, 0x5B, 0x01, 0x5C, 0x16][..]);
 }

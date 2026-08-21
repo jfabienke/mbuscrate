@@ -921,6 +921,7 @@ dependencies = [
  "defmt 0.3.100",
  "heapless",
  "hex",
+ "nom",
  "subtle",
 ]
 

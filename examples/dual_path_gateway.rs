@@ -39,7 +39,7 @@ fn demo_mbus_dual_path() {
         control: 0x08,
         address: 42,
         control_information: 0x72,
-        data: vec![],
+        data: mbus_rs::mbus::frame::FrameData::from_slice(&[]).unwrap(),
         checksum: 0,
         more_records_follow: false,
     };

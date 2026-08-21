@@ -1,6 +1,8 @@
 //! Unit tests for the `frame.rs` module, which includes the parsing, packing, and verification of M-Bus frames.
 
-use mbus_rs::mbus::frame::{pack_frame, parse_frame, verify_frame, MBusFrame, MBusFrameType};
+use mbus_rs::mbus::frame::{
+    pack_frame, parse_frame, verify_frame, FrameData, MBusFrame, MBusFrameType,
+};
 
 /// Tests that an ACK frame is correctly parsed.
 #[test]
@@ -11,7 +13,7 @@ fn test_parse_ack_frame() {
     assert_eq!(frame.control, 0);
     assert_eq!(frame.address, 0);
     assert_eq!(frame.control_information, 0);
-    assert_eq!(frame.data, Vec::<u8>::new());
+    assert!(frame.data.is_empty());
     assert_eq!(frame.checksum, 0);
 }
 
@@ -24,7 +26,7 @@ fn test_parse_short_frame() {
     assert_eq!(frame.control, 0x53);
     assert_eq!(frame.address, 0x01);
     assert_eq!(frame.control_information, 0);
-    assert_eq!(frame.data, Vec::<u8>::new());
+    assert!(frame.data.is_empty());
     assert_eq!(frame.checksum, 0x54);
 }
 
@@ -37,7 +39,7 @@ fn test_parse_control_frame() {
     assert_eq!(frame.control, 0x53);
     assert_eq!(frame.address, 0x01);
     assert_eq!(frame.control_information, 0x00);
-    assert_eq!(frame.data, Vec::<u8>::new());
+    assert!(frame.data.is_empty());
     assert_eq!(frame.checksum, 0x54);
 }
 
@@ -64,7 +66,7 @@ fn test_pack_ack_frame() {
         control: 0,
         address: 0,
         control_information: 0,
-        data: Vec::new(),
+        data: FrameData::new(),
         checksum: 0,
         more_records_follow: false,
     };
@@ -80,7 +82,7 @@ fn test_pack_short_frame() {
         control: 0x53,
         address: 0x01,
         control_information: 0,
-        data: Vec::new(),
+        data: FrameData::new(),
         checksum: 0x54,
         more_records_follow: false,
     };
@@ -96,7 +98,7 @@ fn test_pack_control_frame() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: Vec::new(),
+        data: FrameData::new(),
         checksum: 0x54,
         more_records_follow: false,
     };
@@ -115,7 +117,7 @@ fn test_pack_long_frame() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: vec![0x01, 0x02, 0x03, 0x04, 0x05],
+        data: FrameData::from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]).unwrap(),
         checksum: 0x63,
         more_records_follow: false,
     };
@@ -134,7 +136,7 @@ fn test_verify_ack_frame() {
         control: 0,
         address: 0,
         control_information: 0,
-        data: Vec::new(),
+        data: FrameData::new(),
         checksum: 0,
         more_records_follow: false,
     };
@@ -149,7 +151,7 @@ fn test_verify_short_frame() {
         control: 0x53,
         address: 0x01,
         control_information: 0,
-        data: Vec::new(),
+        data: FrameData::new(),
         checksum: 0x54,
         more_records_follow: false,
     };
@@ -164,7 +166,7 @@ fn test_verify_control_frame() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: Vec::new(),
+        data: FrameData::new(),
         checksum: 0x54,
         more_records_follow: false,
     };
@@ -179,7 +181,7 @@ fn test_verify_long_frame() {
         control: 0x53,
         address: 0x01,
         control_information: 0x00,
-        data: vec![0x01, 0x02, 0x03, 0x04, 0x05],
+        data: FrameData::from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05]).unwrap(),
         checksum: 0x63,
         more_records_follow: false,
     };

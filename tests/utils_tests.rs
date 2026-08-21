@@ -13,7 +13,7 @@ fn test_hex_to_bytes_local() {
             .collect()
     }
     let b = hex_to_bytes("0123456789ABCDEF");
-    assert_eq!(b, vec![1, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]);
+    assert_eq!(&b[..], &[1, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF][..]);
 }
 
 /// Tests the `timestamp_to_systemtime()` function, which converts a Unix timestamp to a `SystemTime` instance.

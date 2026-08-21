@@ -5,7 +5,7 @@
 
 use crate::error::MBusError;
 use crate::mbus::frame;
-use crate::mbus::frame::{MBusFrame, MBusFrameType};
+use crate::mbus::frame::{FrameData, MBusFrame, MBusFrameType};
 use crate::payload::record::MBusRecord;
 
 /// Represents the different states of the M-Bus protocol state machine.
@@ -116,11 +116,11 @@ impl StateMachine {
         // [68h][0Bh][0Bh][68h][53h][FDh][52h][Secondary Address...][CS][16h]
         let selection_frame = MBusFrame {
             frame_type: MBusFrameType::Long,
-            control: 0x53,                    // SND_UD control field
-            address: 0xFD,                    // Selection address (253)
-            control_information: 0x52,        // CI for Mode 1 selection
-            data: secondary_address.to_vec(), // 8-byte secondary address
-            checksum: 0,                      // computed by pack_frame
+            control: 0x53,             // SND_UD control field
+            address: 0xFD,             // Selection address (253)
+            control_information: 0x52, // CI for Mode 1 selection
+            data: FrameData::from_slice(secondary_address).unwrap_or_default(), // 8-byte secondary address
+            checksum: 0, // computed by pack_frame
             more_records_follow: false,
         };
         let _frame_bytes = frame::pack_frame(&selection_frame);
@@ -165,7 +165,7 @@ impl StateMachine {
             control: control_field,
             address: self.current_address,
             control_information: 0, // Not used in short frames
-            data: Vec::new(),       // No data in REQ_UD2
+            data: FrameData::new(), // No data in REQ_UD2
             checksum: 0,            // Will be calculated by pack_frame
             more_records_follow: false,
         };
@@ -203,7 +203,7 @@ impl StateMachine {
             control: control_field,
             address: self.current_address,
             control_information: 0, // Not used in short frames
-            data: Vec::new(),       // No data in REQ_UD1
+            data: FrameData::new(), // No data in REQ_UD1
             checksum: 0,            // Will be calculated by pack_frame
             more_records_follow: false,
         };
@@ -283,7 +283,9 @@ impl StateMachine {
             // Remove the 0x1F DIF code from the data
             self.extract_payload_without_multi_frame_dif(&received_frame.data)
         } else {
-            received_frame.data.clone()
+            // `data` is now a fixed-capacity FrameData; this arm returns the owned
+            // Vec<u8> the rest of the protocol layer expects.
+            received_frame.data.to_vec()
         };
 
         Ok((payload_data, more_frames))
@@ -644,12 +646,14 @@ impl FrameHandler {
 
     /// Packs an M-Bus frame for transmission.
     pub fn pack_frame(&self, frame: &MBusFrame) -> Vec<u8> {
-        crate::mbus::frame::pack_frame(frame)
+        // Core returns a fixed-capacity PackedFrame; this façade keeps its Vec<u8>
+        // signature so callers of the std API are unaffected by the split.
+        crate::mbus::frame::pack_frame(frame).to_vec()
     }
 
     /// Verifies the integrity of an M-Bus frame.
     pub fn verify_frame(&self, frame: &MBusFrame) -> Result<(), MBusError> {
-        crate::mbus::frame::verify_frame(frame)
+        crate::mbus::frame::verify_frame(frame).map_err(Into::into)
     }
 
     /// Disconnects from all connected M-Bus devices.
@@ -722,7 +726,7 @@ impl DeviceDiscoveryManager {
             control: crate::constants::MBUS_CONTROL_MASK_REQ_UD2,
             address: crate::constants::MBUS_ADDRESS_NETWORK_LAYER,
             control_information: 0,
-            data: vec![],
+            data: FrameData::new(),
             checksum: (crate::constants::MBUS_CONTROL_MASK_REQ_UD2)
                 .wrapping_add(crate::constants::MBUS_ADDRESS_NETWORK_LAYER),
             more_records_follow: false,
@@ -750,7 +754,7 @@ impl DeviceDiscoveryManager {
             control: 0,
             address: 0,
             control_information: 0,
-            data: vec![],
+            data: FrameData::new(),
             checksum: 0,
             more_records_follow: false,
         };
@@ -807,7 +811,7 @@ impl DataRetrievalManager {
             control: MBUS_CONTROL_MASK_REQ_UD2,
             address,
             control_information: 0,
-            data: vec![],
+            data: FrameData::new(),
             checksum: 0,
             more_records_follow: false,
         };

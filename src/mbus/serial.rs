@@ -5,7 +5,7 @@
 //! sending M-Bus frames, and receiving M-Bus frames.
 
 use crate::error::MBusError;
-use crate::mbus::frame::{pack_frame, parse_frame, MBusFrame};
+use crate::mbus::frame::{pack_frame, parse_frame, FrameData, MBusFrame};
 use crate::mbus::mbus_protocol::StateMachine;
 use crate::mbus::transport::{fill_exact, ByteTransport, SerialTransport};
 use crate::payload::record::MBusRecord;
@@ -259,7 +259,7 @@ impl MBusDeviceHandle {
             control: 0x40, // SND_NKE (Initialize)
             address: 0xFE, // Broadcast address
             control_information: 0,
-            data: vec![],
+            data: FrameData::new(),
             checksum: 0x3E, // 0x40 + 0xFE = 0x13E -> 0x3E
             more_records_follow: false,
         };
