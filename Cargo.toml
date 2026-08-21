@@ -1,9 +1,12 @@
 [workspace]
-members = [".", "mbus-core"]
-# metermon-rs stays OUT of the workspace, as it was before the split. It carries an
-# optional path dependency on a sibling repo that is not checked out in this repo's CI,
-# and workspace members share dependency resolution — making it a member would make a
-# default CI build depend on a directory that may not exist.
+members = [".", "mbus-core", "lorawan-join-control"]
+# metermon-rs stays OUT of the workspace, as it was before the split, because workspace
+# members share dependency resolution and metermon-rs carries Linux-only radio deps.
+#
+# It used to be excluded for a second reason — an optional path dependency on a *sibling
+# repo* that CI never checked out, which failed the build outright (cargo resolves path
+# deps even when the feature is off). That reason is gone: `lorawan-join-control` is now
+# vendored here as a subtree and is a workspace member, so it is always present.
 # The panic probe is its own workspace: it needs `panic = "abort"` and a bare-metal
 # target profile that must not apply to the host crates.
 exclude = ["metermon-rs", "mbus-core/panic-probe"]

@@ -14,14 +14,27 @@ messages they exchange to agree on one `JoinOutcome`.
 
 ## Use
 
-Both apps add it as a path dependency:
+**This crate lives in the `mbuscrate` repo** (vendored 2026-08-21 as a git subtree, with
+its history), and is a member of that workspace. `metermon-rs` depends on it by path:
 
 ```toml
-lorawan-join-control = { path = "../../lorawan-join-control" }
+lorawan-join-control = { path = "../lorawan-join-control", optional = true }
 ```
 
-(`device-config` from `core/Cargo.toml`; `metermon-rs` from its `Cargo.toml` — both
-resolve to the same sibling directory.)
+It was previously a standalone sibling directory that both apps path-depended on as
+`../../lorawan-join-control`. That arrangement worked only on a machine where both repos
+sat side by side: the crate had no git remote, so **CI could never resolve it** — and
+because cargo resolves path dependencies even when the owning feature is disabled, a
+default build failed outright rather than merely skipping the feature. That is what kept
+the join-control PR unmergeable.
+
+### device-config
+
+`device-config` still points at the old sibling path and is therefore unaffected today,
+but it now has a *second copy* of this contract — exactly the drift this crate exists to
+prevent. Repoint it at the vendored copy (or vendor it there too and treat one as
+canonical) before the schema next changes; a contract with two independent copies is not
+a contract.
 
 ## Protocol
 
