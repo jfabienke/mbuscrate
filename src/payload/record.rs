@@ -503,8 +503,22 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
     if (record.drh.dib.dif & MBUS_DIB_DIF_EXTENSION_BIT) != 0 {
         let mut dife_count = 0;
         loop {
-            if i_temp.is_empty() || dife_count >= 10 {
-                break;
+            // Refuse a chain that runs off the end or exceeds the standard's ten DIFEs,
+            // rather than stopping and carrying on. Breaking here meant the next byte —
+            // the 11th DIFE — was read as the VIF, and every field after it shifted by
+            // one: the parser returned Ok with a confidently wrong record. This is the
+            // error handling the (unused) parser in data.rs had and this one lacked.
+            if i_temp.is_empty() {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    i_temp,
+                    nom::error::ErrorKind::Eof,
+                )));
+            }
+            if dife_count >= 10 {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    i_temp,
+                    nom::error::ErrorKind::TooLarge,
+                )));
             }
             let dife = i_temp[0];
             record.drh.dib.dife[dife_count] = dife;
@@ -545,8 +559,19 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
     if (record.drh.vib.vif & MBUS_DIB_VIF_EXTENSION_BIT) != 0 {
         let mut vife_count = 0;
         loop {
-            if i_temp.is_empty() || vife_count >= 10 {
-                break;
+            // Same reasoning as the DIFE chain above: stopping silently made the next
+            // byte — the 11th VIFE — the first data byte, shifting the value.
+            if i_temp.is_empty() {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    i_temp,
+                    nom::error::ErrorKind::Eof,
+                )));
+            }
+            if vife_count >= 10 {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    i_temp,
+                    nom::error::ErrorKind::TooLarge,
+                )));
             }
             let vife = i_temp[0];
             record.drh.vib.vife[vife_count] = vife;
