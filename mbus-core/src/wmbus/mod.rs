@@ -9,5 +9,8 @@
 
 pub mod block;
 pub mod crc;
+pub mod decode_buffer;
 pub mod frame;
+pub mod frame_decode;
 pub mod framing;
+pub mod mode_c;
