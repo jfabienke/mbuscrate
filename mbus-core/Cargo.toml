@@ -48,3 +48,6 @@ defmt = ["dep:defmt", "heapless/defmt-03"]
 
 [dev-dependencies]
 hex = "0.4"
+# Property tests came across with the VIF tables; they check the exponent maths against
+# a generated range rather than a handful of samples.
+proptest = "1"

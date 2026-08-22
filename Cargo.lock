@@ -924,6 +924,7 @@ dependencies = [
  "heapless",
  "hex",
  "nom",
+ "proptest",
  "subtle",
  "zeroize",
 ]

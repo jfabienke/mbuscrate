@@ -49,4 +49,5 @@ pub mod lorawan;
 pub mod constants;
 pub mod error;
 pub mod mbus;
+pub mod payload;
 pub mod wmbus;

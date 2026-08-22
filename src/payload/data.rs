@@ -54,8 +54,11 @@ pub fn mbus_data_record_decode(input: &[u8]) -> IResult<&[u8], MBusDataRecord> {
     let (input, dif) = be_u8(input)?;
     let (input, vib) = parse_vib(input)?;
 
-    let (unit, value, quantity) =
-        normalize_vib(&vib).unwrap_or((String::new(), 0.0, String::new()));
+    // `normalize_vib` returns `&'static str` now; this module still holds owned strings,
+    // so the conversion happens here rather than inside the parser.
+    let (unit, value, quantity) = normalize_vib(&vib)
+        .map(|(u, v, q)| (u.to_string(), v, q.to_string()))
+        .unwrap_or((String::new(), 0.0, String::new()));
 
     let (input, data) = take(mbus_dif_datalength_lookup(dif))(input)?;
 

@@ -378,8 +378,11 @@ fn decode_record_value(record: &mut MBusRecord) {
         }
         infos
     };
+    // The core returns `&'static str`; this module's record fields are still owned
+    // strings, so it converts here. When `MBusRecord` moves to fixed-capacity fields the
+    // conversion disappears rather than moving.
     let (unit, exponent, quantity) = match crate::payload::vif::normalize_vib(&vib) {
-        Ok(t) => t,
+        Ok((u, e, q)) => (u.to_string(), e, q.to_string()),
         // Unknown VIF: leave the raw bytes for the caller rather than inventing a unit.
         Err(_) => (String::new(), 1.0, String::new()),
     };
