@@ -4,6 +4,28 @@
 //! used in the M-Bus protocol, such as BCD, integer, float, and time data.
 
 use crate::error::MBusError;
+
+// BCD, manufacturer codes and the date *parser* moved to the core; they are pure
+// functions of bytes. What stays here is the conversion to `SystemTime`, which needs an
+// epoch — the core has no clock by design.
+pub use mbus_core::payload::data_encoding::{
+    decode_bcd, decode_date_time, encode_bcd, DateTimeError, MBusDateTime,
+};
+
+/// Manufacturer code as an owned `String`, for callers that want one.
+///
+/// The core returns a fixed-capacity 3-character string — the code is always exactly
+/// three letters — and this converts at the boundary.
+pub fn mbus_decode_manufacturer(byte1: u8, byte2: u8) -> String {
+    mbus_core::payload::data_encoding::decode_manufacturer(byte1, byte2)
+        .as_str()
+        .to_string()
+}
+
+/// Pack three letters into the two-byte manufacturer code.
+pub fn mbus_data_manufacturer_encode(manufacturer: &str) -> Result<[u8; 2], MBusError> {
+    mbus_core::payload::data_encoding::encode_manufacturer(manufacturer).map_err(Into::into)
+}
 use nom::{
     bytes::complete::take,
     combinator::map,
@@ -109,53 +131,6 @@ pub fn mbus_data_bin_decode(dst: &mut String, src: &[u8], len: usize, max_len: u
     if dst.ends_with(' ') {
         dst.pop(); // remove last space
     }
-}
-
-/// Decodes a binary-coded decimal (BCD) value to a 32-bit unsigned integer.
-pub fn decode_bcd(input: &[u8]) -> IResult<&[u8], u32> {
-    let (input, bytes) = take(4usize)(input)?;
-
-    for byte in bytes {
-        if (byte & 0xF) > 9 || ((byte >> 4) & 0xF) > 9 {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Verify,
-            )));
-        }
-    }
-
-    let mut value = 0u32;
-    let mut multiplier = 1u32;
-    // Process bytes in forward order (big-endian) to match encode_bcd
-    for &byte in bytes.iter().rev() {
-        // Low nibble is ones digit, high nibble is tens digit in BCD
-        value += (byte as u32 & 0xF) * multiplier;
-        multiplier *= 10;
-        value += ((byte >> 4) as u32 & 0xF) * multiplier;
-        multiplier *= 10;
-    }
-
-    Ok((input, value))
-}
-
-/// Encodes a 32-bit unsigned integer to a binary-coded decimal (BCD) representation.
-/// Returns bytes compatible with decode_bcd's little-endian processing.
-pub fn encode_bcd(mut input: u32) -> Vec<u8> {
-    let mut result = vec![0u8; 4];
-
-    // Extract each pair of decimal digits and store in BCD format
-    for idx in (0..4).rev() {
-        if input > 0 {
-            let ones = (input % 10) as u8;
-            input /= 10;
-            let tens = (input % 10) as u8;
-            input /= 10;
-
-            result[idx] = (tens << 4) | ones;
-        }
-    }
-
-    result
 }
 
 /// Decodes an integer value from the input data.
@@ -323,35 +298,4 @@ pub fn decode_time(input: &[u8], size: usize) -> IResult<&[u8], SystemTime> {
         time
     })
     .parse(input)
-}
-
-/// Encodes the manufacturer ID according to the manufacturer's 3-byte ASCII code.
-pub fn mbus_data_manufacturer_encode(manufacturer: &str) -> Result<[u8; 2], MBusError> {
-    if manufacturer.len() != 3 || !manufacturer.chars().all(|c| c.is_ascii_alphabetic()) {
-        return Err(MBusError::InvalidManufacturer);
-    }
-
-    let id = (((manufacturer.chars().next().unwrap() as u32 - 64) & 0x1F) * 32 * 32)
-        + (((manufacturer.chars().nth(1).unwrap() as u32 - 64) & 0x1F) * 32)
-        + ((manufacturer.chars().nth(2).unwrap() as u32 - 64) & 0x1F);
-
-    if !(0x0421..=0x6B5A).contains(&id) {
-        return Err(MBusError::InvalidManufacturerId);
-    }
-
-    Ok([(id >> 8) as u8, (id & 0xFF) as u8])
-}
-
-/// Decodes the manufacturer ID from the 2-byte encoded data.
-pub fn mbus_decode_manufacturer(byte1: u8, byte2: u8) -> String {
-    let mut id = ((byte1 as u32) << 8) + (byte2 as u32);
-    let mut manufacturer = String::with_capacity(3);
-
-    manufacturer.push(char::from_u32((id / (32 * 32)) + 64).unwrap_or('?'));
-    id %= 32 * 32;
-    manufacturer.push(char::from_u32((id / 32) + 64).unwrap_or('?'));
-    id %= 32;
-    manufacturer.push(char::from_u32(id + 64).unwrap_or('?'));
-
-    manufacturer
 }

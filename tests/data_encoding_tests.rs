@@ -46,16 +46,16 @@ fn test_decode_bcd_invalid() {
 fn test_encode_bcd() {
     // encode_bcd returns bytes in format compatible with decode_bcd
     // The format places least significant BCD digits at the end
-    assert_eq!(encode_bcd(0), vec![0x00, 0x00, 0x00, 0x00]);
-    assert_eq!(encode_bcd(9), vec![0x00, 0x00, 0x00, 0x09]);
+    assert_eq!(encode_bcd(0), [0x00, 0x00, 0x00, 0x00]);
+    assert_eq!(encode_bcd(9), [0x00, 0x00, 0x00, 0x09]);
 
     // Test two digits
-    assert_eq!(encode_bcd(42), vec![0x00, 0x00, 0x00, 0x42]);
-    assert_eq!(encode_bcd(99), vec![0x00, 0x00, 0x00, 0x99]);
+    assert_eq!(encode_bcd(42), [0x00, 0x00, 0x00, 0x42]);
+    assert_eq!(encode_bcd(99), [0x00, 0x00, 0x00, 0x99]);
 
     // Test larger numbers - most significant at start
-    assert_eq!(encode_bcd(1234), vec![0x00, 0x00, 0x12, 0x34]);
-    assert_eq!(encode_bcd(12345678), vec![0x12, 0x34, 0x56, 0x78]);
+    assert_eq!(encode_bcd(1234), [0x00, 0x00, 0x12, 0x34]);
+    assert_eq!(encode_bcd(12345678), [0x12, 0x34, 0x56, 0x78]);
 }
 
 #[test]

@@ -4,5 +4,6 @@
 //! its decimal exponent. Resolution is table-driven and the tables are `const`, so this
 //! layer allocates nothing and needs no clock.
 
+pub mod data_encoding;
 pub mod vif;
 pub mod vif_maps;
