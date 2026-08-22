@@ -1,5 +1,25 @@
 use crate::constants::*;
 use crate::error::MBusError;
+
+// Value decoding moved to the core: these are purely bytes-to-number and have no
+// dependency on `MBusRecord`, its units or its vendor hooks. Assembling a record stays
+// here for now, because `MBusRecord` carries owned strings and a `SystemTime`.
+use mbus_core::payload::record_value::{bcd_le, dif_datalength_lookup, int_le};
+
+/// Data-field length implied by a DIF's low nibble.
+pub fn mbus_dif_datalength_lookup(dif: u8) -> usize {
+    dif_datalength_lookup(dif)
+}
+
+/// Data length described by an LVAR byte.
+///
+/// The core reports an unknown code as a static `InvalidField`; this maps it back to
+/// `UnknownDif(byte)`, which is what callers here already match on and which carries the
+/// offending byte for diagnostics.
+fn parse_variable_data_length(input: u8) -> Result<usize, MBusError> {
+    mbus_core::payload::record_value::variable_data_length(input)
+        .map_err(|_| MBusError::UnknownDif(input))
+}
 use crate::payload::data_encoding::mbus_data_str_decode;
 use crate::vendors;
 use nom::{bytes::complete::take, number::complete::be_u8, IResult};
@@ -417,56 +437,6 @@ fn decode_record_value(record: &mut MBusRecord) {
     record.quantity = quantity;
 }
 
-/// Little-endian two's-complement integer of 1..=8 bytes, as M-Bus encodes them.
-fn int_le(data: &[u8]) -> i64 {
-    if data.is_empty() {
-        return 0;
-    }
-    let mut v: i64 = 0;
-    for (i, b) in data.iter().enumerate() {
-        v |= (*b as i64) << (8 * i);
-    }
-    // Sign-extend from the most significant byte present.
-    let bits = 8 * data.len() as u32;
-    if bits < 64 && (v >> (bits - 1)) & 1 == 1 {
-        v |= -1i64 << bits;
-    }
-    v
-}
-
-/// Little-endian packed BCD, as M-Bus encodes it. The most significant nibble of the
-/// last byte holds the sign (0xF = negative). Returns `None` for non-BCD nibbles.
-fn bcd_le(data: &[u8]) -> Option<f64> {
-    if data.is_empty() {
-        return None;
-    }
-    let (last, rest) = data.split_last()?;
-    let negative = (last >> 4) == 0x0F;
-    let mut digits = String::new();
-    if !negative {
-        let hi = last >> 4;
-        if hi > 9 {
-            return None;
-        }
-        digits.push(char::from_digit(hi as u32, 10)?);
-    }
-    let lo = last & 0x0F;
-    if lo > 9 {
-        return None;
-    }
-    digits.push(char::from_digit(lo as u32, 10)?);
-    for b in rest.iter().rev() {
-        for nib in [b >> 4, b & 0x0F] {
-            if nib > 9 {
-                return None;
-            }
-            digits.push(char::from_digit(nib as u32, 10)?);
-        }
-    }
-    let magnitude: f64 = digits.parse().ok()?;
-    Some(if negative { -magnitude } else { magnitude })
-}
-
 /// Parse one variable-data record. See [`parse_variable_record_consumed`] when you need the
 /// exact bytes consumed (e.g. to advance through a multi-record payload).
 pub fn parse_variable_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
@@ -671,29 +641,6 @@ fn normalize_fixed_unit(medium_unit: u8, value: f64) -> Result<(String, f64, Str
     }
 }
 
-/// Looks up the data length from a DIF field in the data record.
-pub fn mbus_dif_datalength_lookup(dif: u8) -> usize {
-    match dif & 0x0F {
-        0x0 => 0,
-        0x1 => 1,
-        0x2 => 2,
-        0x3 => 3,
-        0x4 => 4,
-        0x5 => 4, // 32-bit real (IEEE-754 single) — 4 bytes, not 6
-        0x6 => 6, // 48-bit integer
-        0x7 => 8, // 64-bit integer — reading this as 0 desynced every later record
-        0x8 => 0, // selection for readout
-        0x9 => 1,
-        0xA => 2,
-        0xB => 3,
-        0xC => 4,
-        0xD => 0, // variable length (LVAR): length byte handled separately
-        0xE => 6,
-        0xF => 0, // special functions carry no fixed-length data
-        _ => 0,
-    }
-}
-
 pub fn mbus_data_record_append(record: &mut MBusRecord) {
     // For manufacturer-specific or more records follow, set appropriate fields
     if record.drh.dib.dif == MBUS_DIB_DIF_MANUFACTURER_SPECIFIC {
@@ -833,22 +780,6 @@ pub fn parse_variable_record_with_vendor(
     parse_variable_record_in_context(input, &ctx).map(|(record, _)| record)
 }
 
-fn parse_variable_data_length(input: u8) -> Result<usize, MBusError> {
-    if input <= 0xBF {
-        Ok(input as usize)
-    } else if (0xC0..=0xCF).contains(&input) {
-        Ok((input - 0xC0) as usize * 2)
-    } else if (0xD0..=0xDF).contains(&input) {
-        Ok(((input - 0xD0) as usize * 2) + 1)
-    } else if (0xE0..=0xEF).contains(&input) {
-        Ok(((input - 0xE0) as usize) + 64)
-    } else if (0xF0..=0xFA).contains(&input) {
-        Ok(((input - 0xF0) as usize) + 1120)
-    } else {
-        Err(MBusError::UnknownDif(input))
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -964,6 +895,7 @@ mod tests {
     }
     use super::*;
     use crate::error::MBusError;
+
     use std::time::SystemTime;
 
     #[test]

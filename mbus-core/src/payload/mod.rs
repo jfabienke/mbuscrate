@@ -5,5 +5,6 @@
 //! layer allocates nothing and needs no clock.
 
 pub mod data_encoding;
+pub mod record_value;
 pub mod vif;
 pub mod vif_maps;
