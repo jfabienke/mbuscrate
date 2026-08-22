@@ -10,3 +10,4 @@
 pub mod block;
 pub mod crc;
 pub mod frame;
+pub mod framing;

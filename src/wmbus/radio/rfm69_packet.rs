@@ -20,8 +20,10 @@ use std::collections::VecDeque;
 const CRC_POLY: u16 = 0x3D65;
 
 /// wM-Bus sync word constants for frame type detection
-const SYNC_A: u8 = 0xCD; // Type A sync (bit-reversed from 0xB3)
-const SYNC_B: u8 = 0x3D; // Type B sync (bit-reversed from 0xBC)
+// Frame boundary detection moved to `mbus_core::wmbus::framing`: `packet_size` is a pure
+// function of two header bytes and was never radio-specific. Re-exported so every
+// existing `rfm69_packet::{packet_size, sync_norm}` path keeps working.
+pub use mbus_core::wmbus::framing::{packet_size, sync_norm, SYNC_A, SYNC_B};
 
 /// Packet processing statistics for monitoring
 #[derive(Debug, Default, Clone)]
@@ -250,65 +252,6 @@ pub fn rev8(mut byte: u8) -> u8 {
     // Swap individual bits within pairs
     byte = (byte & 0xAA) >> 1 | (byte & 0x55) << 1;
     byte
-}
-
-// =============================================================================
-// Fix #2: Robust PacketSize() with 4 Header Cases
-// =============================================================================
-
-/// Normalize sync bytes for consistent comparison
-pub fn sync_norm(sync: u8) -> u8 {
-    match sync {
-        0xB3 => SYNC_A, // Bit-reversed A sync
-        0xBC => SYNC_B, // Bit-reversed B sync
-        _ => sync,
-    }
-}
-
-/// Total on-FIFO frame length (including the sync/type byte) from the L-field.
-///
-/// Type A is block-structured: block 0 is 10 bytes (+CRC), then 16-byte data blocks
-/// each with their own CRC. So the total is `2 + L + num_crcs*2` (epulse `PacketSize`),
-/// NOT the naive `L+3` which undercounts multi-block CRCs. Type B carries a single CRC
-/// over block 0, so `L + 2`.
-fn wmbus_packet_len(l: u8, type_b: bool) -> i32 {
-    let l = l as i32;
-    if type_b {
-        l + 2
-    } else {
-        // BLOCK0_LEN=10, BLOCKA_LEN=16, CRC_LEN=2
-        let num_crcs = 1 + ((l - 10).max(0) + 15) / 16;
-        2 + l + num_crcs * 2
-    }
-}
-
-/// Determine packet size from header bytes with robust validation
-///
-/// Handles all 4 possible header arrangements:
-/// - Case A/B: \[SYNC\]\[LEN\]
-/// - Case C/D: \[LEN\]\[SYNC\]
-pub fn packet_size(data: &[u8]) -> i32 {
-    if data.len() < 2 {
-        return -1; // Need more data
-    }
-
-    let b0 = data[0];
-    let b1 = data[1];
-
-    // Case A/B: [SYNC][LEN]
-    if sync_norm(b0) == 0xCD || sync_norm(b0) == 0x3D {
-        let type_b = sync_norm(b0) == 0x3D;
-        return wmbus_packet_len(b1, type_b);
-    }
-
-    // Case C/D: [LEN][SYNC]
-    if sync_norm(b1) == 0xCD || sync_norm(b1) == 0x3D {
-        let type_b = sync_norm(b1) == 0x3D;
-        return wmbus_packet_len(b0, type_b);
-    }
-
-    // Not a WM-Bus header → drop
-    -2
 }
 
 // =============================================================================
