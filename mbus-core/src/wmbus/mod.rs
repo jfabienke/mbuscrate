@@ -19,6 +19,8 @@ pub mod ell;
 pub mod frame;
 pub mod frame_decode;
 pub mod framing;
+#[cfg(feature = "crypto")]
+pub mod gcm;
 pub mod mode_c;
 #[cfg(feature = "crypto")]
 pub mod oms;

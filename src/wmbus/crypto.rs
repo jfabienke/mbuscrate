@@ -76,6 +76,14 @@ pub enum CryptoError {
 // as a KDF, is deprecated below, and has no place in the core.
 pub use mbus_core::wmbus::crypto::{AesKey, DeviceInfo, KeyMode};
 
+// GCM header construction moved to the core: AAD and IV are fixed-size pure functions of
+// the frame header and device identity, and were already allocation-free. The cipher
+// operations stay here until aes-gcm's allocating `Aead` API is rewritten onto
+// `AeadInPlace`.
+pub use mbus_core::wmbus::gcm::{
+    build_gcm_aad, build_gcm_iv, extract_access_number, GCM_AAD_LEN, GCM_IV_LEN,
+};
+
 /// The core's allocation-free error, under a distinct name so both can coexist.
 pub use mbus_core::wmbus::crypto::CryptoError as CoreCryptoError;
 
@@ -308,10 +316,10 @@ impl WMBusCrypto {
         let (encrypted_data, tag) = ciphertext.split_at(ciphertext.len() - tag_len);
 
         // Build 11-byte AAD from frame header (per OMS 7.3.6.2)
-        let aad = self.build_gcm_aad(full_frame)?;
+        let aad = build_gcm_aad(full_frame)?;
 
         // Build 12-byte IV/nonce (per OMS 7.3.6.3)
-        let iv = self.build_gcm_iv(device_info)?;
+        let iv = build_gcm_iv(device_info);
 
         // Perform GCM decryption
         let plaintext = self.aes_gcm_decrypt(key, encrypted_data, &aad, &iv, tag)?;
@@ -348,10 +356,10 @@ impl WMBusCrypto {
         device_info: &DeviceInfo,
     ) -> Result<Vec<u8>, CryptoError> {
         // Build 11-byte AAD from frame header
-        let aad = self.build_gcm_aad(full_frame)?;
+        let aad = build_gcm_aad(full_frame)?;
 
         // Build 12-byte IV/nonce
-        let iv = self.build_gcm_iv(device_info)?;
+        let iv = build_gcm_iv(device_info);
 
         // Optional: Add CRC to plaintext (OMS 7.3.6.4)
         // This is configurable based on device requirements
@@ -374,88 +382,6 @@ impl WMBusCrypto {
         }
 
         Ok(result)
-    }
-
-    /// Build 11-byte AAD for GCM mode (OMS 7.3.6.2)
-    fn build_gcm_aad(&self, frame: &[u8]) -> Result<[u8; 11], CryptoError> {
-        // AAD = L(1) + C(1) + M(2) + A(4) + V(1) + T(1) + Access(1)
-        // Frame structure: L(1) + C(1) + M(2) + A(4) + V(1) + T(1) + CI(1) + ...
-
-        if frame.len() < 11 {
-            return Err(CryptoError::InvalidFrame {
-                reason: "Frame too short for GCM AAD extraction".to_string(),
-            });
-        }
-
-        let mut aad = [0u8; 11];
-
-        // L field (byte 0)
-        aad[0] = frame[0];
-
-        // C field (byte 1)
-        aad[1] = frame[1];
-
-        // M field (bytes 2-3, manufacturer)
-        aad[2..4].copy_from_slice(&frame[2..4]);
-
-        // A field (bytes 4-7, device address/ID)
-        aad[4..8].copy_from_slice(&frame[4..8]);
-
-        // V field (byte 8, version)
-        aad[8] = frame[8];
-
-        // T field (byte 9, device type)
-        aad[9] = frame[9];
-
-        // Access field (byte 10) - In standard frames, this is derived from access number
-        // For now, use the CI field position value or a default
-        aad[10] = if frame.len() > 10 {
-            frame[10] & 0x0F
-        } else {
-            0x00
-        };
-
-        Ok(aad)
-    }
-
-    /// Build 12-byte IV for GCM mode (OMS 7.3.6.3)
-    fn build_gcm_iv(&self, device_info: &DeviceInfo) -> Result<[u8; 12], CryptoError> {
-        // IV = M(2 LE) + A(4 LE) + Access(6 LE from u64 low bytes)
-        // This is different from Mode 5/7 which use 16-byte IVs
-
-        let mut iv = [0u8; 12];
-
-        // Manufacturer (2 bytes, little-endian)
-        let mfg_bytes = device_info.manufacturer.to_le_bytes();
-        iv[0..2].copy_from_slice(&mfg_bytes);
-
-        // Device address/ID (4 bytes, little-endian)
-        let id_bytes = device_info.device_id.to_le_bytes();
-        iv[2..6].copy_from_slice(&id_bytes);
-
-        // Access number (6 bytes, little-endian from u64)
-        // Use provided access number or derive from device info
-        let access_number = device_info.access_number.unwrap_or({
-            // Fallback: derive from version and type for compatibility
-            ((device_info.version as u64) << 8) | (device_info.device_type as u64)
-        });
-        let access_bytes = access_number.to_le_bytes();
-        iv[6..12].copy_from_slice(&access_bytes[0..6]);
-
-        Ok(iv)
-    }
-
-    /// Extract access number from frame (for Mode 9)
-    pub fn extract_access_number(frame: &[u8]) -> Option<u64> {
-        // In wM-Bus frames, access number is typically at offset 10
-        // This varies by frame type, so we provide a simple extraction
-        if frame.len() > 10 {
-            // Extract access byte and extend to u64
-            let access_byte = frame[10];
-            Some(access_byte as u64)
-        } else {
-            None
-        }
     }
 
     /// Add CRC to plaintext before GCM encryption (OMS 7.3.6.4)
@@ -628,24 +554,16 @@ impl WMBusCrypto {
         use aes::Aes128;
         use cmac::{Cmac, Mac};
 
-        // Build B0 block for MIC calculation
-        let mut b0 = vec![
-            0x49, // Fixed value for MIC calculation
-            0x00, 0x00, 0x00, 0x00,      // 4 bytes reserved
-            direction, // Direction: 0=uplink, 1=downlink
-        ];
-
-        // Add DevAddr (little-endian)
-        b0.extend_from_slice(&dev_addr.to_le_bytes());
-
-        // Add FCnt (little-endian)
-        b0.extend_from_slice(&fcnt.to_le_bytes());
-
-        // Add padding byte
-        b0.push(0x00);
-
-        // Add message length
-        b0.push(msg.len() as u8);
+        // B0 is exactly 16 bytes by construction: 0x49(1) + reserved(4) + dir(1) +
+        // DevAddr(4) + FCnt(4) + pad(1) + len(1). It used to be built with `vec![]` and
+        // four `extend`/`push` calls; an array needs no allocator and makes the 16 explicit.
+        // This is the same block `mbus_core::lorawan` builds for DataFrame MICs.
+        let mut b0 = [0u8; 16];
+        b0[0] = 0x49;
+        b0[5] = direction; // 0 = uplink, 1 = downlink
+        b0[6..10].copy_from_slice(&dev_addr.to_le_bytes());
+        b0[10..14].copy_from_slice(&fcnt.to_le_bytes());
+        b0[15] = msg.len() as u8;
 
         // Create CMAC instance
         let mut mac = <Cmac<Aes128> as cmac::Mac>::new_from_slice(key).map_err(|_| {
@@ -795,9 +713,6 @@ mod tests {
 
     #[test]
     fn test_gcm_aad_construction() {
-        let master_key = AesKey::from_bytes(&[0; 16]).unwrap();
-        let crypto = WMBusCrypto::new(master_key);
-
         // Create test frame with proper structure
         // L(1) + C(1) + M(2) + A(4) + V(1) + T(1) + CI(1) + ...
         let frame = vec![
@@ -811,7 +726,7 @@ mod tests {
             0x00, 0x00, // Additional data
         ];
 
-        let aad = crypto.build_gcm_aad(&frame).unwrap();
+        let aad = build_gcm_aad(&frame).unwrap();
 
         // Verify AAD structure (11 bytes)
         assert_eq!(aad.len(), 11);
@@ -826,9 +741,6 @@ mod tests {
 
     #[test]
     fn test_gcm_iv_construction() {
-        let master_key = AesKey::from_bytes(&[0; 16]).unwrap();
-        let crypto = WMBusCrypto::new(master_key);
-
         let device_info = DeviceInfo {
             device_id: 0x12345678,
             manufacturer: 0xABCD,
@@ -837,7 +749,7 @@ mod tests {
             access_number: Some(0x0304), // Explicit access number
         };
 
-        let iv = crypto.build_gcm_iv(&device_info).unwrap();
+        let iv = build_gcm_iv(&device_info);
 
         // Verify IV structure (12 bytes, not 16)
         assert_eq!(iv.len(), 12);
@@ -991,12 +903,12 @@ mod tests {
             0x00, 0x00,
         ];
 
-        let access = WMBusCrypto::extract_access_number(&frame);
+        let access = extract_access_number(&frame);
         assert_eq!(access, Some(0x55));
 
         // Test with short frame
         let short_frame = vec![0x10, 0x44];
-        let access = WMBusCrypto::extract_access_number(&short_frame);
+        let access = extract_access_number(&short_frame);
         assert_eq!(access, None);
     }
 
