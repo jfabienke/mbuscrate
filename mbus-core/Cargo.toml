@@ -13,10 +13,16 @@ repository = "https://github.com/jfabienke/mbuscrate"
 aes    = { version = "0.8", optional = true }
 cmac   = { version = "0.7", optional = true }
 subtle = { version = "2.6", default-features = false, optional = true }
+# AES-CBC for OMS security mode 5. NOT `features = ["alloc"]` as mbus-rs declares it:
+# `decrypt_padded_mut` works in place on a caller-supplied buffer, so nothing allocates.
+cbc = { version = "0.1", optional = true }
 # Fixed-capacity collections. Every capacity in this crate is dictated by the LoRaWAN
 # spec (see the constants in `lorawan`), not chosen for convenience, so the bounds are
 # protocol facts rather than tuning knobs.
 heapless = "0.8"
+# Key material that clears itself on drop. `default-features = false` drops its `alloc`
+# default: an AES-128 key is `[u8; 16]`, so there is nothing to allocate.
+zeroize = { version = "1.9", default-features = false, features = ["derive"], optional = true }
 # Parser combinators. `default-features = false` drops std; we deliberately do NOT enable
 # nom's `alloc` feature, so only the combinators that work on borrowed slices are
 # available — which is all the M-Bus wire format needs.
@@ -32,7 +38,7 @@ default = ["std", "crypto"]
 # no_std-first; this feature only turns on std-specific conveniences.
 std = []
 # LoRaWAN / OMS cryptography. Pulls RustCrypto, all no_std-capable.
-crypto = ["dep:aes", "dep:cmac", "dep:subtle"]
+crypto = ["dep:aes", "dep:cbc", "dep:cmac", "dep:subtle", "dep:zeroize"]
 # `defmt::Format` on the public types, for Embassy/RTT logging. No `defmt/alloc`:
 # the public types are fixed-capacity and implement `Format` natively.
 defmt = ["dep:defmt", "heapless/defmt-03"]

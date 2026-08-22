@@ -9,8 +9,14 @@
 
 pub mod block;
 pub mod crc;
+// Key material and crypto errors. Behind `crypto` because it pulls AES, subtle and
+// zeroize — a device that only checks CRCs should not link a cipher to do it.
+#[cfg(feature = "crypto")]
+pub mod crypto;
 pub mod decode_buffer;
 pub mod frame;
 pub mod frame_decode;
 pub mod framing;
 pub mod mode_c;
+#[cfg(feature = "crypto")]
+pub mod oms;

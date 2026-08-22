@@ -917,12 +917,14 @@ name = "mbus-core"
 version = "1.0.0"
 dependencies = [
  "aes",
+ "cbc",
  "cmac",
  "defmt 0.3.100",
  "heapless",
  "hex",
  "nom",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]

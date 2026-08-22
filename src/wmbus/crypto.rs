@@ -40,9 +40,7 @@
 //! let decrypted = crypto.decrypt_mode9_gcm(&encrypted_frame, &device_info).unwrap();
 //! ```
 
-use crate::util::{hex, logging};
 use thiserror::Error;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Enhanced encryption errors with specific failure types
 #[derive(Error, Debug, Clone, PartialEq)]
@@ -72,134 +70,83 @@ pub enum CryptoError {
     KeyDerivationFailed { reason: String },
 }
 
-/// AES-128 key for wM-Bus encryption
+// AesKey, CryptoError, DeviceInfo and KeyMode live in `mbus-core` so that every crate in
+// the tree shares one key type — two would mean converting at the boundary, which for a
+// secret means copying it. `derive_device_key` is NOT re-exported: it was an XOR labelled
+// as a KDF, is deprecated below, and has no place in the core.
+pub use mbus_core::wmbus::crypto::{AesKey, DeviceInfo, KeyMode};
+
+/// The core's allocation-free error, under a distinct name so both can coexist.
+pub use mbus_core::wmbus::crypto::CryptoError as CoreCryptoError;
+
+/// Lift the core's error into this crate's richer one at the boundary.
 ///
-/// `PartialEq` and `Debug` are hand-written rather than derived, for two reasons that a
-/// derive gets wrong on a secret:
+/// The core cannot carry the `String` reasons this type uses — that is the whole point of
+/// the split — so the prose is supplied here, where an allocator exists.
+impl From<CoreCryptoError> for CryptoError {
+    fn from(e: CoreCryptoError) -> Self {
+        match e {
+            CoreCryptoError::InvalidKeyLength { expected, actual } => {
+                CryptoError::InvalidKeyLength { expected, actual }
+            }
+            CoreCryptoError::InvalidDataLength { block_size, actual } => {
+                CryptoError::InvalidDataLength { block_size, actual }
+            }
+            CoreCryptoError::UnsupportedMode { mode } => CryptoError::UnsupportedMode { mode },
+            CoreCryptoError::InvalidIv => CryptoError::InvalidIV {
+                reason: "invalid initialisation vector".to_string(),
+            },
+            CoreCryptoError::DecryptionFailed => CryptoError::DecryptionFailed {
+                reason: "decryption failed".to_string(),
+            },
+            CoreCryptoError::EncryptionFailed => CryptoError::EncryptionFailed {
+                reason: "encryption failed".to_string(),
+            },
+            CoreCryptoError::InvalidFrame(why) => CryptoError::InvalidFrame {
+                reason: why.to_string(),
+            },
+        }
+    }
+}
+
+/// Derive a per-device key from a master key by XOR.
 ///
-/// * the derived `PartialEq` compares byte by byte and returns on the first difference,
-///   so how long a comparison takes reveals how many leading bytes matched. The
-///   `subtle`-backed impl below is constant-time. (`subtle` has been a declared
-///   dependency of both crates since the crypto hardening work, for exactly this — it
-///   was simply never wired up, so nothing used it.)
-/// * the derived `Debug` prints the key material. One `{:?}` on a struct containing a
-///   key would put it in a log file, and the whole point of `ZeroizeOnDrop` is that the
-///   bytes should not outlive their use.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct AesKey {
-    key: [u8; 16],
-}
+/// **This is not a key derivation function.** XOR is reversible: anyone holding a derived
+/// key and the device identity recovers the master key, which is the one secret shared
+/// across the whole fleet. It is kept only so existing callers of
+/// [`KeyMode::DerivedFromMaster`] keep compiling, and it is deliberately NOT in
+/// `mbus-core` — a portable core should not carry a primitive that must not be used.
+///
+/// Real OMS master-key derivation is AES-CMAC based (OMS Vol.2 Annex A). Implementing it
+/// needs the exact input encoding, which this crate has never had to hand; a
+/// plausible-looking wrong KDF is worse than an absent one, because it produces keys that
+/// look fine and decrypt nothing.
+#[deprecated(
+    note = "not a KDF: XOR is reversible and leaks the master key. Supply the device key directly (KeyMode::Direct)."
+)]
+pub fn derive_device_key(master: &AesKey, device_id: u32, manufacturer: u16) -> AesKey {
+    let mut derived = *master.as_bytes();
 
-impl PartialEq for AesKey {
-    fn eq(&self, other: &Self) -> bool {
-        use subtle::ConstantTimeEq;
-        self.key.ct_eq(&other.key).into()
-    }
-}
-
-impl Eq for AesKey {}
-
-impl core::fmt::Debug for AesKey {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Deliberately opaque: never print key material.
-        f.write_str("AesKey(<redacted>)")
-    }
-}
-
-impl AesKey {
-    /// Create AES key from 16-byte array
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        if bytes.len() != 16 {
-            return Err(CryptoError::InvalidKeyLength {
-                expected: 16,
-                actual: bytes.len(),
-            });
-        }
-
-        let mut key = [0u8; 16];
-        key.copy_from_slice(bytes);
-        Ok(Self { key })
+    let device_bytes = device_id.to_le_bytes();
+    for i in 0..4 {
+        derived[i] ^= device_bytes[i];
+        derived[i + 4] ^= device_bytes[i];
     }
 
-    /// Create AES key from hex string
-    pub fn from_hex(hex_str: &str) -> Result<Self, CryptoError> {
-        let bytes = hex::decode_hex(hex_str).map_err(|_| CryptoError::InvalidKeyLength {
-            expected: 16,
-            actual: 0,
-        })?;
-        Self::from_bytes(&bytes)
+    let mfg_bytes = manufacturer.to_le_bytes();
+    for i in 0..2 {
+        derived[i + 8] ^= mfg_bytes[i];
+        derived[i + 10] ^= mfg_bytes[i];
     }
 
-    /// Get key bytes
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        &self.key
-    }
-
-    /// Mix a device id and manufacturer into a key by XOR.
-    ///
-    /// **This is not a key derivation function and not the OMS scheme**, despite what
-    /// earlier revisions of this code claimed. It is XOR, so it provides none of the
-    /// one-wayness a KDF must have: an attacker who learns one device key recovers the
-    /// master key immediately, and with it every other device's key.
-    ///
-    /// Real meters ship with a per-device key, so the correct usage is to supply that
-    /// key directly ([`KeyMode::Direct`], the default). Proper OMS master-key
-    /// derivation is AES-CMAC based and is deliberately not implemented here rather
-    /// than guessed at: it requires the exact input encoding from OMS Vol. 2 Annex A,
-    /// and a plausible-looking wrong KDF is worse than an absent one.
-    #[deprecated(
-        note = "not a KDF: XOR is reversible and leaks the master key. Supply the device key directly."
-    )]
-    pub fn derive_device_key(&self, device_id: u32, manufacturer: u16) -> Self {
-        let mut derived_key = self.key;
-
-        let device_bytes = device_id.to_le_bytes();
-        for i in 0..4 {
-            derived_key[i] ^= device_bytes[i];
-            derived_key[i + 4] ^= device_bytes[i];
-        }
-
-        // Incorporate manufacturer ID
-        let mfg_bytes = manufacturer.to_le_bytes();
-        for i in 0..2 {
-            derived_key[i + 8] ^= mfg_bytes[i];
-            derived_key[i + 10] ^= mfg_bytes[i];
-        }
-
-        Self { key: derived_key }
-    }
-}
-
-/// Device information for encryption/decryption
-#[derive(Debug, Clone)]
-pub struct DeviceInfo {
-    pub device_id: u32,
-    pub manufacturer: u16,
-    pub version: u8,
-    pub device_type: u8,
-    /// Access number from frame (for Mode 9 IV construction)
-    pub access_number: Option<u64>,
-}
-
-/// How the key handed to [`WMBusCrypto`] relates to the key a frame is encrypted with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum KeyMode {
-    /// The supplied key *is* the device key — the normal case, because meters ship
-    /// with a per-device key. This is the default.
-    #[default]
-    Direct,
-    /// Apply the deprecated XOR mixing to the supplied master key. Retained only for
-    /// compatibility with data produced by earlier revisions; see
-    /// [`AesKey::derive_device_key`].
-    DerivedFromMaster,
+    // Length is 16 by construction.
+    AesKey::from_bytes(&derived).unwrap_or_else(|_| master.clone())
 }
 
 /// Enhanced wM-Bus cryptographic operations
 pub struct WMBusCrypto {
     master_key: AesKey,
     key_mode: KeyMode,
-    #[allow(dead_code)]
-    error_throttle: logging::LogThrottle,
     /// Configuration flags
     add_crc_mode9: bool,
     verify_crc_mode9: bool,
@@ -212,8 +159,7 @@ impl WMBusCrypto {
         Self {
             master_key,
             key_mode: KeyMode::Direct,
-            error_throttle: logging::LogThrottle::new(1000, 3), // 3 errors per second
-            add_crc_mode9: false,                               // Default: no CRC for compatibility
+            add_crc_mode9: false, // Default: no CRC for compatibility
             verify_crc_mode9: false,
             full_tag_compatibility: true, // Default: use 16-byte tags for testing
         }
@@ -253,9 +199,11 @@ impl WMBusCrypto {
         match self.key_mode {
             KeyMode::Direct => self.master_key.clone(),
             #[allow(deprecated)]
-            KeyMode::DerivedFromMaster => self
-                .master_key
-                .derive_device_key(device_info.device_id, device_info.manufacturer),
+            KeyMode::DerivedFromMaster => derive_device_key(
+                &self.master_key,
+                device_info.device_id,
+                device_info.manufacturer,
+            ),
         }
     }
 
@@ -595,21 +543,6 @@ impl WMBusCrypto {
                 reason: "GCM authentication/decryption failed".to_string(),
             })
         }
-
-        #[cfg(not(feature = "crypto"))]
-        {
-            // Fallback for testing
-            if self.error_throttle.allow() {
-                log::warn!("GCM encryption requires 'crypto' feature");
-            }
-
-            // Simple XOR for testing
-            let mut result = ciphertext.to_vec();
-            for (i, byte) in result.iter_mut().enumerate() {
-                *byte ^= key.as_bytes()[i % 16];
-            }
-            Ok(result)
-        }
     }
 
     /// Perform AES-GCM encryption
@@ -650,25 +583,6 @@ impl WMBusCrypto {
             let (ciphertext, tag) = combined.split_at(combined.len() - 16);
 
             Ok((ciphertext.to_vec(), tag.to_vec()))
-        }
-
-        #[cfg(not(feature = "crypto"))]
-        {
-            // Fallback for testing
-            if self.error_throttle.allow() {
-                log::warn!("GCM encryption requires 'crypto' feature");
-            }
-
-            // Simple XOR for testing
-            let mut ciphertext = plaintext.to_vec();
-            for (i, byte) in ciphertext.iter_mut().enumerate() {
-                *byte ^= key.as_bytes()[i % 16];
-            }
-
-            // Fake tag
-            let tag = vec![0xAA; 16];
-
-            Ok((ciphertext, tag))
         }
     }
 
@@ -825,6 +739,7 @@ impl WMBusCrypto {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::hex;
 
     #[test]
     fn test_aes_key_creation() {
@@ -848,14 +763,14 @@ mod tests {
     fn test_key_derivation() {
         let master_key = AesKey::from_bytes(&[0; 16]).unwrap();
         #[allow(deprecated)]
-        let device_key = master_key.derive_device_key(0x12345678, 0xABCD);
+        let device_key = derive_device_key(&master_key, 0x12345678, 0xABCD);
 
         // Derived key should be different from master key
         assert_ne!(device_key.as_bytes(), master_key.as_bytes());
 
         // Same derivation should produce same key
         #[allow(deprecated)]
-        let device_key2 = master_key.derive_device_key(0x12345678, 0xABCD);
+        let device_key2 = derive_device_key(&master_key, 0x12345678, 0xABCD);
         assert_eq!(device_key.as_bytes(), device_key2.as_bytes());
     }
 
@@ -870,7 +785,7 @@ mod tests {
     fn test_invalid_key_length() {
         let result = AesKey::from_bytes(&[0; 15]); // Wrong length
         assert!(result.is_err());
-        if let Err(CryptoError::InvalidKeyLength { expected, actual }) = result {
+        if let Err(CoreCryptoError::InvalidKeyLength { expected, actual }) = result {
             assert_eq!(expected, 16);
             assert_eq!(actual, 15);
         } else {
@@ -1111,7 +1026,8 @@ mod tests {
         // Under the legacy mode the deprecated XOR mixing is applied, so the effective
         // key equals the derived device key — and differs from the supplied master key.
         #[allow(deprecated)]
-        let derived = master_key.derive_device_key(device_info.device_id, device_info.manufacturer);
+        let derived =
+            derive_device_key(&master_key, device_info.device_id, device_info.manufacturer);
         // XOR-based derivation must actually change the key, or the test proves nothing.
         assert_ne!(derived.as_bytes(), master_key.as_bytes());
 
