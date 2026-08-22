@@ -77,3 +77,28 @@ fn a_tampered_12_byte_tag_is_still_rejected() {
         "truncating the tag must not weaken authentication to the point of accepting forgeries"
     );
 }
+
+/// The shipped default must be the standard, not a testing convenience.
+///
+/// This defaulted to the non-standard 16-byte tag ("for testing"), which meant the crate
+/// could not interoperate with a real OMS Mode 9 meter out of the box — and because every
+/// Mode 9 test used the default, the 12-byte path was never exercised and had a defect
+/// that made it unable to authenticate at all.
+#[test]
+fn the_default_tag_length_is_the_oms_twelve() {
+    let key = AesKey::from_bytes(&[0x2B; 16]).unwrap();
+    let mut c = WMBusCrypto::new(key); // no set_tag_mode call
+    let plain = plaintext_frame();
+    let encrypted = c.encrypt_mode9_gcm(&plain, &device()).expect("encrypt");
+
+    // Header is unchanged; the payload grows by the tag. 12 bytes, not 16.
+    let overhead = encrypted.len() - plain.len();
+    assert_eq!(
+        overhead, 12,
+        "default must emit OMS 7.3.6's 12-byte truncated tag, got {overhead} bytes"
+    );
+
+    // And it must still round-trip under that default.
+    let decrypted = c.decrypt_mode9_gcm(&encrypted, &device()).expect("decrypt");
+    assert_eq!(&decrypted[11..], &PAYLOAD);
+}

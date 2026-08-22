@@ -169,7 +169,15 @@ impl WMBusCrypto {
             key_mode: KeyMode::Direct,
             add_crc_mode9: false, // Default: no CRC for compatibility
             verify_crc_mode9: false,
-            full_tag_compatibility: true, // Default: use 16-byte tags for testing
+            // OMS 7.3.6 truncates the GCM tag to 12 bytes on air, so that is the
+            // default: a meter built to the standard is what this crate has to talk to.
+            // It used to default to 16 "for testing", which meant the shipped default
+            // could not interoperate with a real Mode 9 meter in either direction — and
+            // because every Mode 9 test used the default, the 12-byte path was never
+            // exercised and had a defect that made it unable to authenticate at all.
+            // `set_tag_mode(true)` restores the 16-byte behaviour for anything that
+            // depends on it.
+            full_tag_compatibility: false,
         }
     }
 
@@ -185,7 +193,9 @@ impl WMBusCrypto {
         self.verify_crc_mode9 = verify;
     }
 
-    /// Set tag compatibility mode (true = 16 bytes, false = 12 bytes OMS)
+    /// Choose the GCM tag length: `false` (default) is OMS 7.3.6's 12-byte truncated
+    /// tag; `true` keeps the full 16-byte tag, which is not what a standards-compliant
+    /// meter sends.
     pub fn set_tag_mode(&mut self, full_tag: bool) {
         self.full_tag_compatibility = full_tag;
     }
