@@ -553,41 +553,47 @@ impl WMBusCrypto {
     ) -> Result<Vec<u8>, CryptoError> {
         #[cfg(feature = "crypto")]
         {
+            use aes_gcm::aead::consts::{U12, U16};
             use aes_gcm::aead::{generic_array::GenericArray, Aead, Payload};
-            use aes_gcm::{Aes128Gcm, KeyInit, Nonce};
+            use aes_gcm::aes::Aes128;
+            use aes_gcm::{AesGcm, KeyInit, Nonce};
 
-            // Create cipher
-            let cipher = Aes128Gcm::new(GenericArray::from_slice(key.as_bytes()));
+            // AES-GCM with an explicitly-sized authentication tag.
+            //
+            // OMS 7.3.6 truncates the tag to 12 bytes on air. This used to zero-pad a
+            // 12-byte tag back to 16 and ask aes-gcm to verify it — which cannot succeed,
+            // because a genuine tag's last four bytes are not zeros. GCM tag truncation is
+            // a supported construction (NIST SP 800-38D §5.2.1.2): you verify against the
+            // truncated tag, you do not reconstruct the full one. aes-gcm expresses that
+            // as a type parameter, so each length gets its own cipher below.
+            type Aes128Gcm12 = AesGcm<Aes128, U12, U12>;
+            type Aes128Gcm16 = AesGcm<Aes128, U12, U16>;
 
             // Create 12-byte nonce from IV
             let nonce = Nonce::from_slice(iv);
 
-            // Combine ciphertext with tag
             let mut combined = ciphertext.to_vec();
-
-            // For OMS Mode 9, tag is 12 bytes, but aes-gcm expects 16
-            // We need to use the full 16-byte tag from encryption
-            if tag.len() == 12 {
-                // This is a truncated tag - for now, pad with zeros
-                // In real implementation, we'd need to handle this differently
-                combined.extend_from_slice(tag);
-                combined.extend_from_slice(&[0, 0, 0, 0]);
-            } else {
-                combined.extend_from_slice(tag);
-            }
-
-            // Create payload with AAD
+            combined.extend_from_slice(tag);
             let payload = Payload {
                 msg: &combined,
                 aad,
             };
 
-            // Decrypt
-            cipher
-                .decrypt(nonce, payload)
-                .map_err(|_| CryptoError::DecryptionFailed {
-                    reason: "GCM authentication/decryption failed".to_string(),
-                })
+            // Verify against the tag length actually received.
+            match tag.len() {
+                12 => Aes128Gcm12::new(GenericArray::from_slice(key.as_bytes()))
+                    .decrypt(nonce, payload),
+                16 => Aes128Gcm16::new(GenericArray::from_slice(key.as_bytes()))
+                    .decrypt(nonce, payload),
+                _ => {
+                    return Err(CryptoError::DecryptionFailed {
+                        reason: "GCM tag must be 12 bytes (OMS 7.3.6) or 16".to_string(),
+                    })
+                }
+            }
+            .map_err(|_| CryptoError::DecryptionFailed {
+                reason: "GCM authentication/decryption failed".to_string(),
+            })
         }
 
         #[cfg(not(feature = "crypto"))]
