@@ -88,7 +88,14 @@ pub fn extract_layout(records: &[u8]) -> Result<RecordLayout, CompactError> {
         if consumed == 0 {
             break;
         }
-        let header_len = consumed - rec.data_len;
+        // Defensive: `consumed` counts the header plus the data, so it should always be
+        // at least `data_len`. This was a bare subtraction — a debug-mode panic and a
+        // release-mode wraparound feeding the slice below — on a value that comes from a
+        // parser reading untrusted bytes. Cheap to check, and the alternative failure is
+        // a wildly out-of-range slice index.
+        let Some(header_len) = consumed.checked_sub(rec.data_len) else {
+            break;
+        };
         entries.push(LayoutEntry {
             header: records[offset..offset + header_len].to_vec(),
             data_len: rec.data_len,

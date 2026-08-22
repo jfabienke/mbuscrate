@@ -300,13 +300,32 @@ pub fn parse_variable_record_consumed(input: &[u8]) -> Result<(MBusRecord, usize
     {
         // re-calculate data length, if of variable length type
         if (record.drh.dib.dif & MBUS_DATA_RECORD_DIF_MASK_DATA) == 0x0D {
-            record.data_len = parse_variable_data_length(*remaining.first().unwrap_or(&0))?;
+            // The LVAR byte must actually be present. `first()` tolerated an empty slice
+            // and then the next line sliced `[1..]` on it, which panics — reachable from
+            // any record that announces a variable length at the very end of the input.
+            let Some(&lvar) = remaining.first() else {
+                return Err(MBusError::PrematureEndAtData);
+            };
+            record.data_len = parse_variable_data_length(lvar)?;
             remaining = &remaining[1..];
             consumed += 1; // the variable-length byte
         }
 
         if record.data_len > remaining.len() {
             return Err(MBusError::PrematureEndAtData);
+        }
+
+        // EN 13757-3 §6.4.3 lets an LVAR code describe up to 1130 bytes, but
+        // `MBusRecord::data` is a fixed 256-byte array. The check above only compares
+        // against the *input*, so a long enough input walked off the end of the
+        // destination — an out-of-bounds panic on attacker-supplied bytes, which for a
+        // gateway parsing untrusted meter frames is a denial of service.
+        if record.data_len > record.data.len() {
+            return Err(MBusError::FrameParseError(format!(
+                "record data length {} exceeds the {}-byte record buffer",
+                record.data_len,
+                record.data.len()
+            )));
         }
 
         for j in 0..record.data_len {

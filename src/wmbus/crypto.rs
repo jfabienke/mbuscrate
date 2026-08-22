@@ -73,9 +73,37 @@ pub enum CryptoError {
 }
 
 /// AES-128 key for wM-Bus encryption
-#[derive(Debug, Clone, PartialEq, Zeroize, ZeroizeOnDrop)]
+///
+/// `PartialEq` and `Debug` are hand-written rather than derived, for two reasons that a
+/// derive gets wrong on a secret:
+///
+/// * the derived `PartialEq` compares byte by byte and returns on the first difference,
+///   so how long a comparison takes reveals how many leading bytes matched. The
+///   `subtle`-backed impl below is constant-time. (`subtle` has been a declared
+///   dependency of both crates since the crypto hardening work, for exactly this — it
+///   was simply never wired up, so nothing used it.)
+/// * the derived `Debug` prints the key material. One `{:?}` on a struct containing a
+///   key would put it in a log file, and the whole point of `ZeroizeOnDrop` is that the
+///   bytes should not outlive their use.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct AesKey {
     key: [u8; 16],
+}
+
+impl PartialEq for AesKey {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.key.ct_eq(&other.key).into()
+    }
+}
+
+impl Eq for AesKey {}
+
+impl core::fmt::Debug for AesKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Deliberately opaque: never print key material.
+        f.write_str("AesKey(<redacted>)")
+    }
 }
 
 impl AesKey {

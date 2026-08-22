@@ -29,6 +29,19 @@ pub enum MBusTimeDecodeError {
     InvalidTimeData,
 }
 
+/// Month index (0-based) from the low nibble of an M-Bus date byte.
+///
+/// EN 13757-3 stores the month as 1..=12. A meter whose clock has never been set — or a
+/// corrupted frame — sends 0, and the previous `(byte & 0x0F) - 1` underflowed: a panic
+/// in debug builds, and in release a wrap to 255 that silently produced a date about 21
+/// years in the future. Six sites had the same bug; they now share this one check.
+fn month_index(byte: u8) -> Option<u64> {
+    match byte & 0x0F {
+        1..=12 => Some(u64::from((byte & 0x0F) - 1)),
+        _ => None,
+    }
+}
+
 /// Decodes M-Bus time data from the input byte slice and returns a SystemTime, handling the different time data types and validating the input.
 pub fn decode_mbus_time(input: &[u8]) -> Result<SystemTime, MBusTimeDecodeError> {
     let mut time = UNIX_EPOCH;
@@ -37,7 +50,7 @@ pub fn decode_mbus_time(input: &[u8]) -> Result<SystemTime, MBusTimeDecodeError>
         2 => {
             // Type G: Compound CP16 (Date)
             let year = u64::from(100 + (((input[0] & 0xE0) >> 5) | ((input[1] & 0xF0) >> 1)));
-            let month = u64::from((input[1] & 0x0F) - 1);
+            let month = month_index(input[1]).ok_or(MBusTimeDecodeError::InvalidTimeData)?;
             let day = u64::from(input[0] & 0x1F);
             time += Duration::from_secs(year * 31_536_000 + month * 2_592_000 + day * 86_400);
         }
@@ -49,7 +62,7 @@ pub fn decode_mbus_time(input: &[u8]) -> Result<SystemTime, MBusTimeDecodeError>
             let minute = u64::from(input[0] & 0x3F);
             let hour = u64::from(input[1] & 0x1F);
             let day = u64::from(input[2] & 0x1F);
-            let month = u64::from((input[3] & 0x0F) - 1);
+            let month = month_index(input[3]).ok_or(MBusTimeDecodeError::InvalidTimeData)?;
             let year = u64::from(100 + (((input[2] & 0xE0) >> 5) | ((input[3] & 0xF0) >> 1)));
             time += Duration::from_secs(
                 year * 31_536_000 + month * 2_592_000 + day * 86_400 + hour * 3_600 + minute * 60,
@@ -64,7 +77,7 @@ pub fn decode_mbus_time(input: &[u8]) -> Result<SystemTime, MBusTimeDecodeError>
             let minute = u64::from(input[1] & 0x3F);
             let hour = u64::from(input[2] & 0x1F);
             let day = u64::from(input[3] & 0x1F);
-            let month = u64::from((input[4] & 0x0F) - 1);
+            let month = month_index(input[4]).ok_or(MBusTimeDecodeError::InvalidTimeData)?;
             let year = u64::from(100 + (((input[3] & 0xE0) >> 5) | ((input[4] & 0xF0) >> 1)));
             time += Duration::from_secs(
                 year * 31_536_000
@@ -253,7 +266,12 @@ pub fn decode_time(input: &[u8], size: usize) -> IResult<&[u8], SystemTime> {
             2 => {
                 // Type G: Compound CP16: Date
                 let year = u64::from(100 + (((bytes[0] & 0xE0) >> 5) | ((bytes[1] & 0xF0) >> 1)));
-                let month = u64::from((bytes[1] & 0x0F) - 1);
+                // `decode_time` is a nom combinator returning an infallible SystemTime, so an
+                // invalid month cannot be reported here; it degrades to January. That is a
+                // defined, bounded fallback, unlike the previous underflow which wrapped to
+                // 255 and moved the date ~21 years into the future. `decode_mbus_time`
+                // above *can* report it, and does.
+                let month = month_index(bytes[1]).unwrap_or(0);
                 let day = u64::from(bytes[0] & 0x1F);
                 time += Duration::from_secs(year * 31_536_000 + month * 2_592_000 + day * 86_400);
             }
@@ -262,7 +280,12 @@ pub fn decode_time(input: &[u8], size: usize) -> IResult<&[u8], SystemTime> {
                 let minute = u64::from(bytes[0] & 0x3F);
                 let hour = u64::from(bytes[1] & 0x1F);
                 let day = u64::from(bytes[2] & 0x1F);
-                let month = u64::from((bytes[3] & 0x0F) - 1);
+                // `decode_time` is a nom combinator returning an infallible SystemTime, so an
+                // invalid month cannot be reported here; it degrades to January. That is a
+                // defined, bounded fallback, unlike the previous underflow which wrapped to
+                // 255 and moved the date ~21 years into the future. `decode_mbus_time`
+                // above *can* report it, and does.
+                let month = month_index(bytes[3]).unwrap_or(0);
                 let year = u64::from(100 + (((bytes[2] & 0xE0) >> 5) | ((bytes[3] & 0xF0) >> 1)));
                 time += Duration::from_secs(
                     year * 31_536_000
@@ -278,7 +301,12 @@ pub fn decode_time(input: &[u8], size: usize) -> IResult<&[u8], SystemTime> {
                 let minute = u64::from(bytes[1] & 0x3F);
                 let hour = u64::from(bytes[2] & 0x1F);
                 let day = u64::from(bytes[3] & 0x1F);
-                let month = u64::from((bytes[4] & 0x0F) - 1);
+                // `decode_time` is a nom combinator returning an infallible SystemTime, so an
+                // invalid month cannot be reported here; it degrades to January. That is a
+                // defined, bounded fallback, unlike the previous underflow which wrapped to
+                // 255 and moved the date ~21 years into the future. `decode_mbus_time`
+                // above *can* report it, and does.
+                let month = month_index(bytes[4]).unwrap_or(0);
                 let year = u64::from(100 + (((bytes[3] & 0xE0) >> 5) | ((bytes[4] & 0xF0) >> 1)));
                 time += Duration::from_secs(
                     year * 31_536_000
