@@ -919,6 +919,7 @@ dependencies = [
  "aes",
  "cbc",
  "cmac",
+ "ctr",
  "defmt 0.3.100",
  "heapless",
  "hex",

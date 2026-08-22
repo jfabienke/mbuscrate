@@ -14,6 +14,8 @@ pub mod crc;
 #[cfg(feature = "crypto")]
 pub mod crypto;
 pub mod decode_buffer;
+#[cfg(feature = "crypto")]
+pub mod ell;
 pub mod frame;
 pub mod frame_decode;
 pub mod framing;

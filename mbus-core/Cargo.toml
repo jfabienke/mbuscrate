@@ -16,6 +16,9 @@ subtle = { version = "2.6", default-features = false, optional = true }
 # AES-CBC for OMS security mode 5. NOT `features = ["alloc"]` as mbus-rs declares it:
 # `decrypt_padded_mut` works in place on a caller-supplied buffer, so nothing allocates.
 cbc = { version = "0.1", optional = true }
+# AES-CTR for the wM-Bus extended link layer. no_std by default; the `alloc` feature is
+# deliberately not enabled — `apply_keystream` works in place.
+ctr = { version = "0.9", optional = true }
 # Fixed-capacity collections. Every capacity in this crate is dictated by the LoRaWAN
 # spec (see the constants in `lorawan`), not chosen for convenience, so the bounds are
 # protocol facts rather than tuning knobs.
@@ -38,7 +41,7 @@ default = ["std", "crypto"]
 # no_std-first; this feature only turns on std-specific conveniences.
 std = []
 # LoRaWAN / OMS cryptography. Pulls RustCrypto, all no_std-capable.
-crypto = ["dep:aes", "dep:cbc", "dep:cmac", "dep:subtle", "dep:zeroize"]
+crypto = ["dep:aes", "dep:cbc", "dep:cmac", "dep:ctr", "dep:subtle", "dep:zeroize"]
 # `defmt::Format` on the public types, for Embassy/RTT logging. No `defmt/alloc`:
 # the public types are fixed-capacity and implement `Format` natively.
 defmt = ["dep:defmt", "heapless/defmt-03"]
