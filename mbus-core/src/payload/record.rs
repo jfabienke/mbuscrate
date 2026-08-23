@@ -987,8 +987,8 @@ mod tests {
         let mut record = MBusRecord {
             // Minimal record
             storage_number: 0,
-            tariff: -1,
-            device: -1,
+            tariff: None,
+            device: None,
             is_numeric: true,
             value: MBusRecordValue::Numeric(0.0),
             unit: UnitText::new(),
