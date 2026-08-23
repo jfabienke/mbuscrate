@@ -65,7 +65,7 @@ pub use crate::logging::{init_logger, log_info};
 pub use mbus::serial::MBusDeviceHandle;
 pub use mbus::{MBusFrame, MBusFrameType};
 pub use mbus_device_manager::MBusDeviceManager;
-pub use payload::{mbus_data_record_decode, normalize_vib, MBusRecord, MBusRecordValue};
+pub use payload::{normalize_vib, MBusRecord, MBusRecordValue};
 
 // Vendor extension system
 pub use vendors::{

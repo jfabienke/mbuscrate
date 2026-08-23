@@ -1,13 +1,11 @@
 //! The payload module contains the components responsible for decoding and processing
 //! the data payload of the M-Bus protocol.
 
-pub mod data;
 pub mod data_encoding;
 pub mod record;
 pub mod vif;
 pub mod vif_maps;
 
-pub use data::mbus_data_record_decode;
 pub use data_encoding::*;
 pub use record::*;
 pub use vif::*;

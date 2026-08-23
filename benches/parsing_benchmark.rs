@@ -1,6 +1,5 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use mbus_rs::mbus::frame::{pack_frame, parse_frame, verify_frame, MBusFrame, MBusFrameType};
-use mbus_rs::payload::data::mbus_data_record_decode;
 use mbus_rs::payload::data_encoding::{decode_bcd, decode_int};
 use mbus_rs::payload::vif::{parse_vib, parse_vif};
 use std::hint::black_box;
@@ -132,7 +131,8 @@ fn benchmark_data_encoding(c: &mut Criterion) {
     let record_data = vec![0x04, 0x13, 0x34, 0x12, 0x00, 0x00]; // DIF + VIF + 4-byte value
     group.bench_function("parse_variable_data_record", |b| {
         b.iter(|| {
-            let _ = mbus_data_record_decode(black_box(&record_data));
+            let _ =
+                mbus_rs::payload::record::parse_variable_record_consumed(black_box(&record_data));
         })
     });
 

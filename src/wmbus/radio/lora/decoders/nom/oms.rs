@@ -4,7 +4,6 @@
 //! heavily reuses the existing M-Bus parsing infrastructure.
 
 use crate::constants::*;
-use crate::payload::data::parse_enhanced_variable_data_record;
 use crate::payload::record::MBusRecordValue;
 use crate::wmbus::radio::lora::decoder::{
     BatteryStatus, DeviceStatus, LoRaDecodeError, LoRaPayloadDecoder, MeteringData, Reading,
@@ -133,32 +132,29 @@ pub fn parse_oms_data_records(input: &[u8]) -> IResult<&[u8], Vec<OmsDataRecord>
             break;
         }
 
-        // Try to parse using enhanced M-Bus parser
-        match parse_enhanced_variable_data_record(remaining) {
-            Ok((new_remaining, record)) => {
-                // Convert M-Bus record to OMS record
-                // Convert data::MBusRecordValue to record::MBusRecordValue
-                let value = match record.value {
-                    crate::payload::data::MBusRecordValue::Numeric(n) => {
-                        MBusRecordValue::Numeric(n)
-                    }
-                    crate::payload::data::MBusRecordValue::String(s) => MBusRecordValue::text(&s),
-                };
+        // Parse with the canonical M-Bus record parser (the former `payload::data` fork,
+        // now deleted, was a second implementation of exactly this). It reports the bytes
+        // consumed rather than the remainder, and its value is already the core
+        // `MBusRecordValue`, so the previous data::-to-record:: conversion is gone.
+        match crate::payload::record::parse_variable_record_consumed(remaining) {
+            Ok((record, used)) if used > 0 => {
+                let dib = &record.drh.dib;
+                let vib = &record.drh.vib;
                 let oms_record = OmsDataRecord {
-                    dif: record.dif_chain.first().copied().unwrap_or(0),
-                    dife: record.dif_chain[1..].to_vec(),
-                    vif: record.vif_chain.first().copied().unwrap_or(0),
-                    vife: record.vif_chain[1..].to_vec(),
-                    data: vec![], // Already processed into value
-                    value,
-                    unit: record.unit,
-                    quantity: record.quantity,
+                    dif: dib.dif,
+                    dife: dib.dife[..dib.ndife].to_vec(),
+                    vif: vib.vif,
+                    vife: vib.vife[..vib.nvife].to_vec(),
+                    data: vec![], // already processed into value
+                    unit: record.unit.to_string(),
+                    quantity: record.quantity.to_string(),
+                    value: record.value,
                 };
                 records.push(oms_record);
-                remaining = new_remaining;
+                remaining = &remaining[used..];
             }
-            Err(_) => {
-                // Skip this byte and try again
+            // Parse failure or a zero-consuming record: skip a byte and resync.
+            _ => {
                 remaining = &remaining[1..];
             }
         }
