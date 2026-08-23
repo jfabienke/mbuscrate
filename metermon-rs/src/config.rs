@@ -84,11 +84,21 @@ pub struct DeviceConfig {
     #[serde(rename = "type")]
     pub dev_type: String,
     pub spidev: Option<String>,
-    /// Radio driver for this device: "sx1262" (default) or "rfm69". The default
-    /// tracks the hardware on the gateway; the RFM69 HAT has been replaced by the
-    /// Waveshare SX1262 XXXM, but the driver remains selectable for other boards.
+    /// Radio backend for this device: "sx1262" (default, mbus-rs's own driver),
+    /// "seeed" (the seeed-wm1302 driver, board-selectable — see `board`), or "rfm69".
+    /// The default tracks the hardware on the gateway; the RFM69 HAT has been replaced
+    /// by the Waveshare SX1262 XXXM, but the driver remains selectable for other boards.
     #[serde(default)]
     pub driver: Option<String>,
+    /// Radio HAT profile for the "seeed" driver: "waveshare-sx1262-pi5" (default) or
+    /// "seeed-wm1302". Selects the electrical profile + pin wiring; the wM-Bus receive
+    /// path is identical on both (wM-Bus is always on the SX1262). Ignored by other drivers.
+    #[serde(default)]
+    pub board: Option<String>,
+    /// Regional band for the "seeed-wm1302" board profile (e.g. "eu868"). Ignored by the
+    /// Waveshare profile and by other drivers.
+    #[serde(default)]
+    pub region: Option<String>,
     /// Periodic LoRa listen windows carved out of wM-Bus receive (SX1262 only).
     /// Absent = wM-Bus continuously, no switching.
     #[serde(default, rename = "lora-listen")]

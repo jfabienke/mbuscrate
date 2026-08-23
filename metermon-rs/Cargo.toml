@@ -42,12 +42,32 @@ env_logger = "0.11"
 rppal = { version = "0.22", optional = true }
 redb = "4.1.0"
 
+# The seeed-wm1302 radio driver stack — drives both the Waveshare SX1262 HAT and the
+# incoming Seeed WM-1302 HAT from one API (wM-Bus RX is always on the SX1262; the SX1302
+# is LoRaWAN-only). Pinned to a reviewed rev; the trait / RxFrame / GfskMeta shapes are
+# stable-by-agreement with the seeed session (design/17). Linux/aarch64 only (radio-linux
+# uses rppal), so these live behind the `seeed-radio` feature, which implies `radio`.
+# Private repo: local + Pi have SSH access; mbuscrate CI needs a read deploy key.
+radio-core = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "3755d6d", optional = true }
+radio-sx126x = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "3755d6d", features = ["tx"], optional = true }
+radio-boards = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "3755d6d", optional = true }
+radio-linux = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "3755d6d", optional = true }
+wmbus-link = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "3755d6d", optional = true }
+
 [features]
 default = []
 # The `radio` feature pulls in the RFM69 driver + Pi HAL. Only builds on Linux/aarch64
 # (rppal is Linux-only), so it is OFF by default: the decode core, file-replay source,
 # and MQTT publisher all build and test on any host without it.
 radio = ["mbus-rs/rfm69", "mbus-rs/raspberry-pi", "dep:rppal"]
+# The seeed-wm1302 driver backend (RadioSource::SeeedSx1262). Implies `radio` so the
+# radio plumbing (RadioSource enum, source module) compiles; adds the seeed crates.
+# Selected at runtime by `driver = "seeed"` in the device config so the legacy sx1262
+# backend stays available as rollback during A/B validation.
+seeed-radio = [
+    "radio",
+    "dep:radio-core", "dep:radio-sx126x", "dep:radio-boards", "dep:radio-linux", "dep:wmbus-link",
+]
 # The LoRaWAN join-control endpoint and its mock-backend driver. Pulls in the shared
 # `lorawan-join-control` wire-schema crate (a sibling path dep, absent from repo CI) and
 # implies `radio` because the gateway endpoint drives the RF join responder. The
