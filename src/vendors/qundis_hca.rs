@@ -357,8 +357,9 @@ impl VendorQuirks for QundisDateQuirk {
         }
         .ok()?; // Undecodable bits: leave the standard reading rather than guess (P3).
 
-        record.unit = "Date".to_string();
-        record.quantity = "QUNDIS Date".to_string();
+        // Both are compile-time constants, so they cost nothing to store.
+        record.unit = mbus_core::payload::text::UnitText::Static("Date");
+        record.quantity = mbus_core::payload::text::QuantityText::Static("QUNDIS Date");
         record.is_numeric = false;
         record.value = crate::payload::record::MBusRecordValue::String(
             datetime.format("%Y-%m-%d %H:%M:%S").to_string(),

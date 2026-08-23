@@ -514,7 +514,7 @@ fn test_data_record_structures() {
         vif: 0x13,
         nvife: 0,
         vife: [0; 10],
-        custom_vif: "Test".to_string(),
+        custom_vif: mbus_rs::payload::record::CustomVif::try_from("Test").unwrap(),
     };
     assert_eq!(vib.vif, 0x13);
     assert_eq!(vib.custom_vif, "Test");

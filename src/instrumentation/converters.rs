@@ -23,7 +23,7 @@ impl Default for MBusDataRecordHeader {
                 vif: 0,
                 nvife: 0,
                 vife: [0; 10],
-                custom_vif: String::new(),
+                custom_vif: crate::payload::record::CustomVif::new(),
             },
         }
     }
@@ -80,9 +80,11 @@ pub fn from_mbus_frame_with_split(
         };
 
         let mut reading = Reading {
-            name: record.quantity.clone(),
+            // Reading holds owned strings; the record's are static or inline, so this
+            // is the one place the conversion happens.
+            name: record.quantity.to_string(),
             value,
-            unit: record.unit.clone(),
+            unit: record.unit.to_string(),
             timestamp: record.timestamp,
             tariff: if record.tariff >= 0 {
                 Some(record.tariff as u32)
@@ -399,9 +401,9 @@ mod tests {
             device: -1,
             is_numeric: true,
             value: MBusRecordValue::Numeric(123.45),
-            unit: "m³".to_string(),
-            function_medium: String::new(),
-            quantity: "Volume".to_string(),
+            unit: mbus_core::payload::text::UnitText::Static("m³"),
+            function_medium: "",
+            quantity: mbus_core::payload::text::QuantityText::Static("Volume"),
             drh: Default::default(),
             data_len: 0,
             data: [0; 256],

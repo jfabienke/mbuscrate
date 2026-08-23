@@ -6,5 +6,6 @@
 
 pub mod data_encoding;
 pub mod record_value;
+pub mod text;
 pub mod vif;
 pub mod vif_maps;

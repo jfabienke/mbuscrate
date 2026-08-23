@@ -40,7 +40,12 @@ fn fields(bytes: &[u8], ctx: &DecodeContext) -> (String, String, String, Vec<&'s
         MBusRecordValue::String(s) => s.clone(),
     };
     let quirks = rec.applied_quirks.iter().map(|q| q.quirk_id).collect();
-    (value, rec.unit.clone(), rec.quantity.clone(), quirks)
+    (
+        value,
+        rec.unit.to_string(),
+        rec.quantity.to_string(),
+        quirks,
+    )
 }
 
 fn ctx_for(registry: &VendorRegistry, manufacturer: &str, integrity: Integrity) -> DecodeContext {

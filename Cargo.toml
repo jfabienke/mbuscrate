@@ -25,6 +25,8 @@ license = "MIT"
 # for the rule that keeps the split honest.
 mbus-core = { path = "mbus-core", default-features = false, features = ["std", "crypto"] }
 hex = "0.4"
+# Fixed-capacity strings shared with mbus-core, for record fields the standard bounds.
+heapless = "0.8"
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 log = "0.4"

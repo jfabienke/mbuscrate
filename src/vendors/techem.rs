@@ -433,7 +433,7 @@ pub fn extract_oms_history(records: &[MBusRecord]) -> Vec<AlmanacEntry> {
             slot.date = Some(iso(y, m, d));
         } else {
             slot.value = Some(raw);
-            slot.quantity = rec.quantity.clone();
+            slot.quantity = rec.quantity.to_string();
         }
     }
 

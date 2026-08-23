@@ -953,6 +953,7 @@ dependencies = [
  "defmt 1.1.1",
  "defmt-rtt",
  "env_logger",
+ "heapless",
  "hex",
  "hmac",
  "lazy_static",

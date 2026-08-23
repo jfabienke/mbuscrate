@@ -20,8 +20,11 @@ fn parse_variable_data_length(input: u8) -> Result<usize, MBusError> {
     mbus_core::payload::record_value::variable_data_length(input)
         .map_err(|_| MBusError::UnknownDif(input))
 }
-use crate::payload::data_encoding::mbus_data_str_decode;
 use crate::vendors;
+use mbus_core::payload::text::{QuantityText, UnitText};
+
+/// Plain-text VIF storage, bounded by `MBUS_VALUE_INFO_BLOCK_CUSTOM_VIF_SIZE`.
+pub type CustomVif = heapless::String<16>;
 use nom::{bytes::complete::take, number::complete::be_u8, IResult};
 use std::time::SystemTime;
 
@@ -34,9 +37,13 @@ pub struct MBusRecord {
     pub device: i32,
     pub is_numeric: bool,
     pub value: MBusRecordValue,
-    pub unit: String,
-    pub function_medium: String,
-    pub quantity: String,
+    /// Unit of the reading, e.g. `m^3`. Usually a pointer into the const VIF tables.
+    pub unit: UnitText,
+    /// What is being measured, e.g. `Volume`. Always static — the medium and function
+    /// names come from fixed tables — so this needs no storage at all.
+    pub function_medium: &'static str,
+    /// Quantity name, e.g. `Volume`, possibly annotated by a vendor extension.
+    pub quantity: QuantityText,
     pub drh: MBusDataRecordHeader,
     pub data_len: usize,
     pub data: [u8; 256],
@@ -67,7 +74,10 @@ pub struct MBusValueInformationBlock {
     pub vif: u8,
     pub nvife: usize,
     pub vife: [u8; 10],
-    pub custom_vif: String,
+    /// Plain-text VIF (`0x7C`) content. Capped at
+    /// `MBUS_VALUE_INFO_BLOCK_CUSTOM_VIF_SIZE` (16) by the standard and by the parser,
+    /// so it needs no allocator.
+    pub custom_vif: CustomVif,
 }
 
 /// Represents the value of an M-Bus data record.
@@ -274,9 +284,9 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
         device: -1,
         is_numeric: true,
         value: MBusRecordValue::Numeric(value1 + value2),
-        unit: format!("{unit1}, {unit2}"),
-        function_medium: "Fixed".to_string(),
-        quantity: format!("{quantity1}, {quantity2}"),
+        unit: UnitText::from_str_truncating(&format!("{unit1}, {unit2}")),
+        function_medium: "Fixed",
+        quantity: QuantityText::from_str_truncating(&format!("{quantity1}, {quantity2}")),
         drh: MBusDataRecordHeader {
             dib: MBusDataInformationBlock {
                 dif: 0,
@@ -287,7 +297,7 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
                 vif: medium,
                 nvife: 0,
                 vife: [0; 10],
-                custom_vif: String::new(),
+                custom_vif: CustomVif::new(),
             },
         },
         data_len: input.len(),
@@ -401,10 +411,12 @@ fn decode_record_value(record: &mut MBusRecord) {
     // The core returns `&'static str`; this module's record fields are still owned
     // strings, so it converts here. When `MBusRecord` moves to fixed-capacity fields the
     // conversion disappears rather than moving.
+    // `normalize_vib` returns `&'static str` straight off the const tables, so these go
+    // into the record with no allocation and no copy.
     let (unit, exponent, quantity) = match crate::payload::vif::normalize_vib(&vib) {
-        Ok((u, e, q)) => (u.to_string(), e, q.to_string()),
+        Ok((u, e, q)) => (UnitText::Static(u), e, QuantityText::Static(q)),
         // Unknown VIF: leave the raw bytes for the caller rather than inventing a unit.
-        Err(_) => (String::new(), 1.0, String::new()),
+        Err(_) => (UnitText::new(), 1.0, QuantityText::new()),
     };
 
     let data = &record.data[..record.data_len];
@@ -451,9 +463,9 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
         device: -1,
         is_numeric: true,
         value: MBusRecordValue::Numeric(0.0),
-        unit: String::new(),
-        function_medium: String::new(),
-        quantity: String::new(),
+        unit: UnitText::new(),
+        function_medium: "",
+        quantity: QuantityText::new(),
         drh: MBusDataRecordHeader {
             dib: MBusDataInformationBlock {
                 dif: 0,
@@ -464,7 +476,7 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
                 vif: 0,
                 nvife: 0,
                 vife: [0; 10],
-                custom_vif: String::new(),
+                custom_vif: CustomVif::new(),
             },
         },
         data_len: 0,
@@ -548,7 +560,13 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
             )));
         }
         let (i, custom_vif) = take(var_vif_len)(i)?;
-        mbus_data_str_decode(&mut record.drh.vib.custom_vif, custom_vif, custom_vif.len());
+        // Reversed, as the wire carries it, straight into the fixed buffer. The parser
+        // already rejects a length above MBUS_VALUE_INFO_BLOCK_CUSTOM_VIF_SIZE above, so
+        // the pushes cannot overflow; discarded rather than unwrapped all the same.
+        record.drh.vib.custom_vif.clear();
+        for byte in custom_vif.iter().rev() {
+            let _ = record.drh.vib.custom_vif.push(*byte as char);
+        }
         i
     } else {
         i
@@ -669,7 +687,7 @@ fn normalize_fixed_unit(medium_unit: u8, value: f64) -> Result<(String, f64, Str
 pub fn mbus_data_record_append(record: &mut MBusRecord) {
     // For manufacturer-specific or more records follow, set appropriate fields
     if record.drh.dib.dif == MBUS_DIB_DIF_MANUFACTURER_SPECIFIC {
-        record.quantity = "Manufacturer specific".to_string();
+        record.quantity = QuantityText::Static("Manufacturer specific");
     }
     if record.drh.dib.dif == MBUS_DIB_DIF_MORE_RECORDS_FOLLOW {
         record.more_records_follow = 1;
@@ -698,8 +716,9 @@ fn apply_vendor_value(
     qty: String,
     var: vendors::VendorVariable,
 ) {
-    record.unit = unit;
-    record.quantity = qty;
+    // Vendor-supplied text is dynamic, so it takes the owned variant.
+    record.unit = UnitText::from_str_truncating(&unit);
+    record.quantity = QuantityText::from_str_truncating(&qty);
     record.value = match var {
         vendors::VendorVariable::Numeric(n) => {
             MBusRecordValue::Numeric(n * 10_f64.powi(exp as i32))
@@ -732,8 +751,8 @@ fn apply_vendor_hooks(
             &record.data[..record.data_len],
         )? {
             if let Some(first) = vendor_records.into_iter().next() {
-                record.unit = first.unit;
-                record.quantity = first.quantity;
+                record.unit = UnitText::from_str_truncating(&first.unit);
+                record.quantity = QuantityText::from_str_truncating(&first.quantity);
                 record.value = match first.value {
                     vendors::VendorVariable::Numeric(n) => MBusRecordValue::Numeric(n),
                     vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
@@ -771,7 +790,11 @@ fn apply_vendor_hooks(
                     .collect::<Vec<_>>()
                     .join(",");
                 if !status_str.is_empty() {
-                    record.quantity = format!("{} [{}]", record.quantity, status_str);
+                    // Vendor annotation: the only place a quantity is built rather than named.
+                    record.quantity = QuantityText::from_str_truncating(&format!(
+                        "{} [{}]",
+                        record.quantity, status_str
+                    ));
                 }
             }
         }
@@ -1073,9 +1096,9 @@ mod tests {
             device: -1,
             is_numeric: true,
             value: MBusRecordValue::Numeric(0.0),
-            unit: String::new(),
-            function_medium: String::new(),
-            quantity: String::new(),
+            unit: UnitText::new(),
+            function_medium: "",
+            quantity: QuantityText::new(),
             drh: MBusDataRecordHeader {
                 dib: MBusDataInformationBlock {
                     dif: MBUS_DIB_DIF_MANUFACTURER_SPECIFIC,
@@ -1086,7 +1109,7 @@ mod tests {
                     vif: 0,
                     nvife: 0,
                     vife: [0; 10],
-                    custom_vif: String::new(),
+                    custom_vif: CustomVif::new(),
                 },
             },
             data_len: 0,
