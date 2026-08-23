@@ -32,7 +32,7 @@ Fully offloads RF I/O and protocol primitives (~2KB flash total):
 SIO/CRC engine offloads verification (poly 0x1021, init 0xFFFF, XOR 0xFFFF) during DMA (<1µs/frame vs. 10µs software), filtering ~20% noisy packets hardware-side.
 
 ### AES-128 Accelerator
-Hardware GCM/CBC/CTR modes (for wM-Bus Modes 5/7/9) with 11-byte AAD/12-byte IV; ~1 cycle/byte (<5µs/packet) in TrustZone. Loaded post-CRC; outputs decrypted frames to Core 1 channel.
+Hardware CTR/CBC/GCM (ELL CTR, OMS Mode 5 CBC, Mode 9 GCM; Mode 7 is not implemented) with 11-byte AAD/12-byte IV; ~1 cycle/byte (<5µs/packet) in TrustZone. Loaded post-CRC; outputs decrypted frames to Core 1 channel.
 
 ## Data Flow During Burst
 

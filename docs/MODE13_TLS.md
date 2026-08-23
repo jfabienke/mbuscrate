@@ -52,8 +52,10 @@ Mode 13 implements TLS 1.2/1.3 encryption for M-Bus communication over IP networ
 ## Available Security Options in mbus-rs
 
 For secure M-Bus communication using this crate:
-- **RF Transport**: ✅ Mode 9 (AES-128-GCM) - Fully implemented with OMS 7.3.6 compliance
-- **Serial Transport**: ✅ Mode 5 (AES-CTR) and Mode 7 (AES-CBC) - Both available
+- **ELL link encryption**: ✅ AES-128-CTR
+- **OMS Mode 5**: ✅ AES-128-CBC (Security Profile A)
+- **OMS Mode 9**: ✅ AES-128-GCM (OMS 7.3.6, 12-byte tag)
+- **OMS Mode 7**: ❌ Not implemented
 - **IP Transport**: ❌ Not supported - Use standard Rust TLS libraries if needed
 
 ## Why IP Support Is Out of Scope

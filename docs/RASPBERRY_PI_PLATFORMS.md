@@ -178,4 +178,4 @@ See the comprehensive [Raspberry Pi Setup Guide](docs/RASPBERRY_PI_SETUP.md) for
 - Performance optimization tips
 - Advanced configuration options
 
-The mbus-rs project now provides a complete, production-ready solution for wireless M-Bus communication on Raspberry Pi platforms! 🎉
+mbus-rs supports wireless M-Bus communication on Raspberry Pi platforms, with C-mode receive verified end-to-end on a Pi 5 gateway.

@@ -114,7 +114,7 @@ The library uses a layered design for separation of concerns, ensuring modularit
 ┌───────────────────┐    ┌───────────────────┐    ┌───────────────────┐
 │     Crypto        │    │     Manager       │    │     Hardware      │
 │ (crypto.rs)       │    │ (device_manager)  │    │ (hal/mod.rs)      │
-│ - Modes 5/7/9     │    │ - Device state    │    │ - SX126x/RFM69    │
+│ - Mode 5/9, ELL   │    │ - Device state    │    │ - SX126x/RFM69    │
 │ - IV/Key derive   │    │ - Cache/LRU       │    │ - PA/AFC adjust   │
 │ - GCM tag         │    │ - Duty/Access     │    │ - rppal Pi GPIO   │
 └───────────────────┘    └───────────────────┘    └───────────────────┘
@@ -354,7 +354,7 @@ src/
 └── wmbus/                   # Wireless M-Bus implementation
     ├── mod.rs               # Module exports
     ├── compact_cache.rs     # LRU cache for compact frames
-    ├── crypto.rs            # AES-128 Modes 5/7/9 implementation
+    ├── crypto.rs            # AES-128: ELL CTR, OMS Mode 5 CBC, Mode 9 GCM
     ├── encoding.rs          # 3-of-6, Manchester, NRZ encoding
     ├── encryption.rs        # Legacy encryption wrapper
     ├── frame.rs             # Wireless frame types

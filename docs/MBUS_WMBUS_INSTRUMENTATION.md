@@ -94,7 +94,7 @@ The protocol provides:
 ❌ **Not Supported:**
 - Device status bytes (alarm flags, battery status)
 - Manufacturer-specific VIF extensions
-- Encryption (Mode 5, Mode 7)
+- OMS Mode 7 encryption (ELL CTR, Mode 5 CBC and Mode 9 GCM are supported)
 - Application reset/user data clear
 - Time synchronization
 

@@ -1,6 +1,6 @@
 # wM-Bus Enhancements Implementation
 
-This document describes the production-grade enhancements added to improve wM-Bus frame handling robustness and achieve 90%+ CRC pass rates in noisy 868MHz environments.
+This document describes enhancements added to improve wM-Bus frame handling robustness in noisy 868 MHz environments (per-block CRC tolerance, vendor quirks, device statistics). The CRC-pass-rate figures below are design targets, not measured results.
 
 ## Implemented Enhancements
 
@@ -148,10 +148,10 @@ enhancements = ["multi-block", "vendor-tolerance", "device-stats"]
 
 ## Benefits Summary
 
-1. **90%+ CRC Pass Rate**: Matches field-proven performance
+1. **CRC tolerance**: recovers frames on noisy channels (target 90%+ pass rate; not yet measured against a field baseline)
 2. **Vendor Compatibility**: Handles manufacturer quirks gracefully
-3. **Production Ready**: Comprehensive error tracking and monitoring
-4. **Standards Compliant**: Full EN 13757 and OMS conformance
+3. **Observability**: error tracking and per-device statistics
+4. **Standards aligned**: EN 13757 and OMS multi-block CRC
 5. **Modular Design**: Clean separation of concerns via trait system
 
-These enhancements make the mbuscrate a robust, production-ready solution for wM-Bus communication in real-world deployments.
+These enhancements improve wM-Bus frame handling robustness in real-world deployments.
