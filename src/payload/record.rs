@@ -684,32 +684,20 @@ fn accumulate_dib_fields(record: &mut MBusRecord) {
     record.storage_number = storage;
 }
 
-/// Normalizes a fixed-length M-Bus data record.
-#[allow(dead_code)]
-fn normalize_fixed(
-    medium_unit1: u8,
-    medium_unit2: u8,
-    counter1: i32,
-    counter2: i32,
-) -> Result<(String, f64, String), MBusError> {
-    let (unit1, value1, quantity1) = normalize_fixed_unit(medium_unit1, counter1 as f64)?;
-    let (unit2, value2, quantity2) = normalize_fixed_unit(medium_unit2, counter2 as f64)?;
-
-    Ok((
-        format!("{unit1}, {unit2}"),
-        value1 + value2,
-        format!("{quantity1}, {quantity2}"),
-    ))
-}
-
 /// Normalizes a single fixed-length M-Bus data record unit.
-#[allow(dead_code)]
-fn normalize_fixed_unit(medium_unit: u8, value: f64) -> Result<(String, f64, String), MBusError> {
+///
+/// Returns `&'static str` straight off `FIXED_MEDIUM_UNITS`, which is a `const` table —
+/// the previous signature called `.to_string()` on both, the same needless allocation
+/// `normalize_vib` had.
+fn normalize_fixed_unit(
+    medium_unit: u8,
+    value: f64,
+) -> Result<(&'static str, f64, &'static str), MBusError> {
     if let Some((_, unit, exponent, quantity)) = FIXED_MEDIUM_UNITS
         .iter()
         .find(|(code, _, _, _)| *code == medium_unit)
     {
-        Ok((unit.to_string(), value * exponent, quantity.to_string()))
+        Ok((unit, value * exponent, quantity))
     } else {
         Err(MBusError::UnknownVif(medium_unit))
     }
