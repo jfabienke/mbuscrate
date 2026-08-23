@@ -16,16 +16,18 @@ pub type Vib = heapless::Vec<VifInfo, 11>;
 ///
 /// Out-of-range exponents return `1.0`: a VIF code cannot produce one, since the nibble
 /// that drives it is four bits wide.
-pub const fn pow10(exp: i32) -> f64 {
+pub fn pow10(exp: i32) -> f64 {
     const POW10: [f64; 20] = [
         1e-12, 1e-11, 1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2,
         1e3, 1e4, 1e5, 1e6, 1e7,
     ];
     let idx = exp + 12;
-    if idx < 0 || idx >= POW10.len() as i32 {
+    // `.get` rather than a manual range check plus `POW10[idx]`: keeps the lookup
+    // provably panic-free for the core's ratchet.
+    if idx < 0 {
         1.0
     } else {
-        POW10[idx as usize]
+        POW10.get(idx as usize).copied().unwrap_or(1.0)
     }
 }
 
@@ -81,7 +83,7 @@ pub fn parse_vib(input: &[u8]) -> IResult<&[u8], Vib> {
 
     // Parse VIFEs if present (check for FD or FB extension codes)
     while !remaining.is_empty() {
-        if remaining[0] == 0xFD || remaining[0] == 0xFB {
+        if matches!(remaining.first(), Some(0xFD) | Some(0xFB)) {
             match parse_vife(remaining) {
                 Ok((new_remaining, vife)) => {
                     if vifes.push(vife).is_err() {

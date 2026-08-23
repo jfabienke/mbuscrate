@@ -14,7 +14,7 @@ use crate::error::ProtocolError;
 use crate::payload::quirk::AppliedQuirks;
 use crate::payload::record_value::{bcd_le_i64, dif_datalength_lookup, int_le};
 use crate::payload::text::{QuantityText, UnitText};
-use nom::{bytes::complete::take, number::complete::be_u8, IResult};
+use nom::{number::complete::be_u8, IResult};
 
 /// `"{a}, {b}"` into a fixed buffer, clipping at capacity — without `core::fmt`, whose
 /// machinery carries panic paths the linker cannot eliminate.
@@ -301,36 +301,40 @@ const FIXED_MEDIUM_UNITS: &[(u8, &str, f64, &str)] = &[
 
 /// Parses a fixed-length M-Bus data record.
 pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, ProtocolError> {
-    if input.len() < crate::constants::MBUS_DATA_FIXED_LENGTH {
-        return Err(ProtocolError::InvalidField("Fixed data too short"));
-    }
+    // A fixed record is exactly MBUS_DATA_FIXED_LENGTH (16) bytes. Binding them as an array
+    // turns every access below into a constant index the compiler proves in bounds — the
+    // parser cannot panic on a short or hostile frame, it returns "too short".
+    let f: &[u8; crate::constants::MBUS_DATA_FIXED_LENGTH] = input
+        .get(..crate::constants::MBUS_DATA_FIXED_LENGTH)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(ProtocolError::InvalidField("Fixed data too short"))?;
 
-    let device_id_bcd = match crate::payload::data_encoding::decode_bcd(&input[0..4]) {
+    let device_id_bcd = match crate::payload::data_encoding::decode_bcd(&f[0..4]) {
         Ok((_, val)) => val,
         Err(_) => return Err(ProtocolError::InvalidField("Invalid BCD device ID")),
     };
-    let manufacturer_val = u16::from_be_bytes([input[4], input[5]]);
+    let manufacturer_val = u16::from_be_bytes([f[4], f[5]]);
     if !(0x0421..=0x6B5A).contains(&manufacturer_val) {
         return Err(ProtocolError::InvalidField("Invalid manufacturer"));
     }
     let _manufacturer = manufacturer_val as i32;
-    let _version = input[6];
-    let medium = input[7];
-    let _access_number = input[8];
-    let status = input[9];
-    let _signature = match crate::payload::data_encoding::decode_int(&input[10..12], 2) {
+    let _version = f[6];
+    let medium = f[7];
+    let _access_number = f[8];
+    let status = f[9];
+    let _signature = match crate::payload::data_encoding::decode_int(&f[10..12], 2) {
         Ok((_, val)) => val,
         Err(_) => return Err(ProtocolError::InvalidField("Invalid signature")),
     };
     let counter1 = if (status & crate::constants::MBUS_DATA_FIXED_STATUS_FORMAT_MASK)
         == crate::constants::MBUS_DATA_FIXED_STATUS_FORMAT_BCD
     {
-        match crate::payload::data_encoding::decode_bcd(&input[12..16]) {
+        match crate::payload::data_encoding::decode_bcd(&f[12..16]) {
             Ok((_, val)) => val as i32,
             Err(_) => return Err(ProtocolError::InvalidField("Invalid BCD counter")),
         }
     } else {
-        match crate::payload::data_encoding::decode_int(&input[12..16], 4) {
+        match crate::payload::data_encoding::decode_int(&f[12..16], 4) {
             Ok((_, val)) => val,
             Err(_) => return Err(ProtocolError::InvalidField("Invalid int counter")),
         }
@@ -365,10 +369,16 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, ProtocolError> {
                 custom_vif: CustomVif::new(),
             },
         },
-        data_len: input.len(),
+        data_len: input.len().min(256),
         data: {
             let mut data = [0; 256];
-            data[..input.len()].copy_from_slice(input);
+            // `.get`/`min` rather than `data[..input.len()]`: an input longer than the
+            // buffer clips instead of panicking. A fixed record is 16 bytes, so this never
+            // fires in practice, but the parser must not panic on any input.
+            let n = input.len().min(data.len());
+            if let (Some(dst), Some(src)) = (data.get_mut(..n), input.get(..n)) {
+                dst.copy_from_slice(src);
+            }
             data
         },
         more_records_follow: false,
@@ -404,7 +414,7 @@ pub fn parse_variable_record_consumed(input: &[u8]) -> Result<(MBusRecord, usize
                 return Err(ProtocolError::PrematureEnd);
             };
             record.data_len = parse_variable_data_length(lvar)?;
-            remaining = &remaining[1..];
+            remaining = remaining.get(1..).unwrap_or(&[]);
             consumed += 1; // the variable-length byte
         }
 
@@ -423,8 +433,13 @@ pub fn parse_variable_record_consumed(input: &[u8]) -> Result<(MBusRecord, usize
             ));
         }
 
-        for j in 0..record.data_len {
-            record.data[j] = *remaining.get(j).unwrap_or(&0);
+        // Both the destination and source ranges were length-checked above; `.get_mut`/
+        // `.get` make that provable to the compiler so the copy cannot panic.
+        if let (Some(dst), Some(src)) = (
+            record.data.get_mut(..record.data_len),
+            remaining.get(..record.data_len),
+        ) {
+            dst.copy_from_slice(src);
         }
         consumed += record.data_len; // the data bytes
     }
@@ -485,7 +500,8 @@ fn decode_record_value(record: &mut MBusRecord) {
         Err(_) => (UnitText::new(), 1.0, QuantityText::new()),
     };
 
-    let data = &record.data[..record.data_len];
+    // `data_len` is bounded to the buffer at fill time; `.get` proves it here.
+    let data = record.data.get(..record.data_len).unwrap_or(&[]);
     let coding = record.drh.dib.dif & MBUS_DATA_RECORD_DIF_MASK_DATA;
 
     // Integer and BCD codings keep an EXACT i64 mantissa — folding a 64-bit counter to
@@ -502,9 +518,10 @@ fn decode_record_value(record: &mut MBusRecord) {
     let raw: Raw = match coding {
         0x00 => Raw::Int(0),                                 // no data
         0x01..=0x04 | 0x06 | 0x07 => Raw::Int(int_le(data)), // 8/16/24/32/48/64-bit int
-        0x05 => (data.len() >= 4)
-            .then(|| f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
-            .map_or(Raw::None, Raw::Real),
+        0x05 => data
+            .get(..4)
+            .and_then(|s| <[u8; 4]>::try_from(s).ok())
+            .map_or(Raw::None, |b| Raw::Real(f32::from_le_bytes(b) as f64)),
         0x09..=0x0C | 0x0E => bcd_le_i64(data).map_or(Raw::None, Raw::Int), // 2/4/6/8/12-digit BCD
         0x0D => {
             // Variable length (LVAR): text, kept verbatim.
@@ -597,8 +614,12 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
 
         // For manufacturer-specific or more-records-follow,
         // all remaining data belongs to this record
-        record.data_len = i.len();
-        record.data[..i.len()].copy_from_slice(i);
+        // Clip to the buffer rather than panic on an over-long manufacturer block.
+        let n = i.len().min(record.data.len());
+        record.data_len = n;
+        if let (Some(dst), Some(src)) = (record.data.get_mut(..n), i.get(..n)) {
+            dst.copy_from_slice(src);
+        }
 
         mbus_data_record_append(&mut record);
         return Ok((&[], record));
@@ -616,22 +637,26 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
             // the 11th DIFE — was read as the VIF, and every field after it shifted by
             // one: the parser returned Ok with a confidently wrong record. This is the
             // error handling the (unused) parser in data.rs had and this one lacked.
-            if i_temp.is_empty() {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    i_temp,
-                    nom::error::ErrorKind::Eof,
-                )));
-            }
             if dife_count >= 10 {
                 return Err(nom::Err::Error(nom::error::Error::new(
                     i_temp,
                     nom::error::ErrorKind::TooLarge,
                 )));
             }
-            let dife = i_temp[0];
-            record.drh.dib.dife[dife_count] = dife;
+            // `split_first` reads the byte and advances the cursor without indexing;
+            // `get_mut` stores it without indexing. The two guards above make both
+            // provably in bounds, so neither can panic.
+            let Some((&dife, rest)) = i_temp.split_first() else {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    i_temp,
+                    nom::error::ErrorKind::Eof,
+                )));
+            };
+            if let Some(slot) = record.drh.dib.dife.get_mut(dife_count) {
+                *slot = dife;
+            }
             dife_count += 1;
-            i_temp = &i_temp[1..];
+            i_temp = rest;
             // Continue if this DIFE also has extension bit
             if (dife & MBUS_DIB_DIF_EXTENSION_BIT) == 0 {
                 break;
@@ -655,7 +680,13 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
                 nom::error::ErrorKind::Tag,
             )));
         }
-        let (i, custom_vif) = take(var_vif_len)(i)?;
+        // `split_at_checked` rather than nom's `take`: nom's runtime-length `take` keeps a
+        // `split_at` panic branch the linker cannot eliminate (it probes as CAN-PANIC),
+        // which a const-sized `take` does not. This is the exact spot the panic ratchet
+        // caught when the record parser was first exercised end to end.
+        let (custom_vif, i) = i.split_at_checked(var_vif_len as usize).ok_or_else(|| {
+            nom::Err::Error(nom::error::Error::new(i, nom::error::ErrorKind::Eof))
+        })?;
         // Reversed, as the wire carries it, straight into the fixed buffer. The parser
         // already rejects a length above MBUS_VALUE_INFO_BLOCK_CUSTOM_VIF_SIZE above, so
         // the pushes cannot overflow; discarded rather than unwrapped all the same.
@@ -675,22 +706,23 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
         loop {
             // Same reasoning as the DIFE chain above: stopping silently made the next
             // byte — the 11th VIFE — the first data byte, shifting the value.
-            if i_temp.is_empty() {
-                return Err(nom::Err::Error(nom::error::Error::new(
-                    i_temp,
-                    nom::error::ErrorKind::Eof,
-                )));
-            }
             if vife_count >= 10 {
                 return Err(nom::Err::Error(nom::error::Error::new(
                     i_temp,
                     nom::error::ErrorKind::TooLarge,
                 )));
             }
-            let vife = i_temp[0];
-            record.drh.vib.vife[vife_count] = vife;
+            let Some((&vife, rest)) = i_temp.split_first() else {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    i_temp,
+                    nom::error::ErrorKind::Eof,
+                )));
+            };
+            if let Some(slot) = record.drh.vib.vife.get_mut(vife_count) {
+                *slot = vife;
+            }
             vife_count += 1;
-            i_temp = &i_temp[1..];
+            i_temp = rest;
             // Continue if this VIFE also has extension bit
             if (vife & MBUS_DIB_VIF_EXTENSION_BIT) == 0 {
                 break;
@@ -731,7 +763,17 @@ fn accumulate_dib_fields(record: &mut MBusRecord) {
     if ndife > 0 {
         let mut tariff: u32 = 0;
         let mut device: u32 = 0;
-        for (idx, &dife) in record.drh.dib.dife[..ndife].iter().enumerate() {
+        // `.get(..ndife)` proves the slice bound; ndife is a runtime field the
+        // compiler cannot otherwise show is <= 10.
+        for (idx, &dife) in record
+            .drh
+            .dib
+            .dife
+            .get(..ndife)
+            .unwrap_or(&[])
+            .iter()
+            .enumerate()
+        {
             // Storage bits are 4 per DIFE, starting at bit 1 (LSB is the DIF bit above).
             // Guard the shift: a pathological chain (>7 DIFEs) would exceed u32 — those
             // high bits simply don't fit and are dropped, matching libmbus behaviour.

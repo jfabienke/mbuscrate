@@ -51,6 +51,30 @@ pub extern "C" fn exercise(raw: *const u8, len: usize) -> u32 {
     if let Some(v) = mbus_core::lorawan::parse_link_adr_ans(bytes) {
         acc = acc.wrapping_add(v as u32);
     }
+
+    // The full wM-Bus + M-Bus decode pipeline: radio/serial bytes to a parsed reading.
+    // This is what the whole port exists for, and these parsers handle the most complex
+    // untrusted input in the crate — the record parser is where this session found an
+    // out-of-bounds write reachable from a hostile frame. Exercising them here makes
+    // "no meter frame can panic the decoder" a LINKED property: if any reachable path in
+    // any stage can panic, this binary fails to link and the ratchet goes red.
+    acc = acc.wrapping_add(mbus_core::wmbus::framing::packet_size(bytes) as u32);
+    if let Ok(frame) = mbus_core::wmbus::frame::parse_wmbus_frame(bytes) {
+        acc = acc.wrapping_add(frame.device_address);
+    }
+    if let Ok(link) = mbus_core::wmbus::mode_c::decode_mode_c(bytes) {
+        acc = acc.wrapping_add(link.device_address);
+    }
+    if let Ok(blocks) = mbus_core::wmbus::block::verify_blocks(bytes) {
+        acc = acc.wrapping_add(blocks.len() as u32);
+    }
+    if let Ok((rec, used)) = mbus_core::payload::record::parse_variable_record_consumed(bytes) {
+        acc = acc.wrapping_add(used as u32);
+        acc = acc.wrapping_add(rec.value.as_f64() as u32);
+    }
+    if let Ok(rec) = mbus_core::payload::record::parse_fixed_record(bytes) {
+        acc = acc.wrapping_add(rec.storage_number);
+    }
     acc
 }
 

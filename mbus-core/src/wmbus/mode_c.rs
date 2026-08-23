@@ -138,33 +138,37 @@ fn bcd4(bytes: &[u8]) -> u32 {
 /// assert!(f.crc_ok);
 /// ```
 pub fn decode_mode_c(raw: &[u8]) -> Result<WMBusLinkFrame, DecodeError> {
-    if raw.len() < 2 {
-        return Err(DecodeError::BufferTooShort {
-            needed: 2,
-            actual: raw.len(),
-        });
-    }
-    let type_a = match raw[0] {
+    let &sync = raw.first().ok_or(DecodeError::BufferTooShort {
+        needed: 1,
+        actual: 0,
+    })?;
+    let type_a = match sync {
         TYPE_A_SYNC => true,
         TYPE_B_SYNC => false,
         _ => return Err(DecodeError::InvalidHeader),
     };
-    if raw.len() < 1 + HEADER_LEN + CRC_LEN {
-        return Err(DecodeError::BufferTooShort {
+
+    // The sync byte plus the 10-byte link header plus block 0's CRC — 13 bytes present in
+    // every frame. Binding them as a fixed-size array turns every header access below into
+    // a constant index the compiler proves in bounds, so none of them can panic. `head[1]`
+    // is the L field; `head[11..13]` is block 0's CRC.
+    let head: &[u8; 1 + HEADER_LEN + CRC_LEN] = raw
+        .get(..1 + HEADER_LEN + CRC_LEN)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(DecodeError::BufferTooShort {
             needed: 1 + HEADER_LEN + CRC_LEN,
             actual: raw.len(),
-        });
-    }
+        })?;
 
-    // Link header occupies raw[1..11] for both types: L, C, M, M, A, A, A, A, V, T.
-    let l = raw[1] as usize;
-    let control_field = raw[2];
-    let manufacturer_id = u16::from_le_bytes([raw[3], raw[4]]);
+    // Link header occupies head[1..11] for both types: L, C, M, M, A, A, A, A, V, T.
+    let l = head[1] as usize;
+    let control_field = head[2];
+    let manufacturer_id = u16::from_le_bytes([head[3], head[4]]);
     let mut link_header = [0u8; 8];
-    link_header.copy_from_slice(&raw[3..11]);
-    let device_address = bcd4(&raw[5..9]);
-    let version = raw[9];
-    let device_type = raw[10];
+    link_header.copy_from_slice(&head[3..11]);
+    let device_address = bcd4(&head[5..9]);
+    let version = head[9];
+    let device_type = head[10];
 
     // Bounded by WMBUS_MAX_PAYLOAD, which the L field bounds in turn. Extends are
     // discarded rather than unwrapped so de-blocking cannot panic; a frame whose blocks
@@ -174,27 +178,27 @@ pub fn decode_mode_c(raw: &[u8]) -> Result<WMBusLinkFrame, DecodeError> {
     let mut crc_ok;
 
     if type_a {
-        // Block 0: 10 header bytes + CRC.
-        crc_ok = verify_block(
-            &raw[1..1 + HEADER_LEN],
-            &raw[1 + HEADER_LEN..1 + HEADER_LEN + CRC_LEN],
-        );
+        // Block 0: 10 header bytes + CRC, both inside the bound `head` window.
+        crc_ok = verify_block(&head[1..1 + HEADER_LEN], &head[1 + HEADER_LEN..]);
         // Data blocks: `l - 9` application bytes in 16-byte blocks, each + CRC.
         let mut remaining = l as isize - (HEADER_LEN as isize - 1);
         let mut pos = 1 + HEADER_LEN + CRC_LEN;
         while remaining > 0 {
             let blklen = (remaining as usize).min(TYPE_A_BLOCK_LEN);
-            if pos + blklen + CRC_LEN > raw.len() {
+            // `.get` instead of a length check plus bare slicing: a block that runs off
+            // the end ends the loop rather than panicking. Both slices come from one
+            // guarded window so neither can be out of bounds.
+            let (Some(block), Some(crc)) = (
+                raw.get(pos..pos + blklen),
+                raw.get(pos + blklen..pos + blklen + CRC_LEN),
+            ) else {
                 crc_ok = false;
                 break;
-            }
-            if !verify_block(
-                &raw[pos..pos + blklen],
-                &raw[pos + blklen..pos + blklen + CRC_LEN],
-            ) {
+            };
+            if !verify_block(block, crc) {
                 crc_ok = false;
             }
-            let _ = payload.extend_from_slice(&raw[pos..pos + blklen]);
+            let _ = payload.extend_from_slice(block);
             pos += blklen + CRC_LEN;
             remaining -= blklen as isize;
         }
@@ -205,9 +209,12 @@ pub fn decode_mode_c(raw: &[u8]) -> Result<WMBusLinkFrame, DecodeError> {
         // L-field breaks under fixed-length radio reads: the trailing noise gets
         // CRC-checked as a phantom second block and poisons every type B frame.
         if l < 1 {
-            return Err(DecodeError::InvalidLength { length: raw[1] });
+            return Err(DecodeError::InvalidLength { length: head[1] });
         }
         let frame_end = 2 + l;
+        // Preserve the original refusal: a frame whose L field claims bytes past the
+        // buffer is BufferTooShort, not a partial accept. (Plain comparison, no panic;
+        // restated here so hardening the slices below did not quietly change behaviour.)
         if frame_end > raw.len() {
             return Err(DecodeError::BufferTooShort {
                 needed: frame_end,
@@ -218,20 +225,33 @@ pub fn decode_mode_c(raw: &[u8]) -> Result<WMBusLinkFrame, DecodeError> {
         // EN 13757-4 frame format B); short telegrams — everything this fleet
         // sends, and all the reference decoder ever handled — are one block.
         let b0 = (l - 1).min(128);
-        crc_ok = verify_block(&raw[1..1 + b0], &raw[1 + b0..1 + b0 + CRC_LEN]);
+        // Every slice below is via `.get`, so a frame shorter than its own L field is a
+        // refusal, never a panic. block0 = raw[1..1+b0], its CRC = raw[1+b0..+2].
+        let block0 = raw.get(1..1 + b0);
+        let block0_crc = raw.get(1 + b0..1 + b0 + CRC_LEN);
+        let (Some(block0), Some(block0_crc)) = (block0, block0_crc) else {
+            return Err(DecodeError::BufferTooShort {
+                needed: 1 + b0 + CRC_LEN,
+                actual: raw.len(),
+            });
+        };
+        crc_ok = verify_block(block0, block0_crc);
         // Payload (CI onward) is the tail of block 0, after the 10-byte header.
-        if 1 + b0 > 1 + HEADER_LEN {
-            let _ = payload.extend_from_slice(&raw[1 + HEADER_LEN..1 + b0]);
+        if let Some(tail) = raw.get(1 + HEADER_LEN..1 + b0) {
+            let _ = payload.extend_from_slice(tail);
         }
         // Second block (own trailing CRC) only when the L-field extends past the
         // first block's capacity.
         let after = 1 + b0 + CRC_LEN;
-        if frame_end > after {
-            let b2 = &raw[after..frame_end - CRC_LEN];
-            if !verify_block(b2, &raw[frame_end - CRC_LEN..frame_end]) {
-                crc_ok = false;
+        if let (Some(body_end), true) = (frame_end.checked_sub(CRC_LEN), frame_end > after) {
+            if let (Some(b2), Some(b2_crc)) =
+                (raw.get(after..body_end), raw.get(body_end..frame_end))
+            {
+                if !verify_block(b2, b2_crc) {
+                    crc_ok = false;
+                }
+                let _ = payload.extend_from_slice(b2);
             }
-            let _ = payload.extend_from_slice(b2);
         }
     }
 

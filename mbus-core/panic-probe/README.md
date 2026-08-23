@@ -10,7 +10,20 @@ Run `./check-panic-free.sh`. It is a **ratchet**: it compares reality against th
 `EXPECT_PANIC_FREE` and fails if they differ in *either* direction, so the state cannot
 regress silently and an improvement cannot land without updating the record.
 
-## Status: panic-free and heap-free (2026-08-21)
+## Status: panic-free and heap-free — now across the FULL decode pipeline
+
+As of 2026-08-23 the probe exercises the entire wM-Bus + M-Bus path: `packet_size`,
+`parse_wmbus_frame`, `decode_mode_c`, `verify_blocks`, `parse_variable_record_consumed`
+and `parse_fixed_record`. So `EXPECT_PANIC_FREE=1` now means the whole decoder — the most
+complex untrusted-input handling in the crate, where an out-of-bounds write was found and
+fixed this session — provably cannot panic on ANY byte sequence. That protects the Linux
+gateway as much as a bare-metal target: a hostile meter frame cannot DoS the parser.
+
+Getting there required replacing nom's runtime-length `take` with `split_at_checked`
+(nom's `take` keeps a `split_at` panic branch the linker cannot eliminate) and binding
+fixed-size header windows so the compiler proves each index in bounds.
+
+### Original status (2026-08-21)
 
 The core links for `thumbv6m-none-eabi` with **no global allocator and no reachable panic
 path**. `EXPECT_PANIC_FREE=1`. The bump allocator this probe used to carry is gone — it
