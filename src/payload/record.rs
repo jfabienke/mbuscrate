@@ -26,12 +26,17 @@ use mbus_core::payload::text::{QuantityText, UnitText};
 /// Plain-text VIF storage, bounded by `MBUS_VALUE_INFO_BLOCK_CUSTOM_VIF_SIZE`.
 pub type CustomVif = heapless::String<16>;
 use nom::{bytes::complete::take, number::complete::be_u8, IResult};
-use std::time::SystemTime;
 
 /// Represents an M-Bus data record.
+///
+/// Carries no timestamp. It used to hold a `SystemTime` stamped by the parser with
+/// `SystemTime::now()` — which is the wrong place: a decoder is a pure function of bytes,
+/// and the instant that matters is when the frame was *received*, not when it happened to
+/// be parsed. The receiving layer knows that instant; the parser does not, and on a
+/// microcontroller there may be no wall clock at all. This is the rule `mbus-core`'s own
+/// documentation states: if a function needs to know the time, it takes it as an argument.
 #[derive(Debug)]
 pub struct MBusRecord {
-    pub timestamp: SystemTime,
     pub storage_number: u32,
     pub tariff: i32,
     pub device: i32,
@@ -278,7 +283,6 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
     let (unit2, value2, quantity2) = normalize_fixed_unit(medium, counter2 as f64)?;
 
     let record = MBusRecord {
-        timestamp: SystemTime::now(),
         storage_number: device_id_bcd,
         tariff: -1,
         device: -1,
@@ -457,7 +461,6 @@ pub fn parse_variable_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
 
 fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
     let mut record = MBusRecord {
-        timestamp: SystemTime::now(),
         storage_number: 0,
         tariff: -1,
         device: -1,
@@ -944,8 +947,6 @@ mod tests {
     use super::*;
     use crate::error::MBusError;
 
-    use std::time::SystemTime;
-
     #[test]
     fn test_mbus_dif_datalength_lookup_all_cases() {
         // Table-driven test for all DIF values
@@ -1090,7 +1091,6 @@ mod tests {
     fn test_mbus_data_record_append() {
         let mut record = MBusRecord {
             // Minimal record
-            timestamp: SystemTime::now(),
             storage_number: 0,
             tariff: -1,
             device: -1,

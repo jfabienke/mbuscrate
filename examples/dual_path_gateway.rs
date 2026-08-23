@@ -48,7 +48,6 @@ fn demo_mbus_dual_path() {
     let records = vec![
         // Good reading - valid volume
         MBusRecord {
-            timestamp: SystemTime::now(),
             storage_number: 0,
             tariff: -1,
             device: -1,
@@ -65,7 +64,6 @@ fn demo_mbus_dual_path() {
         },
         // Bad reading - negative energy (invalid)
         MBusRecord {
-            timestamp: SystemTime::now(),
             storage_number: 0,
             tariff: -1,
             device: -1,
@@ -82,7 +80,6 @@ fn demo_mbus_dual_path() {
         },
         // Good reading - valid temperature
         MBusRecord {
-            timestamp: SystemTime::now(),
             storage_number: 0,
             tariff: -1,
             device: -1,
@@ -99,7 +96,6 @@ fn demo_mbus_dual_path() {
         },
         // Bad reading - out of bounds temperature
         MBusRecord {
-            timestamp: SystemTime::now(),
             storage_number: 0,
             tariff: -1,
             device: -1,

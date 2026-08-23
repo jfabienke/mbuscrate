@@ -63,6 +63,14 @@ pub fn from_mbus_frame_with_split(
         inst.version = Some(format!("{}", addr.version));
     }
 
+    // Stamp all readings from this frame with one instant, taken here.
+    //
+    // `MBusRecord` no longer carries a timestamp: the parser used to call
+    // `SystemTime::now()` per record, which stamped *parse* time rather than receive
+    // time, and gave records from one frame microscopically different instants for no
+    // reason. This layer owns a clock and a frame; it is the right place.
+    let received_at = SystemTime::now();
+
     // Convert records to readings
     let mut good_readings = Vec::new();
     let mut bad_readings = Vec::new();
@@ -85,7 +93,7 @@ pub fn from_mbus_frame_with_split(
             name: record.quantity.to_string(),
             value,
             unit: record.unit.to_string(),
-            timestamp: record.timestamp,
+            timestamp: received_at,
             tariff: if record.tariff >= 0 {
                 Some(record.tariff as u32)
             } else {
@@ -395,7 +403,6 @@ mod tests {
         };
 
         let records = vec![MBusRecord {
-            timestamp: SystemTime::now(),
             storage_number: 0,
             tariff: -1,
             device: -1,

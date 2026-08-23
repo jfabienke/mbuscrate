@@ -8,7 +8,6 @@ use mbus_rs::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 /// Mock vendor extension implementation for Kamstrup devices
 struct KamstrupExtension;
@@ -434,7 +433,6 @@ fn test_integration_with_mbus_frame() {
 
     // Create some records with vendor-specific data
     let records = vec![MBusRecord {
-        timestamp: SystemTime::now(),
         storage_number: 0,
         tariff: -1,
         device: -1,
