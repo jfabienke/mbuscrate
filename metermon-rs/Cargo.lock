@@ -797,9 +797,13 @@ name = "mbus-core"
 version = "1.0.0"
 dependencies = [
  "aes",
+ "cbc",
  "cmac",
+ "ctr",
  "heapless",
+ "nom",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -821,6 +825,7 @@ dependencies = [
  "crc",
  "ctr",
  "env_logger",
+ "heapless",
  "hex",
  "hmac",
  "lazy_static",

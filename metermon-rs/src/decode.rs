@@ -622,8 +622,12 @@ fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Valu
             }
         }
     }
-    obj["unit"] = json!(rec.unit);
-    obj["quantity"] = json!(rec.quantity);
+    // `unit`/`quantity` are `mbus_core::payload::text::Text` now, not `String`. They
+    // deref to `str`, but `json!` needs `Serialize`, so the conversion is explicit —
+    // rather than adding a serde dependency to a core whose whole point is having
+    // almost nothing to depend on.
+    obj["unit"] = json!(rec.unit.as_str());
+    obj["quantity"] = json!(rec.quantity.as_str());
 
     // Zenner error-flags bit-decode. The field is a standard VIF 0xFD 0x17 record,
     // but its bit meanings are vendor- and device-class-specific — so this is gated
