@@ -6,6 +6,7 @@
 
 pub mod data_encoding;
 pub mod quirk;
+pub mod record;
 pub mod record_value;
 pub mod text;
 pub mod vif;

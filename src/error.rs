@@ -99,6 +99,11 @@ impl From<mbus_core::error::ProtocolError> for MBusError {
             },
             P::InvalidHexString => MBusError::InvalidHexString,
             P::InvalidField(name) => MBusError::FrameParseError(name.to_string()),
+            // Same variants on both sides, so tests that match `UnknownDif(0xFB)` and
+            // friends see exactly what they saw before the parser moved crates.
+            P::UnknownDif(b) => MBusError::UnknownDif(b),
+            P::UnknownVif(b) => MBusError::UnknownVif(b),
+            P::PrematureEnd => MBusError::PrematureEndAtData,
         }
     }
 }

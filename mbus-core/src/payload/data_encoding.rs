@@ -7,7 +7,12 @@
 //! microcontroller there may not be one.
 
 use crate::error::ProtocolError;
-use nom::{bytes::complete::take, IResult, Parser};
+use nom::{
+    bytes::complete::take,
+    combinator::map,
+    number::complete::{be_u16, be_u32, be_u64, be_u8},
+    IResult, Parser,
+};
 
 /// A date and time exactly as an M-Bus telegram carries it.
 ///
@@ -128,6 +133,23 @@ pub fn decode_bcd(input: &[u8]) -> IResult<&[u8], u32> {
     }
 
     Ok((input, value))
+}
+
+/// Decode a big-endian integer of 1, 2, 4 or 8 bytes to `i32`.
+///
+/// Moved verbatim from `mbus-rs`; the record parser's fixed-format path uses it for the
+/// signature and counter fields.
+pub fn decode_int(input: &[u8], size: usize) -> IResult<&[u8], i32> {
+    match size {
+        1 => map(be_u8, |v| v as i32).parse(input),
+        2 => map(be_u16, |v| v as i32).parse(input),
+        4 => map(be_u32, |v| v as i32).parse(input),
+        8 => map(be_u64, |v| v as i32).parse(input),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        ))),
+    }
 }
 
 /// Encode a `u32` as four BCD bytes.

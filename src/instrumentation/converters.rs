@@ -6,28 +6,11 @@ use super::{
 };
 use crate::mbus::frame::MBusFrame;
 use crate::mbus::secondary_addressing::SecondaryAddress;
-use crate::payload::record::{
-    MBusDataInformationBlock, MBusDataRecordHeader, MBusRecord, MBusRecordValue,
-    MBusValueInformationBlock,
-};
+use crate::payload::record::{MBusRecord, MBusRecordValue};
 
-impl Default for MBusDataRecordHeader {
-    fn default() -> Self {
-        Self {
-            dib: MBusDataInformationBlock {
-                dif: 0,
-                ndife: 0,
-                dife: [0; 10],
-            },
-            vib: MBusValueInformationBlock {
-                vif: 0,
-                nvife: 0,
-                vife: [0; 10],
-                custom_vif: crate::payload::record::CustomVif::new(),
-            },
-        }
-    }
-}
+// `Default for MBusDataRecordHeader` moved to mbus-core with the type (orphan rule:
+// the impl cannot live in a crate that no longer defines it). Derived there — every
+// field defaults to zero/empty, exactly what the manual impl produced.
 use crate::vendors::{manufacturer_id_to_string, VendorDeviceInfo};
 use crate::wmbus::frame::WMBusFrame;
 use crate::wmbus::radio::lora::decoder::MeteringData;

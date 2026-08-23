@@ -23,6 +23,12 @@ pub enum ProtocolError {
     InvalidHexString,
     /// A field was outside the range the standard permits.
     InvalidField(&'static str),
+    /// A Data Information Field code this crate does not know.
+    UnknownDif(u8),
+    /// A Value Information Field code this crate does not know.
+    UnknownVif(u8),
+    /// The input ended before the data a record announced.
+    PrematureEnd,
 }
 
 impl core::fmt::Display for ProtocolError {
@@ -37,6 +43,9 @@ impl core::fmt::Display for ProtocolError {
             ),
             Self::InvalidHexString => write!(f, "invalid hexadecimal string"),
             Self::InvalidField(name) => write!(f, "invalid field: {name}"),
+            Self::UnknownDif(b) => write!(f, "unknown DIF: 0x{b:02X}"),
+            Self::UnknownVif(b) => write!(f, "unknown VIF: 0x{b:02X}"),
+            Self::PrematureEnd => write!(f, "premature end of data"),
         }
     }
 }
