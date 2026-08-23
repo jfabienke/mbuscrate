@@ -14,8 +14,21 @@ use crate::error::ProtocolError;
 use crate::payload::quirk::AppliedQuirks;
 use crate::payload::record_value::{bcd_le, dif_datalength_lookup, int_le};
 use crate::payload::text::{QuantityText, UnitText};
-use core::fmt::Write as _;
 use nom::{bytes::complete::take, number::complete::be_u8, IResult};
+
+/// `"{a}, {b}"` into a fixed buffer, clipping at capacity — without `core::fmt`, whose
+/// machinery carries panic paths the linker cannot eliminate.
+fn compose<const N: usize>(a: &str, b: &str) -> heapless::String<N> {
+    let mut out = heapless::String::new();
+    for part in [a, ", ", b] {
+        for c in part.chars() {
+            if out.push(c).is_err() {
+                return out;
+            }
+        }
+    }
+    out
+}
 
 /// Data length described by an LVAR byte, reporting the offending byte on failure.
 fn parse_variable_data_length(input: u8) -> Result<usize, ProtocolError> {
@@ -293,19 +306,12 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, ProtocolError> {
         device: -1,
         is_numeric: true,
         value: MBusRecordValue::Numeric(value1 + value2),
-        // Composed in place: `write!` into a fixed buffer clips at capacity exactly as
-        // `from_str_truncating(&format!(..))` did, without the allocator `format!` needs.
-        unit: {
-            let mut u = heapless::String::new();
-            let _ = write!(u, "{unit1}, {unit2}");
-            UnitText::Owned(u)
-        },
+        // Composed by pushing chars, clipping at capacity exactly as the old
+        // `format!` composition did. Not `write!`: core::fmt's machinery carries panic
+        // paths the linker cannot eliminate, and this module is under the panic ratchet.
+        unit: UnitText::Owned(compose(unit1, unit2)),
         function_medium: "Fixed",
-        quantity: {
-            let mut q = heapless::String::new();
-            let _ = write!(q, "{quantity1}, {quantity2}");
-            QuantityText::Owned(q)
-        },
+        quantity: QuantityText::Owned(compose(quantity1, quantity2)),
         drh: MBusDataRecordHeader {
             dib: MBusDataInformationBlock {
                 dif: 0,
