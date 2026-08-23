@@ -120,30 +120,6 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
 - Instrumentation-only mode for diagnostic reporting without good readings
 - `validate_reading()` function for reading quality checks
 
-#### SIMD/NEON Optimizations (Raspberry Pi 4/5 Support)
-- **ARM NEON CRC Implementation** (`src/wmbus/simd_crc.rs`):
-  - Complete NEON-optimized CRC with correct wM-Bus polynomial (0x8408)
-  - `calculate_crc_table_neon()` using NEON vector loads for efficient table lookups
-  - `calculate_block_crc_neon()` with vectorized processing for multi-block frames
-  - Fixed ARM CRC32 instruction polynomial mismatch via optimized table approach
-- **ARM NEON Checksum** (`src/mbus/simd.rs`):
-  - 64-byte chunk processing optimized for Cortex-A72 (Pi 4) and Cortex-A76 (Pi 5) cache lines
-  - 4x16 byte unrolled loops for maximum throughput
-  - Runtime CPU feature detection with automatic NEON enablement
-- **Raspberry Pi Detection**:
-  - Automatic model detection via `/proc/cpuinfo` parsing
-  - Specific optimizations for BCM2711/Cortex-A72 (Pi 4) and BCM2712/Cortex-A76 (Pi 5)
-  - Feature logging for debugging and performance tuning
-- **Performance Results**:
-  - Checksum: ~2.7 Gbps throughput (4-8x improvement over scalar)
-  - CRC: ~1.1 Gbps throughput (3-5x improvement over scalar)
-  - Real-world frames: >3.5M frames/sec (short), >1M frames/sec (standard)
-  - Sub-microsecond latency: 0.28-2.54 µs per frame
-- **Testing and Benchmarks**:
-  - `simd_benchmark.rs` for comprehensive performance evaluation
-  - `simd_demo.rs` example demonstrating SIMD acceleration
-  - Full test coverage ensuring bit-exact results with scalar implementations
-
 #### LoRa Decoder Enhancements
 - Refactored to `DecoderType` enum for simplified device registration
 - Updated `LoRaDeviceManager` with config-based decoder setup (Dragino, Decentlab, GenericCounter)
@@ -154,7 +130,6 @@ This release brings `mbus-rs` to **100% compliance** with EN 13757-3 M-Bus stand
 - `instrumentation_demo.rs`: Demonstrates new instrumentation features
 - `samples/` directory with real-world payload examples
 - New docs: `DUAL_PATH_INSTRUMENTATION.md`, `TRANSIENT_STATES.md`, updated `README.md`
-- `PERFORMANCE.md` with optimization notes and benchmarks
 
 #### LoRa Enhancements (SX126x Radio Driver)
 - **Channel Activity Detection (CAD)** (`src/wmbus/radio/lora/cad.rs`):

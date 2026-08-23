@@ -339,6 +339,10 @@ This design maximizes RP2350 hardware for secure, low-power wM-Bus gateways—PI
 
 ### Performance Optimizations
 - Custom LLVM passes for RP2350 dual-core
-- SIMD acceleration for bulk operations
 - Zero-copy packet forwarding using DMA scatter-gather
 - Predictive burst detection using machine learning
+
+> Note: SIMD acceleration was tried and removed on the host build. For M-Bus
+> frames (≤255 bytes) the vectorised checksum/CRC sat far below the I/O noise
+> floor and never paid for its ~250 lines of intrinsics. Don't reintroduce it
+> here without a measurement that shows a real win at these frame sizes.

@@ -244,31 +244,19 @@ fn bench_batch_processing(c: &mut Criterion) {
     group.finish();
 }
 
-/// Performance comparison: scalar vs potential SIMD
-fn bench_optimization_comparison(c: &mut Criterion) {
-    let mut group = c.benchmark_group("optimization_comparison");
+/// Checksum throughput across buffer sizes.
+fn bench_checksum_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("checksum_throughput");
     group.measurement_time(Duration::from_secs(10));
 
-    // Test data for comparison
     let data_256 = generate_test_data(256);
     let data_1k = generate_test_data(1024);
     let data_4k = generate_test_data(4096);
 
-    // Current implementation (will be optimized with SIMD later)
     for (size, data) in &[(256, &data_256), (1024, &data_1k), (4096, &data_4k)] {
         group.throughput(Throughput::Bytes(*size as u64));
-
-        group.bench_with_input(BenchmarkId::new("current", size), data, |b, data| {
+        group.bench_with_input(BenchmarkId::new("scalar", size), data, |b, data| {
             b.iter(|| calculate_mbus_checksum(black_box(data)))
-        });
-
-        // Placeholder for SIMD implementation
-        // Will be replaced with actual SIMD when implemented
-        group.bench_with_input(BenchmarkId::new("future_simd", size), data, |b, data| {
-            b.iter(|| {
-                // For now, same as current
-                calculate_mbus_checksum(black_box(data))
-            })
         });
     }
 
@@ -285,7 +273,7 @@ criterion_group!(
     bench_hmac_sha1,
     bench_frame_validation_pipeline,
     bench_batch_processing,
-    bench_optimization_comparison
+    bench_checksum_throughput
 );
 
 #[cfg(not(feature = "crypto"))]
@@ -296,7 +284,7 @@ criterion_group!(
     bench_block_crc,
     bench_frame_validation_pipeline,
     bench_batch_processing,
-    bench_optimization_comparison
+    bench_checksum_throughput
 );
 
 criterion_main!(benches);

@@ -1,7 +1,9 @@
 # mbus-rs
 
-**Production-ready Rust implementation of the M-Bus protocol for smart meter communication.**
-Connect to electricity, gas, water, and heat meters with confidence—featuring async I/O, multi-telegram support, and encryption.
+**A Rust implementation of the M-Bus protocol for smart meter communication.**
+Reads electricity, gas, water, and heat meters over wired and wireless M-Bus — async I/O,
+multi-telegram support, and encryption. Verified against real meter traffic; still
+consolidating toward a 1.0 release (see [What's New](#whats-new) for current status).
 
 ## What's New
 

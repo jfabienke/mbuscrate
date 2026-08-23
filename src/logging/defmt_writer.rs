@@ -231,7 +231,6 @@ pub mod encoders {
     pub enum CryptoBackend {
         Hardware,
         Software,
-        Simd,
     }
 
     /// LoRa event data for structured logging
@@ -387,7 +386,7 @@ mod tests {
 
         // These should not panic
         log_irq_event(0x02, 1000, 26);
-        log_crypto_event(CryptoOp::Decrypt, CryptoBackend::Simd, 128, 2500);
+        log_crypto_event(CryptoOp::Decrypt, CryptoBackend::Hardware, 128, 2500);
         log_lora_event(LoRaEventType::RxComplete, -85, 12.5, 868950000, 7, 64);
     }
 }

@@ -33,11 +33,11 @@ fn bench_unaligned_buffers(c: &mut Criterion) {
 fn bench_partial_frames(c: &mut Criterion) {
     let mut group = c.benchmark_group("partial_frames");
 
-    // Test partial frame sizes (not aligned to SIMD vector width)
+    // Awkward, non-power-of-two frame sizes
     let sizes = [
         13, 17, 19, 23, 29, 31, // Prime numbers (worst case)
         33, 65, 127, 129, 255, // Off-by-one from powers of 2
-        15, 63, 511, 1023, // One less than SIMD boundaries
+        15, 63, 511, 1023, // One less than a power of two
     ];
 
     for size in sizes.iter() {
@@ -60,7 +60,7 @@ fn bench_partial_frames(c: &mut Criterion) {
 fn bench_worst_case_patterns(c: &mut Criterion) {
     let mut group = c.benchmark_group("worst_case_patterns");
 
-    // Create data patterns that might stress SIMD implementations
+    // Data patterns that stress the checksum/CRC folds
     let patterns = [
         ("all_zeros", vec![0x00u8; 1024]),
         ("all_ones", vec![0xFFu8; 1024]),

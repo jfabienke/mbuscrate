@@ -270,10 +270,7 @@ pub fn verify_frame(frame: &MBusFrame) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-/// Hardware-accelerated M-Bus checksum calculation for raw data
-///
-/// Optimized implementation with SIMD acceleration for high-throughput operations.
-/// This function is designed for gateway applications processing thousands of frames per second.
+/// M-Bus checksum calculation for raw data: the byte sum modulo 256.
 ///
 /// # Arguments
 /// * `data` - Raw byte slice to calculate checksum for
@@ -289,9 +286,8 @@ pub fn calculate_mbus_checksum(data: &[u8]) -> u8 {
     data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b))
 }
 
-/// Calculates the checksum of an M-Bus frame using hardware-accelerated implementation.
+/// Calculates the checksum of an M-Bus frame.
 fn calculate_checksum(frame: &MBusFrame) -> u8 {
-    // Use hardware-accelerated implementation for better performance
     match frame.frame_type {
         MBusFrameType::Short => calculate_mbus_checksum(&[frame.control, frame.address]),
         MBusFrameType::Control => {

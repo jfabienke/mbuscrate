@@ -121,10 +121,6 @@ harness = false
 name = "edge_cases_benchmark"
 harness = false
 
-[[bench]]
-name = "simd_benchmark"
-harness = false
-
 # Targets that depend on feature-gated symbols. Without these, `cargo test` and
 # `cargo build --examples` fail on the default feature set because the RTT logging
 # API only exists under `rtt-logging` (see src/logging.rs).

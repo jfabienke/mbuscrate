@@ -283,7 +283,7 @@ via `set_baud_rate`; that is a transport reconfigure, independent of FCB.
 | `serial_mock.rs:15/65-106` `MockSerialPort` + own checksum builder | `VirtualBus`/`InMemoryTransport`; tests build frames via `frame::pack_frame` | **replace/delete** |
 | `tests/mock_support.rs:6-7` empty stubs | `VirtualBus` | **delete** |
 | `frame.rs:93/192/238` parse/pack/verify | **stays in `mbus::frame`**; gains `inspect_prefix` | keep (finding 6) |
-| `frame.rs:263`→`simd.rs` checksum | called unchanged | untouched (SIMD removal is separate) |
+| `frame.rs` checksum | called unchanged | SIMD removal has since landed — `calculate_mbus_checksum` is now a plain fold in `mbus-core` |
 | `mbus_protocol.rs:664/673` `FrameHandler` "not implemented" | borrow `&mut Session` | **deferred follow-up** |
 
 ---
@@ -485,8 +485,8 @@ drops the handles).
   is deliberately **not** folded into `ByteTransport` (invariant 6); wireless keeps
   `WMBusHandleWrapper`. An analogous seam can come later once wired is proven.
 - **`FrameHandler`/`DataRetrievalManager` transport wiring** — deferred follow-up (§5).
-- **SIMD checksum removal** (`src/mbus/simd.rs`) — orthogonal; `frame` keeps calling
-  `calculate_mbus_checksum`.
+- **SIMD checksum removal** — done (was orthogonal to this refactor). `src/mbus/simd.rs`
+  is gone; `calculate_mbus_checksum` is a plain wrapping fold in `mbus-core`.
 - **Record/VIF parsing** — untouched.
 - **Public-surface narrowing / workspace split** (`mbus-rs` vs `metermon-rs`) — separate (#2, #5).
 
