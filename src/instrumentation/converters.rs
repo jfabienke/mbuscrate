@@ -77,11 +77,7 @@ pub fn from_mbus_frame_with_split(
             value,
             unit: record.unit.to_string(),
             timestamp: received_at,
-            tariff: if record.tariff >= 0 {
-                Some(record.tariff as u32)
-            } else {
-                None
-            },
+            tariff: record.tariff,
             storage_number: Some(record.storage_number),
             quality: ReadingQuality::Good,
         };
@@ -387,8 +383,8 @@ mod tests {
 
         let records = vec![MBusRecord {
             storage_number: 0,
-            tariff: -1,
-            device: -1,
+            tariff: None,
+            device: None,
             is_numeric: true,
             value: MBusRecordValue::Numeric(123.45),
             unit: mbus_core::payload::text::UnitText::Static("m³"),

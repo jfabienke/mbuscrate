@@ -50,8 +50,14 @@ pub type CustomVif = heapless::String<16>;
 #[derive(Debug)]
 pub struct MBusRecord {
     pub storage_number: u32,
-    pub tariff: i32,
-    pub device: i32,
+    /// Tariff index from the DIFE chain, or `None` when the record has no DIFE.
+    ///
+    /// Was an `i32` using `-1` for "absent" — a C sentinel. The value is a bit-packed
+    /// index and is never meaningfully negative, so `Option<u32>` says exactly what the
+    /// sentinel encoded, with no `>= 0` dance at the consumer.
+    pub tariff: Option<u32>,
+    /// Subunit (device) index from the DIFE chain, or `None`. Same story as `tariff`.
+    pub device: Option<u32>,
     pub is_numeric: bool,
     pub value: MBusRecordValue,
     /// Unit of the reading, e.g. `m^3`. Usually a pointer into the const VIF tables.
@@ -304,8 +310,8 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, ProtocolError> {
 
     let record = MBusRecord {
         storage_number: device_id_bcd,
-        tariff: -1,
-        device: -1,
+        tariff: None,
+        device: None,
         is_numeric: true,
         value: MBusRecordValue::Numeric(value1 + value2),
         // Composed by pushing chars, clipping at capacity exactly as the old
@@ -492,8 +498,8 @@ pub fn parse_variable_record(input: &[u8]) -> Result<MBusRecord, ProtocolError> 
 fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
     let mut record = MBusRecord {
         storage_number: 0,
-        tariff: -1,
-        device: -1,
+        tariff: None,
+        device: None,
         is_numeric: true,
         value: MBusRecordValue::Numeric(0.0),
         unit: UnitText::new(),
@@ -679,8 +685,8 @@ fn accumulate_dib_fields(record: &mut MBusRecord) {
             tariff |= (((dife & MBUS_DATA_RECORD_DIFE_MASK_TARIFF) >> 4) as u32) << (2 * idx);
             device |= (((dife & MBUS_DATA_RECORD_DIFE_MASK_DEVICE) >> 6) as u32) << idx;
         }
-        record.tariff = tariff as i32;
-        record.device = device as i32;
+        record.tariff = Some(tariff);
+        record.device = Some(device);
     }
 
     record.storage_number = storage;
@@ -732,8 +738,8 @@ mod tests {
         let (rec, _) =
             parse_variable_record_consumed(&[0x04, 0x13, 0x00, 0x00, 0x00, 0x00]).unwrap();
         assert_eq!(rec.storage_number, 0);
-        assert_eq!(rec.tariff, -1, "no DIFE -> tariff absent");
-        assert_eq!(rec.device, -1, "no DIFE -> subunit absent");
+        assert_eq!(rec.tariff, None, "no DIFE -> tariff absent");
+        assert_eq!(rec.device, None, "no DIFE -> subunit absent");
     }
 
     /// DIF bit 6 alone (no DIFE) is the storage-number LSB -> storage 1.
@@ -742,7 +748,7 @@ mod tests {
         // DIF 0x41 = 32-bit... actually 0x01 (8-bit int) | 0x40 storage bit.
         let (rec, _) = parse_variable_record_consumed(&[0x41, 0x13, 0x07]).unwrap();
         assert_eq!(rec.storage_number, 1);
-        assert_eq!(rec.tariff, -1);
+        assert_eq!(rec.tariff, None);
     }
 
     /// One DIFE carrying a storage nibble: storage = DIF-LSB | (nibble << 1).
@@ -753,8 +759,8 @@ mod tests {
         let (rec, _) =
             parse_variable_record_consumed(&[0x84, 0x03, 0x13, 0x00, 0x00, 0x00, 0x00]).unwrap();
         assert_eq!(rec.storage_number, 6);
-        assert_eq!(rec.tariff, 0, "DIFE present, tariff bits 0");
-        assert_eq!(rec.device, 0, "DIFE present, subunit bit 0");
+        assert_eq!(rec.tariff, Some(0), "DIFE present, tariff bits 0");
+        assert_eq!(rec.device, Some(0), "DIFE present, subunit bit 0");
     }
 
     /// DIFE tariff and subunit bits decode independently of storage.
@@ -764,8 +770,8 @@ mod tests {
         // 0x50 & 0x40 = 0x40 -> subunit 1, storage nibble 0.
         let (rec, _) =
             parse_variable_record_consumed(&[0x84, 0x50, 0x13, 0x00, 0x00, 0x00, 0x00]).unwrap();
-        assert_eq!(rec.tariff, 1);
-        assert_eq!(rec.device, 1);
+        assert_eq!(rec.tariff, Some(1));
+        assert_eq!(rec.device, Some(1));
         assert_eq!(rec.storage_number, 0);
     }
 

@@ -434,8 +434,8 @@ fn test_integration_with_mbus_frame() {
     // Create some records with vendor-specific data
     let records = vec![MBusRecord {
         storage_number: 0,
-        tariff: -1,
-        device: -1,
+        tariff: None,
+        device: None,
         is_numeric: true,
         value: MBusRecordValue::Numeric(1234.56),
         unit: mbus_core::payload::text::UnitText::Static("m³"),

@@ -49,8 +49,8 @@ fn demo_mbus_dual_path() {
         // Good reading - valid volume
         MBusRecord {
             storage_number: 0,
-            tariff: -1,
-            device: -1,
+            tariff: None,
+            device: None,
             is_numeric: true,
             value: MBusRecordValue::Numeric(1234.567),
             unit: mbus_core::payload::text::UnitText::Static("m³"),
@@ -65,8 +65,8 @@ fn demo_mbus_dual_path() {
         // Bad reading - negative energy (invalid)
         MBusRecord {
             storage_number: 0,
-            tariff: -1,
-            device: -1,
+            tariff: None,
+            device: None,
             is_numeric: true,
             value: MBusRecordValue::Numeric(-50.0),
             unit: mbus_core::payload::text::UnitText::Static("kWh"),
@@ -81,8 +81,8 @@ fn demo_mbus_dual_path() {
         // Good reading - valid temperature
         MBusRecord {
             storage_number: 0,
-            tariff: -1,
-            device: -1,
+            tariff: None,
+            device: None,
             is_numeric: true,
             value: MBusRecordValue::Numeric(22.5),
             unit: mbus_core::payload::text::UnitText::Static("°C"),
@@ -97,8 +97,8 @@ fn demo_mbus_dual_path() {
         // Bad reading - out of bounds temperature
         MBusRecord {
             storage_number: 0,
-            tariff: -1,
-            device: -1,
+            tariff: None,
+            device: None,
             is_numeric: true,
             value: MBusRecordValue::Numeric(150.0),
             unit: mbus_core::payload::text::UnitText::Static("°C"),
