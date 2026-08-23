@@ -12,9 +12,11 @@ fn mbus_record_stays_within_its_size_budget() {
 
     let size = std::mem::size_of::<MBusRecord>();
 
-    // Was 488 bytes with four `String`s and up to six heap allocations per record.
-    // Now 528 with none: +40 bytes of inline buffer bought the allocator's removal, which
-    // is what makes the type usable on a target that has no allocator at all.
+    // 488 bytes originally, with four `String`s and up to six heap allocations per
+    // record; now larger by value and allocation-free, which is what makes the type usable
+    // on a target with no allocator. Every inline buffer is paid in every record, so this
+    // guard has already earned itself once: setting MAX_APPLIED_QUIRKS to 8 rather than 2
+    // added 160 bytes and was caught here rather than in a profile.
     assert!(
         size <= 560,
         "MBusRecord grew to {size} bytes. It is moved by value on every reading, so \

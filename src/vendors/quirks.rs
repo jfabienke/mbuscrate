@@ -84,16 +84,10 @@ pub struct QuirkManifest {
     pub status: QuirkStatus,
 }
 
-/// Record of a quirk having changed a decode outcome (P5). A consumer must be able
-/// to tell a standard decode from an overridden one; two gateways that disagree
-/// silently cannot be audited.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuirkApplied {
-    /// The manifest id of the quirk that fired.
-    pub quirk_id: &'static str,
-    /// Whether the quirk's evidence was merely provisional at the time it fired.
-    pub provisional: bool,
-}
+// Moved to `mbus_core::payload::quirk`: it is a field of `MBusRecord`, and a record must
+// be able to say how it was decoded even where no vendor registry is linked. The quirks
+// themselves, and the logic deciding when one fires, stay here.
+pub use mbus_core::payload::quirk::{AppliedQuirks, QuirkApplied, MAX_APPLIED_QUIRKS};
 
 /// Layer 2 hook set. Every method returns `Some(QuirkApplied)` exactly when it
 /// changed the outcome, so application is always observable.

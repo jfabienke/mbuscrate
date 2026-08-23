@@ -55,7 +55,7 @@ pub struct MBusRecord {
     pub more_records_follow: u8,
     /// Quirks that changed this record's interpretation (vendor-layers P5). Empty for
     /// a purely standard decode; a consumer can always tell an overridden reading.
-    pub applied_quirks: Vec<crate::vendors::QuirkApplied>,
+    pub applied_quirks: mbus_core::payload::quirk::AppliedQuirks,
 }
 
 /// Represents the M-Bus data record header.
@@ -311,7 +311,7 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, MBusError> {
             data
         },
         more_records_follow: 0,
-        applied_quirks: Vec::new(),
+        applied_quirks: mbus_core::payload::quirk::AppliedQuirks::new(),
     };
 
     Ok(record)
@@ -485,7 +485,7 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
         data_len: 0,
         data: [0; 256],
         more_records_follow: 0,
-        applied_quirks: Vec::new(),
+        applied_quirks: mbus_core::payload::quirk::AppliedQuirks::new(),
     };
 
     // Skip idle filler bytes if present (they are optional)
@@ -807,7 +807,14 @@ fn apply_vendor_hooks(
     // the specification. Every application is recorded on the record (P5).
     for quirk in ctx.quirks() {
         if let Some(applied) = quirk.reinterpret_record(record) {
-            record.applied_quirks.push(applied);
+            // Full means the audit trail would be incomplete, which is the one thing
+            // this vector exists to guarantee — so it is worth a log, not a silent drop.
+            if record.applied_quirks.push(applied).is_err() {
+                log::warn!(
+                    "more than {} quirks fired on one record; audit trail truncated",
+                    mbus_core::payload::quirk::MAX_APPLIED_QUIRKS
+                );
+            }
         }
     }
 
@@ -1115,7 +1122,7 @@ mod tests {
             data_len: 0,
             data: [0; 256],
             more_records_follow: 0,
-            applied_quirks: Vec::new(),
+            applied_quirks: mbus_core::payload::quirk::AppliedQuirks::new(),
         };
         mbus_data_record_append(&mut record);
         assert_eq!(record.quantity, "Manufacturer specific");
