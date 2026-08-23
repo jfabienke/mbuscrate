@@ -5,12 +5,19 @@ Connect to electricity, gas, water, and heat meters with confidence—featuring 
 
 ## What's New
 
-- **Crypto Enhancements**: Added CMAC, HMAC, and SHA1 support for advanced wM-Bus security, preparing for Mode 13 TLS compatibility. Enable with the `crypto` feature.
-- **Instrumentation Improvements**: New split good/bad readings in converters, `MeteringReport` for validated data, and instrumentation-only mode for diagnostics.
-- **SIMD Optimizations**: SIMD-accelerated parsing and CRC in mbus/wmbus modules, with benchmarks and `simd_demo.rs` example.
-- **LoRa Decoder Refactor**: Enum-based `DecoderType` for easier device registration (Dragino, Decentlab, GenericCounter); updated `lora_decoder_demo.rs`.
-- **New Examples**: `dual_path_gateway.rs` for hybrid M-Bus/wM-Bus, `instrumentation_demo.rs` for reporting, `simd_demo.rs` for performance.
-- **Documentation**: Added `PERFORMANCE.md`, `DUAL_PATH_INSTRUMENTATION.md`, `TRANSIENT_STATES.md`; updated README with optimization notes.
+- **`no_std` protocol core**: the parsing, decoding and crypto now live in a separate
+  `mbus-core` crate that builds `no_std` with **no heap and no panics** — the same
+  decode code runs on a Linux gateway and on a Cortex-M microcontroller. It compiles for
+  `thumbv6m-none-eabi`, and its panic-freedom is not asserted but *linker-verified* in CI:
+  if any reachable path in the decode pipeline could panic, the check binary fails to link.
+- **Exact large counters**: record values from integer and BCD codings keep their raw
+  64-bit mantissa (`MBusRecordValue::Scaled`) instead of being folded to `f64` at parse
+  time, which silently corrupted any total past ~9×10¹⁵. `as_f64()` gives a convenience
+  float where the loss is acceptable.
+- **Crypto**: CMAC/HMAC/SHA1 on RustCrypto primitives; OMS Mode 9 (GCM) authenticates the
+  spec's 12-byte truncated tag correctly and defaults to it.
+- **LoRa Decoder Refactor**: Enum-based `DecoderType` for easier device registration
+  (Dragino, Decentlab, GenericCounter); `lora_decoder_demo.rs`.
 
 See full details in [CHANGELOG.md](CHANGELOG.md).
 
@@ -65,6 +72,7 @@ async fn main() -> Result<(), mbus_rs::MBusError> {
 | **Encryption** | ✅ AES-128 CTR/CBC/GCM | <5ms decrypt time |
 | **Device scanning** | ✅ Primary/secondary | 100 devices in <30s |
 | **Raspberry Pi** | ✅ Native SX126x driver | SPI up to 16 MHz |
+| **`no_std` core** | ✅ `mbus-core` crate | no heap, no panics; builds for Cortex-M |
 
 ## Installation
 
@@ -141,10 +149,13 @@ measurement and have been removed.
   against captured Kamstrup Multical 21 traffic.
 - **Compact frames**: layout learned from a full frame and re-applied, with the
   format signature confirmed against captured traffic.
-- **OMS security profiles**: Mode 5 (CTR), 7 (CBC) and 9 (GCM) are implemented on
-  RustCrypto primitives and covered by NIST SP 800-38A known-answer vectors. They
-  have **not** been validated against live Mode 5/7/9 meter traffic — the meters
-  reachable from the test gateway use ELL encryption.
+- **OMS security profiles**: Mode 5 (AES-128-CBC, Security Profile A) and Mode 9
+  (AES-128-GCM) are implemented on RustCrypto primitives and covered by known-answer
+  vectors. **Mode 7 is not implemented.** The implemented modes have **not** been
+  validated against live meter traffic — the meters reachable from the test gateway use
+  ELL encryption. (An earlier version of this list said "Mode 5 (CTR), 7 (CBC)"; Mode 5's
+  cipher is CBC, not CTR — the CTR path was a bug and was retired — and no Mode 7 code
+  exists.)
 - **Not implemented**: OMS master-key derivation (AES-CMAC). Supply the per-device
   key directly; see `KeyMode`.
 
