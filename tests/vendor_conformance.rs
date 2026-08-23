@@ -37,7 +37,7 @@ fn fields(bytes: &[u8], ctx: &DecodeContext) -> (String, String, String, Vec<&'s
     let (rec, _) = parse_variable_record_in_context(bytes, ctx).expect("corpus record parses");
     let value = match &rec.value {
         MBusRecordValue::Numeric(n) => format!("{n}"),
-        MBusRecordValue::String(s) => s.clone(),
+        MBusRecordValue::String(s) => s.to_string(),
     };
     let quirks = rec.applied_quirks.iter().map(|q| q.quirk_id).collect();
     (

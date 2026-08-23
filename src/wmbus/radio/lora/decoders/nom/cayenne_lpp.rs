@@ -229,13 +229,13 @@ impl CayenneValue {
                 format!("Channel {channel} Unix Time"),
             ),
             Self::Accelerometer { x, y, z } => (
-                MBusRecordValue::String(format!("X:{x:.3} Y:{y:.3} Z:{z:.3}")),
+                MBusRecordValue::text(&format!("X:{x:.3} Y:{y:.3} Z:{z:.3}")),
                 "g".to_string(),
                 "Accelerometer".to_string(),
                 format!("Channel {channel} Accelerometer"),
             ),
             Self::Gyrometer { x, y, z } => (
-                MBusRecordValue::String(format!("X:{x:.1} Y:{y:.1} Z:{z:.1}")),
+                MBusRecordValue::text(&format!("X:{x:.1} Y:{y:.1} Z:{z:.1}")),
                 "°/s".to_string(),
                 "Gyrometer".to_string(),
                 format!("Channel {channel} Gyrometer"),
@@ -245,7 +245,7 @@ impl CayenneValue {
                 longitude,
                 altitude,
             } => (
-                MBusRecordValue::String(format!("{latitude}°, {longitude}°, {altitude}m")),
+                MBusRecordValue::text(&format!("{latitude}°, {longitude}°, {altitude}m")),
                 "".to_string(),
                 "GPS".to_string(),
                 format!("Channel {channel} GPS Location"),

@@ -142,7 +142,7 @@ pub fn parse_oms_data_records(input: &[u8]) -> IResult<&[u8], Vec<OmsDataRecord>
                     crate::payload::data::MBusRecordValue::Numeric(n) => {
                         MBusRecordValue::Numeric(n)
                     }
-                    crate::payload::data::MBusRecordValue::String(s) => MBusRecordValue::String(s),
+                    crate::payload::data::MBusRecordValue::String(s) => MBusRecordValue::text(&s),
                 };
                 let oms_record = OmsDataRecord {
                     dif: record.dif_chain.first().copied().unwrap_or(0),

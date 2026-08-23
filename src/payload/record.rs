@@ -85,11 +85,33 @@ pub struct MBusValueInformationBlock {
     pub custom_vif: CustomVif,
 }
 
-/// Represents the value of an M-Bus data record.
-#[derive(Debug, Clone)]
+/// Text capacity for a record's decoded string value.
+///
+/// LVAR text can in principle reach 1130 bytes, but a record's raw bytes are already kept
+/// in [`MBusRecord::data`] — this is a *decoded* convenience copy, reversed into reading
+/// order. So a clipped value costs nothing recoverable: the caller reads `data` for the
+/// full content. 32 covers the device-identification strings that occur in practice
+/// without charging every record for the pathological case.
+pub const RECORD_TEXT_CAPACITY: usize = 32;
+
+/// A record's decoded value.
+#[derive(Debug, Clone, PartialEq)]
 pub enum MBusRecordValue {
     Numeric(f64),
-    String(String),
+    String(heapless::String<RECORD_TEXT_CAPACITY>),
+}
+
+impl MBusRecordValue {
+    /// Build a string value, clipping at [`RECORD_TEXT_CAPACITY`].
+    pub fn text(s: &str) -> Self {
+        let mut out = heapless::String::new();
+        for c in s.chars() {
+            if out.push(c).is_err() {
+                break;
+            }
+        }
+        MBusRecordValue::String(out)
+    }
 }
 
 // Constants for fixed-length medium units (based on M-Bus spec)
@@ -434,10 +456,16 @@ fn decode_record_value(record: &mut MBusRecord) {
         0x0D => {
             // Variable length (LVAR): text, kept verbatim.
             record.is_numeric = false;
-            record.value = MBusRecordValue::String(
-                String::from_utf8_lossy(&data.iter().copied().rev().collect::<Vec<_>>())
-                    .into_owned(),
-            );
+            // Reversed into reading order, straight into the fixed buffer — the previous
+            // version collected a Vec and then allocated a String from it, two allocations
+            // to re-present bytes that are already sitting in `record.data`.
+            let mut text = heapless::String::<RECORD_TEXT_CAPACITY>::new();
+            for &b in data.iter().rev() {
+                if text.push(b as char).is_err() {
+                    break;
+                }
+            }
+            record.value = MBusRecordValue::String(text);
             record.unit = unit;
             record.quantity = quantity;
             return;
@@ -726,8 +754,8 @@ fn apply_vendor_value(
         vendors::VendorVariable::Numeric(n) => {
             MBusRecordValue::Numeric(n * 10_f64.powi(exp as i32))
         }
-        vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
-        _ => MBusRecordValue::String("Vendor specific".to_string()),
+        vendors::VendorVariable::String(s) => MBusRecordValue::text(&s),
+        _ => MBusRecordValue::text("Vendor specific"),
     };
 }
 
@@ -758,8 +786,8 @@ fn apply_vendor_hooks(
                 record.quantity = QuantityText::from_str_truncating(&first.quantity);
                 record.value = match first.value {
                     vendors::VendorVariable::Numeric(n) => MBusRecordValue::Numeric(n),
-                    vendors::VendorVariable::String(s) => MBusRecordValue::String(s),
-                    _ => MBusRecordValue::String("Vendor specific".to_string()),
+                    vendors::VendorVariable::String(s) => MBusRecordValue::text(&s),
+                    _ => MBusRecordValue::text("Vendor specific"),
                 };
             }
         }

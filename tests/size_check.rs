@@ -12,13 +12,21 @@ fn mbus_record_stays_within_its_size_budget() {
 
     let size = std::mem::size_of::<MBusRecord>();
 
-    // 488 bytes originally, with four `String`s and up to six heap allocations per
-    // record; now larger by value and allocation-free, which is what makes the type usable
-    // on a target with no allocator. Every inline buffer is paid in every record, so this
-    // guard has already earned itself once: setting MAX_APPLIED_QUIRKS to 8 rather than 2
-    // added 160 bytes and was caught here rather than in a profile.
+    // Accounting, so a future change can tell deliberate growth from accidental:
+    //
+    //   488  original, four `String`s, up to six heap allocations per record
+    //   +40  unit/quantity/function_medium/custom_vif -> fixed-capacity  (allocations -4)
+    //   +16  applied_quirks -> heapless::Vec<_, 2>                       (allocations -1)
+    //   +24  MBusRecordValue::String -> heapless::String<32>             (allocations -1)
+    //   ---
+    //   568  and allocation-free
+    //
+    // Every inline buffer is paid in every record, used or not, so this guard has already
+    // earned itself twice: MAX_APPLIED_QUIRKS at 8 rather than 2 added 160 bytes, and
+    // Text<96> for all three text fields would have added 220. Both were caught here
+    // rather than in a profile.
     assert!(
-        size <= 560,
+        size <= 580,
         "MBusRecord grew to {size} bytes. It is moved by value on every reading, so \
          check what was added — a fixed-capacity field costs its full size in every \
          record, used or not."
@@ -27,6 +35,18 @@ fn mbus_record_stays_within_its_size_budget() {
         size >= 400,
         "MBusRecord shrank to {size} bytes, which probably means `data: [u8; 252]` \
          changed. That would be good news, but update this guard deliberately."
+    );
+}
+
+#[test]
+fn report_value_sizes() {
+    println!(
+        "MBusRecordValue = {} bytes",
+        std::mem::size_of::<mbus_rs::payload::record::MBusRecordValue>()
+    );
+    println!(
+        "MBusRecord      = {} bytes",
+        std::mem::size_of::<mbus_rs::payload::record::MBusRecord>()
     );
 }
 

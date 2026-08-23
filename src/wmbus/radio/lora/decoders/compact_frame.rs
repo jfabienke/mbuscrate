@@ -61,7 +61,7 @@ impl LoRaPayloadDecoder for CompactFrameDecoder {
         Ok(MeteringData {
             timestamp: SystemTime::now(),
             readings: vec![Reading {
-                value: MBusRecordValue::String(hex::encode(&wmbus_frame.payload)),
+                value: MBusRecordValue::text(&hex::encode(&wmbus_frame.payload)),
                 unit: "hex".to_string(),
                 quantity: "Raw wM-Bus payload".to_string(),
                 tariff: None,

@@ -422,7 +422,7 @@ fn test_mbus_record_value_enum() {
     }
 
     // Test string value
-    let string = MBusRecordValue::String("Test".to_string());
+    let string = MBusRecordValue::text("Test");
     if let MBusRecordValue::String(val) = string {
         assert_eq!(val, "Test");
     } else {

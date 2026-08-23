@@ -361,8 +361,10 @@ impl VendorQuirks for QundisDateQuirk {
         record.unit = mbus_core::payload::text::UnitText::Static("Date");
         record.quantity = mbus_core::payload::text::QuantityText::Static("QUNDIS Date");
         record.is_numeric = false;
-        record.value = crate::payload::record::MBusRecordValue::String(
-            datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
+        // "YYYY-MM-DD HH:MM:SS" is 19 characters, comfortably inside the record's
+        // text capacity.
+        record.value = crate::payload::record::MBusRecordValue::text(
+            &datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
         );
         Some(QuirkApplied {
             quirk_id: self.manifest.id,

@@ -316,7 +316,7 @@ impl LoRaPayloadDecoder for RawBinaryDecoder {
         Ok(MeteringData {
             timestamp: SystemTime::now(),
             readings: vec![Reading {
-                value: MBusRecordValue::String(hex::encode(payload)),
+                value: MBusRecordValue::text(&hex::encode(payload)),
                 unit: "hex".to_string(),
                 quantity: "Raw Data".to_string(),
                 tariff: None,

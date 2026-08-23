@@ -616,7 +616,7 @@ fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Valu
         }
         MBusRecordValue::String(txt) => {
             if txt.bytes().all(|b| (0x20..0x7F).contains(&b)) {
-                obj["value"] = json!(txt);
+                obj["value"] = json!(txt.as_str());
             } else {
                 obj["value_opaque"] = json!(true);
             }
