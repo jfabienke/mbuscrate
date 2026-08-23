@@ -39,6 +39,10 @@ fn parse_variable_data_length(input: u8) -> Result<usize, ProtocolError> {
 /// Plain-text VIF storage, bounded by `MBUS_VALUE_INFO_BLOCK_CUSTOM_VIF_SIZE`.
 pub type CustomVif = heapless::String<16>;
 
+/// A record's data bytes. Capacity is MBUS_MAX_DATA — a record's data cannot exceed the
+/// frame that carries it.
+pub type RecordData = heapless::Vec<u8, { crate::mbus::frame::MBUS_MAX_DATA }>;
+
 /// Represents an M-Bus data record.
 ///
 /// Carries no timestamp. It used to hold a `SystemTime` stamped by the parser with
@@ -68,8 +72,11 @@ pub struct MBusRecord {
     /// Quantity name, e.g. `Volume`, possibly annotated by a vendor extension.
     pub quantity: QuantityText,
     pub drh: MBusDataRecordHeader,
-    pub data_len: usize,
-    pub data: [u8; 256],
+    /// The record's data bytes, exactly as long as the record carries — no companion
+    /// length field, because the vector's own length is the length. Bounded by
+    /// MBUS_MAX_DATA (252), the most a one-byte frame length can describe; the old
+    /// `[u8; 256]` was both too small for the LVAR maximum and larger than any real frame.
+    pub data: RecordData,
     /// Set when the meter signalled that another record follows (DIF 0x1F). Consumers
     /// keep parsing while it is true.
     pub more_records_follow: bool,
@@ -369,18 +376,13 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, ProtocolError> {
                 custom_vif: CustomVif::new(),
             },
         },
-        data_len: input.len().min(256),
-        data: {
-            let mut data = [0; 256];
-            // `.get`/`min` rather than `data[..input.len()]`: an input longer than the
-            // buffer clips instead of panicking. A fixed record is 16 bytes, so this never
-            // fires in practice, but the parser must not panic on any input.
-            let n = input.len().min(data.len());
-            if let (Some(dst), Some(src)) = (data.get_mut(..n), input.get(..n)) {
-                dst.copy_from_slice(src);
-            }
-            data
-        },
+        // Clip to capacity rather than panic; a fixed record is 16 bytes, well within.
+        data: RecordData::from_slice(
+            input
+                .get(..input.len().min(crate::mbus::frame::MBUS_MAX_DATA))
+                .unwrap_or(&[]),
+        )
+        .unwrap_or_default(),
         more_records_follow: false,
         applied_quirks: AppliedQuirks::new(),
     };
@@ -405,43 +407,32 @@ pub fn parse_variable_record_consumed(input: &[u8]) -> Result<(MBusRecord, usize
     if record.drh.dib.dif != MBUS_DIB_DIF_MANUFACTURER_SPECIFIC
         && record.drh.dib.dif != MBUS_DIB_DIF_MORE_RECORDS_FOLLOW
     {
-        // re-calculate data length, if of variable length type
+        // The expected data length. Normally the DIF's low nibble; for a variable-length
+        // record (DIF 0x0D) the following LVAR byte overrides it. Computed here rather
+        // than carried in a field, since it is a pure function of bytes the record holds.
+        let mut expected = dif_datalength_lookup(record.drh.dib.dif);
         if (record.drh.dib.dif & MBUS_DATA_RECORD_DIF_MASK_DATA) == 0x0D {
-            // The LVAR byte must actually be present. `first()` tolerated an empty slice
-            // and then the next line sliced `[1..]` on it, which panics — reachable from
-            // any record that announces a variable length at the very end of the input.
+            // The LVAR byte must actually be present, or the frame is truncated.
             let Some(&lvar) = remaining.first() else {
                 return Err(ProtocolError::PrematureEnd);
             };
-            record.data_len = parse_variable_data_length(lvar)?;
+            expected = parse_variable_data_length(lvar)?;
             remaining = remaining.get(1..).unwrap_or(&[]);
             consumed += 1; // the variable-length byte
         }
 
-        if record.data_len > remaining.len() {
+        // The data must be present in the input...
+        let Some(src) = remaining.get(..expected) else {
             return Err(ProtocolError::PrematureEnd);
-        }
-
-        // EN 13757-3 §6.4.3 lets an LVAR code describe up to 1130 bytes, but
-        // `MBusRecord::data` is a fixed 256-byte array. The check above only compares
-        // against the *input*, so a long enough input walked off the end of the
-        // destination — an out-of-bounds panic on attacker-supplied bytes, which for a
-        // gateway parsing untrusted meter frames is a denial of service.
-        if record.data_len > record.data.len() {
-            return Err(ProtocolError::InvalidField(
-                "record data length exceeds the record buffer",
-            ));
-        }
-
-        // Both the destination and source ranges were length-checked above; `.get_mut`/
-        // `.get` make that provable to the compiler so the copy cannot panic.
-        if let (Some(dst), Some(src)) = (
-            record.data.get_mut(..record.data_len),
-            remaining.get(..record.data_len),
-        ) {
-            dst.copy_from_slice(src);
-        }
-        consumed += record.data_len; // the data bytes
+        };
+        // ...and fit the record buffer. EN 13757-3 §6.4.3 lets an LVAR announce up to
+        // 1130 bytes; `from_slice` refuses anything past MBUS_MAX_DATA rather than
+        // truncating — the over-long-record denial-of-service guard, now enforced by the
+        // type's capacity instead of a hand-written length compare.
+        record.data = RecordData::from_slice(src).map_err(|_| {
+            ProtocolError::InvalidField("record data length exceeds the record buffer")
+        })?;
+        consumed += expected; // the data bytes
     }
 
     decode_record_value(&mut record);
@@ -500,8 +491,8 @@ fn decode_record_value(record: &mut MBusRecord) {
         Err(_) => (UnitText::new(), 1.0, QuantityText::new()),
     };
 
-    // `data_len` is bounded to the buffer at fill time; `.get` proves it here.
-    let data = record.data.get(..record.data_len).unwrap_or(&[]);
+    // The vector's length IS the data length now — no separate field to slice by.
+    let data = record.data.as_slice();
     let coding = record.drh.dib.dif & MBUS_DATA_RECORD_DIF_MASK_DATA;
 
     // Integer and BCD codings keep an EXACT i64 mantissa — folding a 64-bit counter to
@@ -592,8 +583,7 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
                 custom_vif: CustomVif::new(),
             },
         },
-        data_len: 0,
-        data: [0; 256],
+        data: RecordData::new(),
         more_records_follow: false,
         applied_quirks: AppliedQuirks::new(),
     };
@@ -612,20 +602,21 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
             record.more_records_follow = true;
         }
 
-        // For manufacturer-specific or more-records-follow,
-        // all remaining data belongs to this record
-        // Clip to the buffer rather than panic on an over-long manufacturer block.
-        let n = i.len().min(record.data.len());
-        record.data_len = n;
-        if let (Some(dst), Some(src)) = (record.data.get_mut(..n), i.get(..n)) {
-            dst.copy_from_slice(src);
-        }
+        // All remaining input belongs to this record. `from_slice` clips at capacity
+        // rather than panic on an over-long manufacturer block.
+        record.data = RecordData::from_slice(
+            i.get(..i.len().min(crate::mbus::frame::MBUS_MAX_DATA))
+                .unwrap_or(&[]),
+        )
+        .unwrap_or_default();
 
         mbus_data_record_append(&mut record);
         return Ok((&[], record));
     }
 
-    record.data_len = dif_datalength_lookup(record.drh.dib.dif);
+    // The expected data length is computed by parse_variable_record_consumed from the DIF
+    // (a pure function of `record.drh.dib.dif`); inner no longer needs to carry it, which
+    // is why `MBusRecord` has no `data_len` field.
 
     // Parse DIF extensions if DIF has extension bit set
     let mut i_temp = i;
@@ -1137,8 +1128,7 @@ mod tests {
                     custom_vif: CustomVif::new(),
                 },
             },
-            data_len: 0,
-            data: [0; 256],
+            data: RecordData::new(),
             more_records_follow: false,
             applied_quirks: AppliedQuirks::new(),
         };
@@ -1160,7 +1150,7 @@ mod tests {
         let data = [0x01, 0x7C, 0x05, b'T', b'e', b's', b't', b'1', 0x42, 0xEE];
         let (record, consumed) = parse_variable_record_consumed(&data).unwrap();
         assert_eq!(consumed, 9, "DIF+VIF+len+5 text+1 data = 9 bytes");
-        assert_eq!(record.data_len, 1);
+        assert_eq!(record.data.len(), 1);
         assert_eq!(
             record.data[0], 0x42,
             "data must be 0x42, not the VIF length byte"

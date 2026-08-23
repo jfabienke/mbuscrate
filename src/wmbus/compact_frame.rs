@@ -93,12 +93,12 @@ pub fn extract_layout(records: &[u8]) -> Result<RecordLayout, CompactError> {
         // release-mode wraparound feeding the slice below — on a value that comes from a
         // parser reading untrusted bytes. Cheap to check, and the alternative failure is
         // a wildly out-of-range slice index.
-        let Some(header_len) = consumed.checked_sub(rec.data_len) else {
+        let Some(header_len) = consumed.checked_sub(rec.data.len()) else {
             break;
         };
         entries.push(LayoutEntry {
             header: records[offset..offset + header_len].to_vec(),
-            data_len: rec.data_len,
+            data_len: rec.data.len(),
         });
         offset += consumed;
     }

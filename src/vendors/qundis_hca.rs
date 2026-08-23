@@ -341,10 +341,10 @@ impl VendorQuirks for QundisDateQuirk {
     }
 
     fn reinterpret_record(&self, record: &mut MBusRecord) -> Option<QuirkApplied> {
-        if record.drh.vib.vif != QUNDIS_VIF_DATE || record.data_len < 2 {
+        if record.drh.vib.vif != QUNDIS_VIF_DATE || record.data.len() < 2 {
             return None;
         }
-        let data = &record.data[..record.data_len];
+        let data = record.data.as_slice();
         let raw_value = match data.len() {
             2 => u16::from_le_bytes([data[0], data[1]]) as u32,
             3 => u32::from_le_bytes([data[0], data[1], data[2], 0]),

@@ -491,8 +491,9 @@ impl StateMachine {
             ));
         }
 
-        // Validate data length is reasonable
-        if record.data_len > 255 {
+        // Validate data length is reasonable. (The record buffer now caps at 252, so this
+        // can no longer trip; kept as a defensive bound.)
+        if record.data.len() > 255 {
             return Err(MBusError::Other(
                 "Record data length exceeds maximum".to_string(),
             ));

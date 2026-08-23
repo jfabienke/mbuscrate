@@ -91,11 +91,9 @@ fn apply_vendor_hooks(
 
     // DIF 0x0F/0x1F: manufacturer data block.
     if record.drh.dib.dif == 0x0F || record.drh.dib.dif == 0x1F {
-        if let Some(vendor_records) = ext.handle_dif_manufacturer_block(
-            mfr_id,
-            record.drh.dib.dif,
-            &record.data[..record.data_len],
-        )? {
+        if let Some(vendor_records) =
+            ext.handle_dif_manufacturer_block(mfr_id, record.drh.dib.dif, &record.data)?
+        {
             if let Some(first) = vendor_records.into_iter().next() {
                 record.unit = UnitText::from_str_truncating(&first.unit);
                 record.quantity = QuantityText::from_str_truncating(&first.quantity);
@@ -110,18 +108,15 @@ fn apply_vendor_hooks(
 
     // VIF 0x7F/0xFF: manufacturer-specific value information.
     if record.drh.vib.vif == 0x7F || record.drh.vib.vif == 0xFF {
-        if let Some((unit, exp, qty, var)) = ext.parse_vif_manufacturer_specific(
-            mfr_id,
-            record.drh.vib.vif,
-            &record.data[..record.data_len],
-        )? {
+        if let Some((unit, exp, qty, var)) =
+            ext.parse_vif_manufacturer_specific(mfr_id, record.drh.vib.vif, &record.data)?
+        {
             apply_vendor_value(record, unit, exp, qty, var);
         }
     }
 
     // Vendor-defined status bits [7:5] in the trailing data byte.
-    if record.data_len > 0 {
-        let status_byte = record.data[record.data_len - 1];
+    if let Some(&status_byte) = record.data.last() {
         if (status_byte & 0xE0) != 0 {
             if let Some(status_vars) = ext.decode_status_bits(mfr_id, status_byte)? {
                 let status_str = status_vars

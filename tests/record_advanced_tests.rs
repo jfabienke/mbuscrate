@@ -98,7 +98,7 @@ fn test_parse_variable_record_idle_filler() {
     assert_eq!(record.drh.dib.dif, 0x01);
     assert_eq!(record.drh.vib.vif, 0x13);
     assert_eq!(record.data[0], 0x42);
-    assert_eq!(record.data_len, 1);
+    assert_eq!(record.data.len(), 1);
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn test_parse_variable_record_manufacturer_specific() {
     let record = result.unwrap();
     assert_eq!(record.drh.dib.dif, MBUS_DIB_DIF_MANUFACTURER_SPECIFIC);
     assert_eq!(record.quantity, "Manufacturer specific");
-    assert_eq!(record.data_len, 4);
+    assert_eq!(record.data.len(), 4);
     assert_eq!(&record.data[..4], &[0xAA, 0xBB, 0xCC, 0xDD]);
 }
 
@@ -131,7 +131,7 @@ fn test_parse_variable_record_more_records_follow() {
     let record = result.unwrap();
     assert_eq!(record.drh.dib.dif, MBUS_DIB_DIF_MORE_RECORDS_FOLLOW);
     assert!(record.more_records_follow);
-    assert_eq!(record.data_len, 2);
+    assert_eq!(record.data.len(), 2);
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn test_parse_variable_record_variable_length() {
     assert!(result.is_ok());
     let record = result.unwrap();
     assert_eq!(record.drh.dib.dif, 0x0D);
-    assert_eq!(record.data_len, 4);
+    assert_eq!(record.data.len(), 4);
     assert_eq!(&record.data[..4], &[0x11, 0x22, 0x33, 0x44]);
 }
 
@@ -242,7 +242,8 @@ fn test_parse_variable_record_extended_variable_length() {
             assert!(result.is_ok(), "Failed for length byte 0x{length_byte:02X}");
             let record = result.unwrap();
             assert_eq!(
-                record.data_len, expected_len,
+                record.data.len(),
+                expected_len,
                 "Wrong length for byte 0x{length_byte:02X}"
             );
         }
@@ -291,7 +292,8 @@ fn test_parse_variable_record_all_dif_types() {
         let record = result.unwrap();
         assert_eq!(record.drh.dib.dif, dif);
         assert_eq!(
-            record.data_len, expected_len,
+            record.data.len(),
+            expected_len,
             "Wrong data length for DIF 0x{dif:02X}"
         );
     }

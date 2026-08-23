@@ -579,7 +579,7 @@ fn insert_records(obj: &mut serde_json::Map<String, Value>, data: &[u8], ctx: &D
 }
 
 fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Value {
-    let raw_hex = hex::encode(&rec.data[..rec.data_len]);
+    let raw_hex = hex::encode(rec.data.as_slice());
     let mut obj = json!({
         "dif": format!("0x{:02X}", rec.drh.dib.dif),
         "vif": format!("0x{:02X}", rec.drh.vib.vif),
@@ -641,7 +641,7 @@ fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Valu
         && rec.drh.vib.vif == 0xFD
         && rec.drh.vib.nvife >= 1
         && rec.drh.vib.vife[0] == 0x17
-        && rec.data_len >= 2
+        && rec.data.len() >= 2
     {
         if let Some(class) = mbus_rs::vendors::zenner::classify(device_type) {
             let raw = u16::from_le_bytes([rec.data[0], rec.data[1]]);

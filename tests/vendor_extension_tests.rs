@@ -442,8 +442,7 @@ fn test_integration_with_mbus_frame() {
         function_medium: "",
         quantity: mbus_core::payload::text::QuantityText::Static("Volume"),
         drh: Default::default(),
-        data_len: 0,
-        data: [0; 256],
+        data: Default::default(),
         more_records_follow: false,
         applied_quirks: Default::default(),
     }];
