@@ -4,25 +4,25 @@
 
 ## Overview
 
-mbuscrate is a production-ready Rust library for M-Bus (Meter-Bus) protocol support, providing comprehensive implementations for both wired (EN 13757-2/3) and wireless (EN 13757-4) communication. The project delivers ~95% feature completeness with robust async I/O and full encryption support.
+mbuscrate is a Rust library for M-Bus (Meter-Bus) protocol support, implementing both wired (EN 13757-2/3) and wireless (EN 13757-4) communication with async I/O and OMS security modes. The wired path is mature; the wireless path decodes real meter traffic (verified against live Kamstrup ELL) and is still being consolidated toward a 1.0 release.
 
 ### Goals and Scope
-mbuscrate provides a safe, performant, and extensible M-Bus implementation with production-level capabilities:
+mbuscrate provides a safe, extensible M-Bus implementation:
 
-- **Compliance** ✅ **~95% COMPLETE**: EN 13757 standards implementation with OMS v4.0.4 support
-- **Performance** ✅ **VERIFIED**: <1ms frame parsing, <2ms command latency on Raspberry Pi
-- **Portability** ✅ **PRODUCTION**: Full Raspberry Pi 4/5 support, HAL for platform expansion
-- **Security** ✅ **IMPLEMENTED**: AES-128 Modes 5/7/9 with GCM, key derivation, CRC-16
-- **Scope**: Complete serial and wireless communication with async/sync hybrid architecture
+- **Compliance**: EN 13757-2/3/4 frame/link/application layers with OMS v4.0.4 features (see [COMPLIANCE.md](COMPLIANCE.md) for what is implemented and what is not)
+- **Performance**: sync parsers behind async I/O; frame parsing is well under the I/O it precedes
+- **Portability**: Raspberry Pi 4/5 support with a HAL for platform expansion; the protocol core (`mbus-core`) is `no_std` and builds for Cortex-M
+- **Security**: AES-128 — ELL CTR, OMS Mode 5 (CBC) and Mode 9 (GCM); keys used as provisioned
+- **Scope**: serial and wireless communication with an async/sync hybrid architecture
 
 ### Key Features (Implementation Status)
 - ✅ **M-Bus Protocol**: All frame types (ACK, Short, Control, Long), multi-telegram support
-- ✅ **Wireless M-Bus**: Complete SX126x/RFM69 drivers, S/T/C modes, LBT compliance
-- ✅ **Raspberry Pi HAL**: Production-tested SPI/GPIO via rppal, cross-compilation support
-- ✅ **Async I/O**: Full tokio integration with proper timeout handling and concurrency
-- ✅ **Frame Parsing**: Robust nom-based parsers with DIF/VIFE chain support (10 extensions)
-- ✅ **Testing**: 147 tests passing, comprehensive mock infrastructure, property testing
-- ✅ **Encryption**: Complete AES-128 CTR/CBC/GCM, software CRC-16, OMS compliance
+- ✅ **Wireless M-Bus**: SX126x/RFM69 drivers, C mode receive verified on hardware (S/T framing implemented, not yet validated against live traffic), LBT
+- ✅ **Raspberry Pi HAL**: SPI/GPIO via rppal, cross-compilation support
+- ✅ **Async I/O**: tokio integration with timeout handling and concurrency
+- ✅ **Frame Parsing**: nom-based parsers with DIF/VIFE chain support (10 extensions)
+- ✅ **Testing**: unit, integration (golden frames), and fuzz targets; property tests for VIF decoding
+- ✅ **Encryption**: AES-128 — ELL CTR, OMS Mode 5 (CBC) and Mode 9 (GCM); software CRC-16
 
 ## Design Principles
 
@@ -128,11 +128,11 @@ The library uses a layered design for separation of concerns, ensuring modularit
 
 - ✅ **Transport Layer** (`src/mbus/serial.rs`, `src/wmbus/radio/`): Complete async serial with tokio, full radio driver with IRQ handling
 
-- ✅ **Crypto Layer** (`src/wmbus/crypto.rs`): Fully implemented AES-128 CTR/CBC/GCM modes, key derivation, IV construction, CRC-16
+- ✅ **Crypto Layer** (`src/wmbus/crypto.rs`, `mbus-core`): AES-128 on RustCrypto primitives — ELL CTR, OMS Mode 5 (CBC), Mode 9 (GCM); IV construction, CRC-16. Keys are used as provisioned (`KeyMode::Direct`); the legacy XOR "derivation" is deprecated as not a KDF
 
 - ✅ **Manager Layer** (`src/mbus_device_manager.rs`): Device management with scanning, secondary addressing, wildcard search, compact frame cache
 
-- ✅ **Hardware Layer** (`src/wmbus/radio/hal/`): Complete HAL implementation, production-tested Raspberry Pi support with SPI/GPIO
+- ✅ **Hardware Layer** (`src/wmbus/radio/hal/`): HAL over rppal for Raspberry Pi SPI/GPIO; C-mode receive verified on a Pi 5
 
 ## Core Components (Implementation Status)
 
@@ -597,7 +597,7 @@ This architecture design is validated by:
 1. **Performance measurements**: Sync operations are orders of magnitude faster than I/O
 2. **Industry patterns**: Network protocols typically use this hybrid approach
 3. **Rust ecosystem**: Libraries like `tokio` use sync parsers with async I/O
-4. **Practical testing**: 78%+ test coverage demonstrates testability
+4. **Practical testing**: ~67% line coverage (`cargo llvm-cov`, default features) demonstrates testability
 
 ### Alternative Architectures Considered
 
@@ -621,7 +621,7 @@ However, for typical M-Bus deployment scenarios, this hybrid architecture provid
 ## Wireless M-Bus (wM-Bus) Architecture ✅ COMPLETE
 
 ### Overview
-The wireless M-Bus implementation provides comprehensive radio support with production-tested drivers.
+The wireless M-Bus implementation provides SX126x and RFM69 radio support; C-mode receive is verified on hardware, with S/T framing implemented but not yet validated against live traffic.
 
 ### Component Status
 
@@ -738,7 +738,7 @@ The implementation follows a dual-platform strategy, starting with Raspberry Pi 
 
 **Enhancements:**
 - Add criterion benchmarks to `benches/` directory
-- Generate tarpaulin coverage reports
+- Generate coverage reports (`cargo llvm-cov`)
 - Add more hardware integration tests
 - Expand property test coverage
 
@@ -763,17 +763,17 @@ The implementation follows a dual-platform strategy, starting with Raspberry Pi 
 ### Test Infrastructure
 ```
 tests/
-├── Unit Tests          # 147 tests covering all modules
-├── Integration Tests   # Golden frames from real devices
-├── Mock Tests          # Complete mock infrastructure
-├── Property Tests      # Extensive proptest coverage
-└── Hardware Tests      # Raspberry Pi integration tests
+├── Unit Tests          # across all modules
+├── Integration Tests   # Golden frames from real devices (5 wired, 7 wireless)
+├── Mock Tests          # Mock transport/radio infrastructure
+├── Property Tests      # proptest for VIF decoding
+└── Fuzz Targets        # cargo-fuzz: frame, data-encoding, VIF, LoRaWAN, multi-telegram
 ```
 
-### Coverage Status ✅ VERIFIED
-- 147 tests passing (143 without crypto, 147 with crypto)
-- Comprehensive unit test coverage
-- Property-based testing for edge cases
+### Coverage Status
+- Suite passes with and without the `crypto` feature (both are in the CI matrix)
+- ~67% line coverage (`cargo llvm-cov`, default features, 2026-08-23)
+- Property-based testing for VIF decoding; fuzz targets for the parsers
 - Golden frame tests from manufacturers (EDC, Engelmann, Elster)
 - Mock serial port with configurable responses
 
@@ -811,24 +811,24 @@ tests/
 4. **Resource Limits**: Frame size limits enforced (255 bytes max)
 5. **Error Information**: Detailed error types with context
 
-### M-Bus Security ✅ FULLY IMPLEMENTED
-**Encryption (`src/wmbus/crypto.rs`):**
-- ✅ Mode 5: AES-128-CTR with proper IV construction
-- ✅ Mode 7: AES-128-CBC with PKCS#7 padding
-- ✅ Mode 9: AES-128-GCM with AAD and tag truncation
-- ✅ Key derivation with manufacturer ID XOR
+### M-Bus Security
+**Encryption (`src/wmbus/crypto.rs`, `mbus-core`):**
+- ✅ ELL: AES-128-CTR
+- ✅ OMS Mode 5: AES-128-CBC (Security Profile A)
+- ⬜ OMS Mode 7: not implemented
+- ✅ OMS Mode 9: AES-128-GCM with AAD and 12-byte tag truncation
+- ✅ Keys used as provisioned (`KeyMode::Direct`); a legacy XOR "derivation" remains but is deprecated and documented as not a KDF
 - ✅ Access number extraction and tracking
 - ✅ Software CRC-16 implementation (polynomial 0x1021)
 
 **Implemented Security Features:**
-- All OMS encryption modes (5/7/9)
-- Key management with derivation
+- OMS encryption Mode 5 (CBC) and Mode 9 (GCM); ELL CTR (Mode 7 not implemented)
+- Keys used as provisioned (legacy XOR derivation deprecated)
 - IV/nonce construction per standard
 - Access number synchronization
-- Secure random generation for nonces
 - Tag verification for authenticated modes
 
-Production-ready security implementation compliant with OMS v4.0.4.
+Encryption is built on the audited RustCrypto crates rather than hand-rolled primitives. Not yet validated against live Mode 5/9 meter traffic — the meters reachable from the test gateway use ELL.
 
 ## Contributing
 
