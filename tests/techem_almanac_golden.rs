@@ -65,7 +65,10 @@ fn storage_numbers_separate_current_setdate_and_prior_period() {
     let mut set_date_val = None;
     let mut prior_val = None;
     for r in &records {
-        if let MBusRecordValue::Numeric(v) = r.value {
+        // HCA consumption readings are integer-coded, so they are `Scaled` now — read the
+        // scalar via `as_f64` (small counts, no precision concern) and skip text records.
+        if !matches!(r.value, MBusRecordValue::String(_)) {
+            let v = r.value.as_f64();
             // VIF 0x6E = HCA units (the consumption reading).
             if r.drh.vib.vif & 0x7F == 0x6E {
                 match r.storage_number {

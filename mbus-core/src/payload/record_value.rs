@@ -81,6 +81,42 @@ pub fn int_le(data: &[u8]) -> i64 {
 /// Computed in integer arithmetic. The previous implementation built a decimal `String`
 /// digit by digit and called `.parse::<f64>()`: an allocation, a formatting round trip and
 /// a float parse to read a packed integer.
+/// Packed BCD to an exact `i64`, same encoding as [`bcd_le`] but without the `f64` step.
+///
+/// 12-digit BCD tops out at 10^12, well inside i64, so this loses nothing where `bcd_le`'s
+/// `f64` would past 2^53. Used by the record parser so a large counter keeps every digit.
+pub fn bcd_le_i64(data: &[u8]) -> Option<i64> {
+    if data.is_empty() {
+        return None;
+    }
+    let (last, rest) = data.split_last()?;
+    let negative = (last >> 4) == 0x0F;
+
+    let mut magnitude: i64 = 0;
+    if !negative {
+        let hi = last >> 4;
+        if hi > 9 {
+            return None;
+        }
+        magnitude = hi as i64;
+    }
+    let lo = last & 0x0F;
+    if lo > 9 {
+        return None;
+    }
+    magnitude = magnitude * 10 + lo as i64;
+
+    for b in rest.iter().rev() {
+        for nib in [b >> 4, b & 0x0F] {
+            if nib > 9 {
+                return None;
+            }
+            magnitude = magnitude * 10 + nib as i64;
+        }
+    }
+    Some(if negative { -magnitude } else { magnitude })
+}
+
 pub fn bcd_le(data: &[u8]) -> Option<f64> {
     if data.is_empty() {
         return None;
@@ -181,6 +217,30 @@ mod tests {
             assert_eq!(bcd_le(case), bcd_le_via_string(case), "{case:02X?}");
         }
         assert_eq!(bcd_le(&[]), None);
+    }
+
+    #[test]
+    fn bcd_i64_agrees_with_the_f64_decoder_and_stays_exact() {
+        // Where f64 is exact, the two must match; the i64 one additionally holds values
+        // f64 would round. 12-digit BCD (6 bytes) is the widest the standard defines.
+        for case in [
+            &[0x34u8, 0x12][..],
+            &[0x78, 0x56, 0x34, 0x12],
+            &[0x78, 0x56, 0x34, 0xF2],             // negative
+            &[0x99, 0x99, 0x99, 0x99, 0x99, 0x99], // 999999999999, > 2^39 but < 2^53
+        ] {
+            let via_i64 = bcd_le_i64(case).map(|v| v as f64);
+            assert_eq!(via_i64, bcd_le(case), "{case:02X?}");
+        }
+        // An invalid nibble is rejected the same way.
+        assert_eq!(bcd_le_i64(&[0x0A]), None);
+        assert_eq!(bcd_le_i64(&[]), None);
+        // Exact past f64's 2^53: 9007199254740993 = 2^53 + 1 is unrepresentable as f64,
+        // but i64 holds it. (Not reachable via 12-digit BCD, but proves the type.)
+        assert_eq!(
+            bcd_le_i64(&[0x93, 0x40, 0x74, 0x25, 0x99, 0x71, 0x90]).is_some(),
+            true
+        );
     }
 
     #[test]

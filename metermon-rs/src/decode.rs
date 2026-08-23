@@ -611,15 +611,19 @@ fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Valu
     // Zenner volume-history block otherwise renders as reversed mojibake. Keep the
     // quantity/unit the VIF gives us, but let raw_hex carry the bytes.
     match &rec.value {
-        MBusRecordValue::Numeric(n) => {
-            obj["value"] = json!(n);
-        }
+        // Both numeric variants serialise via as_f64. NOTE: for a >2^53 Scaled counter
+        // this loses precision the parser now preserves — a JSON number is f64 regardless.
+        // If exact billing values are ever needed downstream, emit mantissa/scale as
+        // separate fields here; that is a telemetry-format decision, not this fix's scope.
         MBusRecordValue::String(txt) => {
             if txt.bytes().all(|b| (0x20..0x7F).contains(&b)) {
                 obj["value"] = json!(txt.as_str());
             } else {
                 obj["value_opaque"] = json!(true);
             }
+        }
+        other => {
+            obj["value"] = json!(other.as_f64());
         }
     }
     // `unit`/`quantity` are `mbus_core::payload::text::Text` now, not `String`. They

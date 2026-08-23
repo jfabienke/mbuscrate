@@ -59,15 +59,15 @@ pub fn from_mbus_frame_with_split(
     let mut bad_readings = Vec::new();
 
     for record in records {
+        // Numeric and Scaled both collapse via `as_f64` (Scaled is lossy past 2^53, which
+        // this instrumentation path accepts — it feeds a display/telemetry Reading, not
+        // billing). A String tries to parse, else the record is skipped.
         let value = match &record.value {
-            MBusRecordValue::Numeric(n) => *n,
-            MBusRecordValue::String(s) => {
-                // Try to parse string as number, otherwise skip
-                match s.parse::<f64>() {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                }
-            }
+            MBusRecordValue::String(s) => match s.parse::<f64>() {
+                Ok(v) => v,
+                Err(_) => continue,
+            },
+            other => other.as_f64(),
         };
 
         let mut reading = Reading {
@@ -254,8 +254,8 @@ pub fn from_lora_metering_data_with_split(
     for reading in &data.readings {
         // Convert MBusRecordValue to f64
         let value = match &reading.value {
-            MBusRecordValue::Numeric(n) => *n,
-            MBusRecordValue::String(_) => 0.0, // Skip string values for now
+            MBusRecordValue::String(_) => 0.0, // string readings carry no scalar
+            other => other.as_f64(),
         };
 
         let reading_struct = Reading {

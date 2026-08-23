@@ -12,7 +12,7 @@
 use crate::constants::*;
 use crate::error::ProtocolError;
 use crate::payload::quirk::AppliedQuirks;
-use crate::payload::record_value::{bcd_le, dif_datalength_lookup, int_le};
+use crate::payload::record_value::{bcd_le_i64, dif_datalength_lookup, int_le};
 use crate::payload::text::{QuantityText, UnitText};
 use nom::{bytes::complete::take, number::complete::be_u8, IResult};
 
@@ -115,9 +115,31 @@ pub struct MBusValueInformationBlock {
 pub const RECORD_TEXT_CAPACITY: usize = 32;
 
 /// A record's decoded value.
+///
+/// # Why there are two numeric variants
+///
+/// Most M-Bus values are an *integer counter* scaled by a decimal factor — a raw 25555
+/// read as 25.555 m³. That integer can be 64 bits (DIF coding 0x07, or 12-digit BCD), and
+/// `f64` has only 52 bits of mantissa: folding the raw counter to `f64` *at parse time*
+/// silently corrupts any total past ~9×10¹⁵. A metering library must not do that.
+///
+/// So integer and BCD codings decode to [`Scaled`](Self::Scaled), which keeps the raw
+/// counter as an exact `i64` and the factor separately. [`Numeric`](Self::Numeric) is for
+/// values that are *genuinely* floating point — a 32-bit IEEE real on the wire, or a
+/// sensor reading from a LoRa decoder — where `f64` loses nothing that was not already
+/// lost on the wire.
+///
+/// [`as_f64`](Self::as_f64) collapses either to a convenience float for callers that want
+/// one and accept the loss; a caller billing on the value reads `mantissa`/`scale`
+/// directly and does exact arithmetic.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MBusRecordValue {
+    /// A genuinely floating-point value. Precision is whatever `f64` gives.
     Numeric(f64),
+    /// An exact scaled integer: `mantissa × scale`. `mantissa` is the raw counter read
+    /// losslessly; `scale` is the VIF's decimal factor (e.g. `1e-3`).
+    Scaled { mantissa: i64, scale: f64 },
+    /// Text, from an LVAR coding.
     String(heapless::String<RECORD_TEXT_CAPACITY>),
 }
 
@@ -131,6 +153,16 @@ impl MBusRecordValue {
             }
         }
         MBusRecordValue::String(out)
+    }
+
+    /// Collapse to `f64` for display. Lossy for a [`Scaled`](Self::Scaled) mantissa past
+    /// 2^53, and `NaN` for text — a caller that needs exactness reads the variant.
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            MBusRecordValue::Numeric(n) => *n,
+            MBusRecordValue::Scaled { mantissa, scale } => *mantissa as f64 * *scale,
+            MBusRecordValue::String(_) => f64::NAN,
+        }
     }
 }
 
@@ -455,12 +487,25 @@ fn decode_record_value(record: &mut MBusRecord) {
 
     let data = &record.data[..record.data_len];
     let coding = record.drh.dib.dif & MBUS_DATA_RECORD_DIF_MASK_DATA;
-    let raw: Option<f64> = match coding {
-        0x00 => Some(0.0),                                      // no data
-        0x01..=0x04 | 0x06 | 0x07 => Some(int_le(data) as f64), // 8/16/24/32/48/64-bit int
+
+    // Integer and BCD codings keep an EXACT i64 mantissa — folding a 64-bit counter to
+    // f64 here is the precision bug this split exists to avoid. Only the IEEE-real coding
+    // is genuinely floating point.
+    enum Raw {
+        /// Exact scaled integer: `mantissa`, to be paired with the VIF `exponent`.
+        Int(i64),
+        /// Genuinely floating point (a 32-bit real on the wire), pre-scale.
+        Real(f64),
+        /// No scalar value.
+        None,
+    }
+    let raw: Raw = match coding {
+        0x00 => Raw::Int(0),                                 // no data
+        0x01..=0x04 | 0x06 | 0x07 => Raw::Int(int_le(data)), // 8/16/24/32/48/64-bit int
         0x05 => (data.len() >= 4)
-            .then(|| f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64),
-        0x09..=0x0C | 0x0E => bcd_le(data), // 2/4/6/8/12-digit BCD
+            .then(|| f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64)
+            .map_or(Raw::None, Raw::Real),
+        0x09..=0x0C | 0x0E => bcd_le_i64(data).map_or(Raw::None, Raw::Int), // 2/4/6/8/12-digit BCD
         0x0D => {
             // Variable length (LVAR): text, kept verbatim.
             record.is_numeric = false;
@@ -478,12 +523,24 @@ fn decode_record_value(record: &mut MBusRecord) {
             record.quantity = quantity;
             return;
         }
-        _ => None, // selection for readout / special functions
+        _ => Raw::None, // selection for readout / special functions
     };
 
-    if let Some(raw) = raw {
-        record.is_numeric = true;
-        record.value = MBusRecordValue::Numeric(raw * exponent);
+    match raw {
+        Raw::Int(mantissa) => {
+            record.is_numeric = true;
+            // Exact counter, factor kept separate — nothing is lost until a caller
+            // asks for `as_f64()`.
+            record.value = MBusRecordValue::Scaled {
+                mantissa,
+                scale: exponent,
+            };
+        }
+        Raw::Real(r) => {
+            record.is_numeric = true;
+            record.value = MBusRecordValue::Numeric(r * exponent);
+        }
+        Raw::None => {}
     }
     record.unit = unit;
     record.quantity = quantity;
@@ -797,10 +854,15 @@ mod tests {
         let (rec, used) = parse_variable_record_consumed(&[0x04, 0x13, 0xD3, 0x63, 0x00, 0x00])
             .expect("record parses");
         assert_eq!(used, 6);
-        match rec.value {
-            MBusRecordValue::Numeric(v) => assert!((v - 25.555).abs() < 1e-9, "got {v}"),
-            other => panic!("expected numeric, got {other:?}"),
-        }
+        // Exact mantissa 25555, VIF 0x13 scales by 1e-3 -> 25.555 m^3.
+        assert_eq!(
+            rec.value,
+            MBusRecordValue::Scaled {
+                mantissa: 25_555,
+                scale: 1e-3
+            }
+        );
+        assert!((rec.value.as_f64() - 25.555).abs() < 1e-9);
         assert_eq!(rec.unit, "m^3");
     }
 
@@ -808,10 +870,15 @@ mod tests {
     fn decodes_8bit_integer_temperature() {
         // DIF 0x01 (8-bit int), VIF 0x5B (flow temperature, degrees C), raw 18.
         let (rec, _) = parse_variable_record_consumed(&[0x01, 0x5B, 0x12]).unwrap();
-        match rec.value {
-            MBusRecordValue::Numeric(v) => assert!((v - 18.0).abs() < 1e-9, "got {v}"),
-            other => panic!("expected numeric, got {other:?}"),
-        }
+        // An integer coding decodes to an EXACT Scaled value (mantissa 18, no VIF scale).
+        assert_eq!(
+            rec.value,
+            MBusRecordValue::Scaled {
+                mantissa: 18,
+                scale: 1.0
+            }
+        );
+        assert!((rec.value.as_f64() - 18.0).abs() < 1e-9);
     }
 
     #[test]
@@ -819,17 +886,38 @@ mod tests {
         // DIF 0x0C (8-digit BCD), VIF 0x13: 0x12345678 little-endian BCD = 12345678.
         let (rec, _) =
             parse_variable_record_consumed(&[0x0C, 0x13, 0x78, 0x56, 0x34, 0x12]).unwrap();
-        match rec.value {
-            MBusRecordValue::Numeric(v) => assert!((v - 12345.678).abs() < 1e-9, "got {v}"),
-            other => panic!("expected numeric, got {other:?}"),
-        }
-        // 0xF in the top nibble of the last byte marks a negative magnitude.
-        assert_eq!(super::bcd_le(&[0x34, 0x12]), Some(1234.0));
-        assert_eq!(super::bcd_le(&[0x34, 0xF2]), Some(-234.0));
+        // The raw BCD counter is kept exact (12345678); VIF 0x13 scales by 1e-3.
         assert_eq!(
-            super::bcd_le(&[0x3A, 0x12]),
-            None,
-            "non-BCD nibble rejected"
+            rec.value,
+            MBusRecordValue::Scaled {
+                mantissa: 12_345_678,
+                scale: 1e-3
+            }
+        );
+        assert!((rec.value.as_f64() - 12345.678).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_64bit_counter_survives_that_f64_would_have_corrupted() {
+        // The whole point of Scaled. DIF 0x07 (64-bit int), VIF 0x06 (energy, Wh).
+        // 9_007_199_254_740_993 = 2^53 + 1 is the first integer f64 cannot represent —
+        // the old `int_le(data) as f64` path would have read it back as 2^53.
+        let n: i64 = 9_007_199_254_740_993;
+        let mut frame = vec![0x07, 0x06];
+        frame.extend_from_slice(&n.to_le_bytes());
+        let (rec, _) = parse_variable_record_consumed(&frame).unwrap();
+        assert_eq!(
+            rec.value,
+            MBusRecordValue::Scaled {
+                mantissa: n,
+                scale: 1000.0
+            },
+            "the exact 64-bit counter must be preserved, not folded through f64"
+        );
+        assert_ne!(
+            rec.value.as_f64() as i64,
+            n,
+            "and as_f64 IS lossy here — which is why the exact mantissa matters"
         );
     }
 
@@ -1052,12 +1140,14 @@ mod vif_extension_tests {
         assert_eq!(used, raw.len());
         assert_eq!(rec.quantity, "Voltage");
         assert_eq!(rec.unit, "V");
-        match rec.value {
-            MBusRecordValue::Numeric(v) => {
-                // 4137 raw x 10^-3 V
-                assert!((v - 4.137).abs() < 1e-9, "got {v}");
+        // 4137 raw x 10^-3 V, kept exact.
+        assert_eq!(
+            rec.value,
+            MBusRecordValue::Scaled {
+                mantissa: 4137,
+                scale: 1e-3
             }
-            other => panic!("expected a numeric voltage, got {other:?}"),
-        }
+        );
+        assert!((rec.value.as_f64() - 4.137).abs() < 1e-9);
     }
 }

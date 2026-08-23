@@ -424,8 +424,9 @@ pub fn extract_oms_history(records: &[MBusRecord]) -> Vec<AlmanacEntry> {
             continue; // current reading, not history
         }
         let raw = match &rec.value {
-            MBusRecordValue::Numeric(v) => *v,
             MBusRecordValue::String(_) => continue, // e.g. the compact-profile LVAR block
+            // Techem history values are small dates/counters, well inside f64.
+            other => other.as_f64(),
         };
         let slot = periods.entry(rec.storage_number).or_default();
         if is_type_g_date_vif(rec.drh.vib.vif) {

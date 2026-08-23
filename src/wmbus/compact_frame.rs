@@ -259,12 +259,12 @@ mod tests {
 
         // And it parses as ordinary records, with the volume correctly scaled.
         let (rec, _) = parse_variable_record_consumed(&expanded[5..]).unwrap();
-        match rec.value {
-            crate::payload::record::MBusRecordValue::Numeric(v) => {
-                assert!((v - 25.539).abs() < 1e-9, "got {v}")
-            }
-            other => panic!("expected numeric, got {other:?}"),
-        }
+        // Integer coding -> exact Scaled; as_f64 gives the scaled reading.
+        assert!(
+            (rec.value.as_f64() - 25.539).abs() < 1e-9,
+            "got {:?}",
+            rec.value
+        );
     }
 
     /// A layout learned from one meter must never be applied to another's values: a

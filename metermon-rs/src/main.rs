@@ -1658,10 +1658,9 @@ fn run_lorawan_join(
                             "    {} = {} {}",
                             rec.quantity,
                             match &rec.value {
-                                mbus_rs::payload::record::MBusRecordValue::Numeric(n) =>
-                                    format!("{n}"),
                                 mbus_rs::payload::record::MBusRecordValue::String(s) =>
                                     s.to_string(),
+                                other => format!("{}", other.as_f64()),
                             },
                             rec.unit
                         );
