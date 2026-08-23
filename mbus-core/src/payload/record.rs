@@ -64,7 +64,9 @@ pub struct MBusRecord {
     pub drh: MBusDataRecordHeader,
     pub data_len: usize,
     pub data: [u8; 256],
-    pub more_records_follow: u8,
+    /// Set when the meter signalled that another record follows (DIF 0x1F). Consumers
+    /// keep parsing while it is true.
+    pub more_records_follow: bool,
     /// Quirks that changed this record's interpretation (vendor-layers P5). Empty for
     /// a purely standard decode; a consumer can always tell an overridden reading.
     pub applied_quirks: AppliedQuirks,
@@ -331,7 +333,7 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, ProtocolError> {
             data[..input.len()].copy_from_slice(input);
             data
         },
-        more_records_follow: 0,
+        more_records_follow: false,
         applied_quirks: AppliedQuirks::new(),
     };
 
@@ -512,7 +514,7 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
         },
         data_len: 0,
         data: [0; 256],
-        more_records_follow: 0,
+        more_records_follow: false,
         applied_quirks: AppliedQuirks::new(),
     };
 
@@ -527,7 +529,7 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
         || record.drh.dib.dif == MBUS_DIB_DIF_MORE_RECORDS_FOLLOW
     {
         if record.drh.dib.dif == MBUS_DIB_DIF_MORE_RECORDS_FOLLOW {
-            record.more_records_follow = 1;
+            record.more_records_follow = true;
         }
 
         // For manufacturer-specific or more-records-follow,
@@ -709,7 +711,7 @@ pub fn mbus_data_record_append(record: &mut MBusRecord) {
         record.quantity = QuantityText::Static("Manufacturer specific");
     }
     if record.drh.dib.dif == MBUS_DIB_DIF_MORE_RECORDS_FOLLOW {
-        record.more_records_follow = 1;
+        record.more_records_follow = true;
     }
     // Additional logic can be added here as needed
 }
@@ -1001,7 +1003,7 @@ mod tests {
             },
             data_len: 0,
             data: [0; 256],
-            more_records_follow: 0,
+            more_records_follow: false,
             applied_quirks: AppliedQuirks::new(),
         };
         mbus_data_record_append(&mut record);
@@ -1010,7 +1012,7 @@ mod tests {
         // Test more records follow
         record.drh.dib.dif = MBUS_DIB_DIF_MORE_RECORDS_FOLLOW;
         mbus_data_record_append(&mut record);
-        assert_eq!(record.more_records_follow, 1);
+        assert!(record.more_records_follow);
     }
 
     #[test]

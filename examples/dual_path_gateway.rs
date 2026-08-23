@@ -59,7 +59,7 @@ fn demo_mbus_dual_path() {
             drh: Default::default(),
             data_len: 0,
             data: [0; 256],
-            more_records_follow: 0,
+            more_records_follow: false,
             applied_quirks: Default::default(),
         },
         // Bad reading - negative energy (invalid)
@@ -75,7 +75,7 @@ fn demo_mbus_dual_path() {
             drh: Default::default(),
             data_len: 0,
             data: [0; 256],
-            more_records_follow: 0,
+            more_records_follow: false,
             applied_quirks: Default::default(),
         },
         // Good reading - valid temperature
@@ -91,7 +91,7 @@ fn demo_mbus_dual_path() {
             drh: Default::default(),
             data_len: 0,
             data: [0; 256],
-            more_records_follow: 0,
+            more_records_follow: false,
             applied_quirks: Default::default(),
         },
         // Bad reading - out of bounds temperature
@@ -107,7 +107,7 @@ fn demo_mbus_dual_path() {
             drh: Default::default(),
             data_len: 0,
             data: [0; 256],
-            more_records_follow: 0,
+            more_records_follow: false,
             applied_quirks: Default::default(),
         },
     ];

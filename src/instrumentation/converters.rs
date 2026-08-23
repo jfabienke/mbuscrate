@@ -397,7 +397,7 @@ mod tests {
             drh: Default::default(),
             data_len: 0,
             data: [0; 256],
-            more_records_follow: 0,
+            more_records_follow: false,
             applied_quirks: Default::default(),
         }];
 

@@ -130,7 +130,7 @@ fn test_parse_variable_record_more_records_follow() {
     assert!(result.is_ok());
     let record = result.unwrap();
     assert_eq!(record.drh.dib.dif, MBUS_DIB_DIF_MORE_RECORDS_FOLLOW);
-    assert_eq!(record.more_records_follow, 1);
+    assert!(record.more_records_follow);
     assert_eq!(record.data_len, 2);
 }
 
