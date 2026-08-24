@@ -32,8 +32,27 @@ jobs:
   # `JoinAdmission` import miss and the LoRa-rotation panic before they reached the Pi.
   radio-feature:
     runs-on: ubuntu-latest
+    env:
+      # cargo resolves metermon-rs's private `seeed-wm1302` git dependency (behind the
+      # optional `seeed-radio` feature) even when the feature is off, so it must be
+      # fetched with the git CLI, which honours the ~/.ssh/config written below.
+      # libgit2's built-in fetch only tried ssh-agent and failed to authenticate.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     steps:
     - uses: actions/checkout@v4
+    # Read access to the private seeed-wm1302 repo for the metermon-rs steps below. A
+    # dedicated read-only deploy key on that repo is held in the SEEED_DEPLOY_KEY secret;
+    # scoped to github.com with IdentitiesOnly so it is used only for that ssh fetch (the
+    # mbuscrate checkout above is HTTPS via GITHUB_TOKEN, unaffected).
+    - name: SSH key for the private seeed-wm1302 git dependency
+      env:
+        SEEED_DEPLOY_KEY: ${{ secrets.SEEED_DEPLOY_KEY }}
+      run: |
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SEEED_DEPLOY_KEY" > ~/.ssh/seeed_ci
+        chmod 600 ~/.ssh/seeed_ci
+        printf 'Host github.com\n  IdentityFile ~/.ssh/seeed_ci\n  IdentitiesOnly yes\n' >> ~/.ssh/config
+        ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy, rustfmt
