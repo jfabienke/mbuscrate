@@ -71,6 +71,15 @@ pub struct MBusRecord {
     pub function_medium: &'static str,
     /// Quantity name, e.g. `Volume`, possibly annotated by a vendor extension.
     pub quantity: QuantityText,
+    /// Whether the VIF chain was recognised against the standard tables. `false` means
+    /// the VIF is unknown — `unit`/`quantity` are then empty and the numeric `value`, if
+    /// any, is unscaled and carries no meaning without vendor knowledge (common inside a
+    /// manufacturer-specific block walked generically). This is the reliable signal for
+    /// "not an identified reading": consumers previously had to infer it from an empty
+    /// `quantity` string, an incidental side effect they could not verify without
+    /// reimplementing the VIF tables. The raw VIF byte remains in [`drh`](Self::drh) if
+    /// the caller wants to interpret an unknown VIF themselves.
+    pub vif_identified: bool,
     pub drh: MBusDataRecordHeader,
     /// The record's data bytes, exactly as long as the record carries — no companion
     /// length field, because the vector's own length is the length. Bounded by
@@ -148,6 +157,15 @@ pub enum MBusRecordValue {
     Scaled { mantissa: i64, scale: f64 },
     /// Text, from an LVAR coding.
     String(heapless::String<RECORD_TEXT_CAPACITY>),
+    /// The record's data did not decode to a value under its declared coding — most
+    /// commonly non-BCD bytes behind a BCD DIF, which is exactly what a manufacturer-
+    /// specific block looks like when walked generically. The record still carries a
+    /// `unit`/`quantity` (the field it *claims* to be) and its raw `data`, but there is
+    /// no scalar: a consumer must NOT read this as a reading of zero. This variant exists
+    /// because the previous behaviour left `value` at its `Numeric(0.0)` default here,
+    /// fabricating a plausible zero measurement — a silent-garbage bug found decoding a
+    /// Zenner vendor block. Exhaustive matching is deliberate so no consumer can miss it.
+    Invalid,
 }
 
 impl MBusRecordValue {
@@ -168,7 +186,7 @@ impl MBusRecordValue {
         match self {
             MBusRecordValue::Numeric(n) => *n,
             MBusRecordValue::Scaled { mantissa, scale } => *mantissa as f64 * *scale,
-            MBusRecordValue::String(_) => f64::NAN,
+            MBusRecordValue::String(_) | MBusRecordValue::Invalid => f64::NAN,
         }
     }
 }
@@ -363,6 +381,9 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, ProtocolError> {
         unit: UnitText::Owned(compose(unit1, unit2)),
         function_medium: "Fixed",
         quantity: QuantityText::Owned(compose(quantity1, quantity2)),
+        // Fixed records resolve their unit/quantity from the medium (above), so they are
+        // always identified — there is no unknown-VIF path here.
+        vif_identified: true,
         drh: MBusDataRecordHeader {
             dib: MBusDataInformationBlock {
                 dif: 0,
@@ -486,9 +507,16 @@ fn decode_record_value(record: &mut MBusRecord) {
     // `normalize_vib` returns `&'static str` straight off the const tables, so these go
     // into the record with no allocation and no copy.
     let (unit, exponent, quantity) = match crate::payload::vif::normalize_vib(&vib) {
-        Ok((u, e, q)) => (UnitText::Static(u), e, QuantityText::Static(q)),
-        // Unknown VIF: leave the raw bytes for the caller rather than inventing a unit.
-        Err(_) => (UnitText::new(), 1.0, QuantityText::new()),
+        Ok((u, e, q)) => {
+            record.vif_identified = true;
+            (UnitText::Static(u), e, QuantityText::Static(q))
+        }
+        // Unknown VIF: leave the raw bytes for the caller rather than inventing a unit,
+        // and flag it explicitly so no consumer has to infer it from the empty quantity.
+        Err(_) => {
+            record.vif_identified = false;
+            (UnitText::new(), 1.0, QuantityText::new())
+        }
     };
 
     // The vector's length IS the data length now — no separate field to slice by.
@@ -548,7 +576,14 @@ fn decode_record_value(record: &mut MBusRecord) {
             record.is_numeric = true;
             record.value = MBusRecordValue::Numeric(r * exponent);
         }
-        Raw::None => {}
+        // No decodable scalar (invalid BCD, a malformed real, or a no-data coding like
+        // selection-for-readout). The record keeps its `unit`/`quantity` and raw `data`,
+        // but the value must be explicitly Invalid — leaving it at the `Numeric(0.0)`
+        // default here fabricated a plausible zero reading (the vendor-block bug).
+        Raw::None => {
+            record.is_numeric = false;
+            record.value = MBusRecordValue::Invalid;
+        }
     }
     record.unit = unit;
     record.quantity = quantity;
@@ -570,6 +605,8 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
         unit: UnitText::new(),
         function_medium: "",
         quantity: QuantityText::new(),
+        // Placeholder: the VIF-recognition result is filled in during value decode below.
+        vif_identified: false,
         drh: MBusDataRecordHeader {
             dib: MBusDataInformationBlock {
                 dif: 0,
@@ -1115,6 +1152,7 @@ mod tests {
             unit: UnitText::new(),
             function_medium: "",
             quantity: QuantityText::new(),
+            vif_identified: false,
             drh: MBusDataRecordHeader {
                 dib: MBusDataInformationBlock {
                     dif: MBUS_DIB_DIF_MANUFACTURER_SPECIFIC,
@@ -1139,6 +1177,47 @@ mod tests {
         record.drh.dib.dif = MBUS_DIB_DIF_MORE_RECORDS_FOLLOW;
         mbus_data_record_append(&mut record);
         assert!(record.more_records_follow);
+    }
+
+    #[test]
+    fn invalid_bcd_is_not_a_fabricated_zero() {
+        // DIF 0x0C = 8-digit BCD, VIF 0x13 = volume. Valid BCD scales to an exact mantissa…
+        let good = parse_variable_record(&[0x0C, 0x13, 0x78, 0x56, 0x34, 0x12]).unwrap();
+        match good.value {
+            MBusRecordValue::Scaled { mantissa, .. } => assert_eq!(mantissa, 12_345_678),
+            other => panic!("expected Scaled, got {other:?}"),
+        }
+        assert!(good.is_numeric);
+
+        // …but non-BCD bytes (0x4C has nibble 0xC) must NOT become "Volume = 0". This is the
+        // Zenner vendor-block bug: `value` used to stay at its Numeric(0.0) default while
+        // unit/quantity were populated, fabricating a plausible zero measurement.
+        let bad = parse_variable_record(&[0x0C, 0x13, 0x4c, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(bad.value, MBusRecordValue::Invalid);
+        assert!(!bad.is_numeric);
+        assert_ne!(bad.value, MBusRecordValue::Numeric(0.0));
+        // The field is still identified — it *claimed* to be a volume.
+        assert_eq!(&*bad.quantity, "Volume");
+
+        // All-0xFF is invalid BCD too (every nibble > 9).
+        let ffff = parse_variable_record(&[0x0C, 0x13, 0xff, 0xff, 0xff, 0xff]).unwrap();
+        assert_eq!(ffff.value, MBusRecordValue::Invalid);
+    }
+
+    #[test]
+    fn vif_identified_flags_unknown_vif() {
+        // A standard VIF (0x13 = volume) is identified.
+        let known = parse_variable_record(&[0x0C, 0x13, 0x78, 0x56, 0x34, 0x12]).unwrap();
+        assert!(known.vif_identified);
+        assert_eq!(&*known.quantity, "Volume");
+
+        // An unrecognised VIF chain (the Zenner vendor field: VIF 0xE7 + two VIFEs) is
+        // flagged explicitly, so a consumer need not infer "unknown" from an empty
+        // quantity string it cannot verify without reimplementing the VIF tables.
+        let unknown =
+            parse_variable_record(&[0x04, 0xe7, 0xc6, 0x40, 0x11, 0x22, 0x33, 0x44]).unwrap();
+        assert!(!unknown.vif_identified);
+        assert!(unknown.quantity.is_empty());
     }
 
     #[test]

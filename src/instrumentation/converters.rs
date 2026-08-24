@@ -390,6 +390,7 @@ mod tests {
             unit: mbus_core::payload::text::UnitText::Static("m³"),
             function_medium: "",
             quantity: mbus_core::payload::text::QuantityText::Static("Volume"),
+            vif_identified: true,
             drh: Default::default(),
             data: Default::default(),
             more_records_follow: false,

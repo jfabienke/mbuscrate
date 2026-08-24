@@ -622,6 +622,13 @@ fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Valu
                 obj["value_opaque"] = json!(true);
             }
         }
+        // The record's bytes did not decode under its declared coding (e.g. non-BCD data
+        // behind a BCD DIF — a vendor block walked generically). Emit NO numeric value:
+        // reporting `0` here fabricated a plausible reading. Keep unit/quantity so the
+        // field is still identified, and flag it so downstream never treats it as data.
+        MBusRecordValue::Invalid => {
+            obj["value_invalid"] = json!(true);
+        }
         other => {
             obj["value"] = json!(other.as_f64());
         }
@@ -632,6 +639,13 @@ fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Valu
     // almost nothing to depend on.
     obj["unit"] = json!(rec.unit.as_str());
     obj["quantity"] = json!(rec.quantity.as_str());
+
+    // An unrecognised VIF: unit/quantity above are empty and any numeric value is
+    // unscaled vendor bytes with no meaning. Flag it explicitly so a consumer never
+    // reads it as an identified measurement (the empty quantity alone is incidental).
+    if !rec.vif_identified {
+        obj["identified"] = json!(false);
+    }
 
     // Zenner error-flags bit-decode. The field is a standard VIF 0xFD 0x17 record,
     // but its bit meanings are vendor- and device-class-specific — so this is gated
