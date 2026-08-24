@@ -640,6 +640,13 @@ fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Valu
     obj["unit"] = json!(rec.unit.as_str());
     obj["quantity"] = json!(rec.quantity.as_str());
 
+    // An unrecognised VIF: unit/quantity above are empty and any numeric value is
+    // unscaled vendor bytes with no meaning. Flag it explicitly so a consumer never
+    // reads it as an identified measurement (the empty quantity alone is incidental).
+    if !rec.vif_identified {
+        obj["identified"] = json!(false);
+    }
+
     // Zenner error-flags bit-decode. The field is a standard VIF 0xFD 0x17 record,
     // but its bit meanings are vendor- and device-class-specific — so this is gated
     // on both manufacturer and a confident class match, and a class we cannot pin

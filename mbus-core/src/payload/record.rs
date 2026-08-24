@@ -71,6 +71,15 @@ pub struct MBusRecord {
     pub function_medium: &'static str,
     /// Quantity name, e.g. `Volume`, possibly annotated by a vendor extension.
     pub quantity: QuantityText,
+    /// Whether the VIF chain was recognised against the standard tables. `false` means
+    /// the VIF is unknown — `unit`/`quantity` are then empty and the numeric `value`, if
+    /// any, is unscaled and carries no meaning without vendor knowledge (common inside a
+    /// manufacturer-specific block walked generically). This is the reliable signal for
+    /// "not an identified reading": consumers previously had to infer it from an empty
+    /// `quantity` string, an incidental side effect they could not verify without
+    /// reimplementing the VIF tables. The raw VIF byte remains in [`drh`](Self::drh) if
+    /// the caller wants to interpret an unknown VIF themselves.
+    pub vif_identified: bool,
     pub drh: MBusDataRecordHeader,
     /// The record's data bytes, exactly as long as the record carries — no companion
     /// length field, because the vector's own length is the length. Bounded by
@@ -372,6 +381,9 @@ pub fn parse_fixed_record(input: &[u8]) -> Result<MBusRecord, ProtocolError> {
         unit: UnitText::Owned(compose(unit1, unit2)),
         function_medium: "Fixed",
         quantity: QuantityText::Owned(compose(quantity1, quantity2)),
+        // Fixed records resolve their unit/quantity from the medium (above), so they are
+        // always identified — there is no unknown-VIF path here.
+        vif_identified: true,
         drh: MBusDataRecordHeader {
             dib: MBusDataInformationBlock {
                 dif: 0,
@@ -495,9 +507,16 @@ fn decode_record_value(record: &mut MBusRecord) {
     // `normalize_vib` returns `&'static str` straight off the const tables, so these go
     // into the record with no allocation and no copy.
     let (unit, exponent, quantity) = match crate::payload::vif::normalize_vib(&vib) {
-        Ok((u, e, q)) => (UnitText::Static(u), e, QuantityText::Static(q)),
-        // Unknown VIF: leave the raw bytes for the caller rather than inventing a unit.
-        Err(_) => (UnitText::new(), 1.0, QuantityText::new()),
+        Ok((u, e, q)) => {
+            record.vif_identified = true;
+            (UnitText::Static(u), e, QuantityText::Static(q))
+        }
+        // Unknown VIF: leave the raw bytes for the caller rather than inventing a unit,
+        // and flag it explicitly so no consumer has to infer it from the empty quantity.
+        Err(_) => {
+            record.vif_identified = false;
+            (UnitText::new(), 1.0, QuantityText::new())
+        }
     };
 
     // The vector's length IS the data length now — no separate field to slice by.
@@ -586,6 +605,8 @@ fn parse_variable_record_inner(input: &[u8]) -> IResult<&[u8], MBusRecord> {
         unit: UnitText::new(),
         function_medium: "",
         quantity: QuantityText::new(),
+        // Placeholder: the VIF-recognition result is filled in during value decode below.
+        vif_identified: false,
         drh: MBusDataRecordHeader {
             dib: MBusDataInformationBlock {
                 dif: 0,
@@ -1131,6 +1152,7 @@ mod tests {
             unit: UnitText::new(),
             function_medium: "",
             quantity: QuantityText::new(),
+            vif_identified: false,
             drh: MBusDataRecordHeader {
                 dib: MBusDataInformationBlock {
                     dif: MBUS_DIB_DIF_MANUFACTURER_SPECIFIC,
@@ -1180,6 +1202,22 @@ mod tests {
         // All-0xFF is invalid BCD too (every nibble > 9).
         let ffff = parse_variable_record(&[0x0C, 0x13, 0xff, 0xff, 0xff, 0xff]).unwrap();
         assert_eq!(ffff.value, MBusRecordValue::Invalid);
+    }
+
+    #[test]
+    fn vif_identified_flags_unknown_vif() {
+        // A standard VIF (0x13 = volume) is identified.
+        let known = parse_variable_record(&[0x0C, 0x13, 0x78, 0x56, 0x34, 0x12]).unwrap();
+        assert!(known.vif_identified);
+        assert_eq!(&*known.quantity, "Volume");
+
+        // An unrecognised VIF chain (the Zenner vendor field: VIF 0xE7 + two VIFEs) is
+        // flagged explicitly, so a consumer need not infer "unknown" from an empty
+        // quantity string it cannot verify without reimplementing the VIF tables.
+        let unknown =
+            parse_variable_record(&[0x04, 0xe7, 0xc6, 0x40, 0x11, 0x22, 0x33, 0x44]).unwrap();
+        assert!(!unknown.vif_identified);
+        assert!(unknown.quantity.is_empty());
     }
 
     #[test]
