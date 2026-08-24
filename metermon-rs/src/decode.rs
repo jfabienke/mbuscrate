@@ -622,6 +622,13 @@ fn record_to_json(rec: &MBusRecord, manufacturer: &str, device_type: u8) -> Valu
                 obj["value_opaque"] = json!(true);
             }
         }
+        // The record's bytes did not decode under its declared coding (e.g. non-BCD data
+        // behind a BCD DIF — a vendor block walked generically). Emit NO numeric value:
+        // reporting `0` here fabricated a plausible reading. Keep unit/quantity so the
+        // field is still identified, and flag it so downstream never treats it as data.
+        MBusRecordValue::Invalid => {
+            obj["value_invalid"] = json!(true);
+        }
         other => {
             obj["value"] = json!(other.as_f64());
         }

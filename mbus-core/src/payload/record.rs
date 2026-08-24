@@ -148,6 +148,15 @@ pub enum MBusRecordValue {
     Scaled { mantissa: i64, scale: f64 },
     /// Text, from an LVAR coding.
     String(heapless::String<RECORD_TEXT_CAPACITY>),
+    /// The record's data did not decode to a value under its declared coding — most
+    /// commonly non-BCD bytes behind a BCD DIF, which is exactly what a manufacturer-
+    /// specific block looks like when walked generically. The record still carries a
+    /// `unit`/`quantity` (the field it *claims* to be) and its raw `data`, but there is
+    /// no scalar: a consumer must NOT read this as a reading of zero. This variant exists
+    /// because the previous behaviour left `value` at its `Numeric(0.0)` default here,
+    /// fabricating a plausible zero measurement — a silent-garbage bug found decoding a
+    /// Zenner vendor block. Exhaustive matching is deliberate so no consumer can miss it.
+    Invalid,
 }
 
 impl MBusRecordValue {
@@ -168,7 +177,7 @@ impl MBusRecordValue {
         match self {
             MBusRecordValue::Numeric(n) => *n,
             MBusRecordValue::Scaled { mantissa, scale } => *mantissa as f64 * *scale,
-            MBusRecordValue::String(_) => f64::NAN,
+            MBusRecordValue::String(_) | MBusRecordValue::Invalid => f64::NAN,
         }
     }
 }
@@ -548,7 +557,14 @@ fn decode_record_value(record: &mut MBusRecord) {
             record.is_numeric = true;
             record.value = MBusRecordValue::Numeric(r * exponent);
         }
-        Raw::None => {}
+        // No decodable scalar (invalid BCD, a malformed real, or a no-data coding like
+        // selection-for-readout). The record keeps its `unit`/`quantity` and raw `data`,
+        // but the value must be explicitly Invalid — leaving it at the `Numeric(0.0)`
+        // default here fabricated a plausible zero reading (the vendor-block bug).
+        Raw::None => {
+            record.is_numeric = false;
+            record.value = MBusRecordValue::Invalid;
+        }
     }
     record.unit = unit;
     record.quantity = quantity;
@@ -1139,6 +1155,31 @@ mod tests {
         record.drh.dib.dif = MBUS_DIB_DIF_MORE_RECORDS_FOLLOW;
         mbus_data_record_append(&mut record);
         assert!(record.more_records_follow);
+    }
+
+    #[test]
+    fn invalid_bcd_is_not_a_fabricated_zero() {
+        // DIF 0x0C = 8-digit BCD, VIF 0x13 = volume. Valid BCD scales to an exact mantissa…
+        let good = parse_variable_record(&[0x0C, 0x13, 0x78, 0x56, 0x34, 0x12]).unwrap();
+        match good.value {
+            MBusRecordValue::Scaled { mantissa, .. } => assert_eq!(mantissa, 12_345_678),
+            other => panic!("expected Scaled, got {other:?}"),
+        }
+        assert!(good.is_numeric);
+
+        // …but non-BCD bytes (0x4C has nibble 0xC) must NOT become "Volume = 0". This is the
+        // Zenner vendor-block bug: `value` used to stay at its Numeric(0.0) default while
+        // unit/quantity were populated, fabricating a plausible zero measurement.
+        let bad = parse_variable_record(&[0x0C, 0x13, 0x4c, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(bad.value, MBusRecordValue::Invalid);
+        assert!(!bad.is_numeric);
+        assert_ne!(bad.value, MBusRecordValue::Numeric(0.0));
+        // The field is still identified — it *claimed* to be a volume.
+        assert_eq!(&*bad.quantity, "Volume");
+
+        // All-0xFF is invalid BCD too (every nibble > 9).
+        let ffff = parse_variable_record(&[0x0C, 0x13, 0xff, 0xff, 0xff, 0xff]).unwrap();
+        assert_eq!(ffff.value, MBusRecordValue::Invalid);
     }
 
     #[test]
