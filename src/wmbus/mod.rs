@@ -23,6 +23,7 @@ pub mod network;
 pub mod oms;
 pub mod radio;
 pub mod status;
+pub mod tpl;
 pub mod weak_key_audit;
 
 pub use radio::{
@@ -58,3 +59,4 @@ pub use mode_switching::{ModeNegotiator, ModeSwitcher, SwitchingStats, WMBusMode
 pub use network::WMBusNetwork;
 #[cfg(feature = "crypto")]
 pub use oms::{decrypt_mode5_cbc, decrypted_ok, mode5_cbc_iv, Mode5Error};
+pub use tpl::{parse_tpl_header, TplError, TplHeader};
