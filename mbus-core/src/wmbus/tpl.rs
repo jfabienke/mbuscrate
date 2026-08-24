@@ -56,6 +56,15 @@ impl TplHeader {
     /// Offset at which cleartext **data records** begin, or `None` when the frame is
     /// encrypted (the records then live in the decrypted plaintext, not in the frame).
     /// This is the offset consumers most often get wrong; return it explicitly.
+    ///
+    /// **Locating records is not the same as their being a plain DIF/VIF walk.** An OMS
+    /// *compact* frame (format B) carries, at this offset, a 2-byte format signature and
+    /// records encoded against a layout sent in a separate full frame — handing this
+    /// offset straight to a DIF/VIF record parser yields *plausible* garbage, the very
+    /// failure class this module fights. [`parse_tpl_header`] cannot detect compact
+    /// framing (that needs frame content beyond the CI, which the crate's own
+    /// `frame::parse_compact_frame` path decides), so a records consumer must rule it out
+    /// upstream before parsing here.
     pub fn records_offset(&self) -> Option<usize> {
         (!self.is_encrypted()).then_some(self.header_len)
     }
@@ -109,6 +118,12 @@ fn decode_config_field(cf: u16) -> (u8, u8) {
 /// (short header: ACC, STATUS, CF), `0x72`/`0x73` (long header: 8-byte TPL address, then
 /// ACC, STATUS, CF). Compact-frame (`0x79`/`0x69`) and other CIs return
 /// [`TplError::NotTpl`] — they are a different shape, not a TPL header.
+///
+/// `0x74`–`0x77` are deliberately **not** accepted. `frame::is_application_ci` groups them
+/// with the long-header CIs for full-vs-compact *routing*, but that is not an
+/// authoritative header-length spec, and a confident source for their TPL layout is
+/// lacking — so this returns `NotTpl` rather than emit an offset that might be wrong. If a
+/// real frame or a spec citation surfaces, add them explicitly.
 pub fn parse_tpl_header(payload: &[u8]) -> Result<TplHeader, TplError> {
     let &ci = payload.first().ok_or(TplError::Empty)?;
 
