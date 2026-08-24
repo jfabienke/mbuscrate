@@ -431,16 +431,37 @@ impl Sx1262Source {
 pub enum RadioSource {
     Rfm69(Rfm69Source),
     Sx1262(Box<Sx1262Source>),
+    /// The seeed-wm1302 driver backend (Waveshare SX1262 or WM-1302 HAT). Opt-in via
+    /// `driver = "seeed"`; the legacy `Sx1262` backend stays available as rollback.
+    #[cfg(feature = "seeed-radio")]
+    SeeedSx1262(Box<crate::source_seeed::SeeedSx1262Source>),
 }
 
 #[cfg(feature = "radio")]
 impl RadioSource {
     /// Open the radio named by `driver` ("sx1262" when absent — the installed HAT).
-    pub async fn open(driver: Option<&str>, spidev: &str) -> Result<Self> {
+    /// `board`/`region` select the seeed HAT profile (ignored by other drivers).
+    pub async fn open(
+        driver: Option<&str>,
+        spidev: &str,
+        board: Option<&str>,
+        region: Option<&str>,
+    ) -> Result<Self> {
+        // `board`/`region` are consumed only by the seeed backend; keep the other builds quiet.
+        #[cfg(not(feature = "seeed-radio"))]
+        let _ = (board, region);
         match driver.unwrap_or("sx1262") {
             "sx1262" => Ok(Self::Sx1262(Box::new(Sx1262Source::open(spidev).await?))),
             "rfm69" => Ok(Self::Rfm69(Rfm69Source::open(spidev).await?)),
-            other => anyhow::bail!("unknown radio driver {other:?} (want sx1262 or rfm69)"),
+            #[cfg(feature = "seeed-radio")]
+            "seeed" => Ok(Self::SeeedSx1262(Box::new(
+                crate::source_seeed::SeeedSx1262Source::open(spidev, board, region).await?,
+            ))),
+            #[cfg(not(feature = "seeed-radio"))]
+            "seeed" => anyhow::bail!(
+                "driver \"seeed\" requires building metermon-rs with --features seeed-radio"
+            ),
+            other => anyhow::bail!("unknown radio driver {other:?} (want sx1262, seeed, or rfm69)"),
         }
     }
 
@@ -448,6 +469,8 @@ impl RadioSource {
         match self {
             Self::Rfm69(r) => r.start().await,
             Self::Sx1262(r) => r.start().await,
+            #[cfg(feature = "seeed-radio")]
+            Self::SeeedSx1262(r) => r.start().await,
         }
     }
 
@@ -455,6 +478,8 @@ impl RadioSource {
         match self {
             Self::Rfm69(r) => r.poll().await,
             Self::Sx1262(r) => r.poll().await,
+            #[cfg(feature = "seeed-radio")]
+            Self::SeeedSx1262(r) => r.poll().await,
         }
     }
 
@@ -463,6 +488,8 @@ impl RadioSource {
     pub fn set_lora_listen(&mut self, cfg: Option<crate::config::LoraListenConfig>) {
         match self {
             Self::Sx1262(r) => r.set_lora_listen(cfg),
+            #[cfg(feature = "seeed-radio")]
+            Self::SeeedSx1262(r) => r.set_lora_listen(cfg),
             Self::Rfm69(_) => {
                 if cfg.is_some() {
                     log::warn!("lora-listen configured but the RFM69 has no LoRa modem; ignoring");
@@ -475,6 +502,8 @@ impl RadioSource {
         match self {
             Self::Rfm69(r) => r.mode(),
             Self::Sx1262(r) => r.mode(),
+            #[cfg(feature = "seeed-radio")]
+            Self::SeeedSx1262(r) => r.mode(),
         }
     }
 
@@ -482,6 +511,8 @@ impl RadioSource {
         match self {
             Self::Rfm69(r) => r.opmode().await,
             Self::Sx1262(r) => r.opmode().await,
+            #[cfg(feature = "seeed-radio")]
+            Self::SeeedSx1262(r) => r.opmode().await,
         }
     }
 
@@ -492,6 +523,16 @@ impl RadioSource {
         match self {
             Self::Rfm69(_) => crate::health::RadioState::from_opmode(raw),
             Self::Sx1262(_) => crate::health::RadioState::from_sx126x_status(raw),
+            // The seeed backend's `opmode()` is a coarse liveness code, not a chip
+            // register: HEALTH_RX -> Rx, anything else -> Unknown (watchdog acts).
+            #[cfg(feature = "seeed-radio")]
+            Self::SeeedSx1262(_) => {
+                if raw == crate::source_seeed::HEALTH_RX {
+                    crate::health::RadioState::Rx
+                } else {
+                    crate::health::RadioState::Unknown
+                }
+            }
         }
     }
 
@@ -499,6 +540,8 @@ impl RadioSource {
         match self {
             Self::Rfm69(r) => r.recover().await,
             Self::Sx1262(r) => r.recover().await,
+            #[cfg(feature = "seeed-radio")]
+            Self::SeeedSx1262(r) => r.recover().await,
         }
     }
 
@@ -506,6 +549,8 @@ impl RadioSource {
         match self {
             Self::Rfm69(r) => r.stop().await,
             Self::Sx1262(r) => r.stop().await,
+            #[cfg(feature = "seeed-radio")]
+            Self::SeeedSx1262(r) => r.stop().await,
         }
     }
 }

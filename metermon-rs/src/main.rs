@@ -35,6 +35,8 @@ mod profiles;
 mod publish;
 mod radio_manager;
 mod source;
+#[cfg(feature = "seeed-radio")]
+mod source_seeed;
 mod sweep;
 #[cfg(feature = "radio")]
 mod sx1262_probe;
@@ -952,11 +954,13 @@ fn run_monitor(
         .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
         .and_then(|d| d.spidev.clone())
         .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
-    let radio_driver = cfg
+    let wmbus_dev = cfg
         .devices
         .values()
-        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
-        .and_then(|d| d.driver.clone());
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"));
+    let radio_driver = wmbus_dev.and_then(|d| d.driver.clone());
+    let board = wmbus_dev.and_then(|d| d.board.clone());
+    let region = wmbus_dev.and_then(|d| d.region.clone());
     let lora_listen = cfg
         .devices
         .values()
@@ -1198,7 +1202,8 @@ fn run_monitor(
             });
         }
 
-        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
+        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev, board.as_deref(), region.as_deref())
+                    .await?;
         radio.set_lora_listen(lora_listen.clone());
         radio.start().await?;
         if let Some(l) = &lora_listen {
@@ -1501,7 +1506,8 @@ fn run_monitor(
                     Err(e) => log::warn!("airwave sweep failed: {e}"),
                 }
                 // Always restore C reception.
-                radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
+                radio = source::RadioSource::open(radio_driver.as_deref(), &spidev, board.as_deref(), region.as_deref())
+                    .await?;
                 radio.set_lora_listen(lora_listen.clone());
                 radio.start().await?;
                 last_sweep = Instant::now();
@@ -2275,6 +2281,8 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
         .clone()
         .ok_or_else(|| anyhow::anyhow!("WMBUS device has no spidev"))?;
     let radio_driver = device.driver.clone();
+    let board = device.board.clone();
+    let region = device.region.clone();
     let lora_listen = device.lora_listen.clone();
 
     let shadow_topic = shadow.then(|| format!("{}-rust", cfg.mqtt.data_topic));
@@ -2287,7 +2295,13 @@ fn run_live(config_path: &str, shadow: bool) -> Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
+        let mut radio = source::RadioSource::open(
+            radio_driver.as_deref(),
+            &spidev,
+            board.as_deref(),
+            region.as_deref(),
+        )
+        .await?;
         radio.set_lora_listen(lora_listen.clone());
         let mut pub_ = publish::Publisher::connect(&cfg.mqtt, shadow_topic.as_deref(), None)?;
 
@@ -2362,11 +2376,13 @@ fn run_capture(
         .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
         .and_then(|d| d.spidev.clone())
         .ok_or_else(|| anyhow::anyhow!("no WMBUS device with a spidev in config"))?;
-    let radio_driver = cfg
+    let wmbus_dev = cfg
         .devices
         .values()
-        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"))
-        .and_then(|d| d.driver.clone());
+        .find(|d| d.dev_type.eq_ignore_ascii_case("WMBUS"));
+    let radio_driver = wmbus_dev.and_then(|d| d.driver.clone());
+    let board = wmbus_dev.and_then(|d| d.board.clone());
+    let region = wmbus_dev.and_then(|d| d.region.clone());
 
     // Hard watchdog. The per-poll `timeout` below cannot cancel a radio SPI
     // transaction that has blocked its runtime thread in-kernel (a `D`-state
@@ -2400,7 +2416,13 @@ fn run_capture(
     let result = rt.block_on(async move {
         use capture_dedup::{DupGuard, DupVerdict};
 
-        let mut radio = source::RadioSource::open(radio_driver.as_deref(), &spidev).await?;
+        let mut radio = source::RadioSource::open(
+            radio_driver.as_deref(),
+            &spidev,
+            board.as_deref(),
+            region.as_deref(),
+        )
+        .await?;
         radio.start().await?;
         let mut file = std::fs::File::create(out)?;
         writeln!(
