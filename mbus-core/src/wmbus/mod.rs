@@ -24,3 +24,4 @@ pub mod gcm;
 pub mod mode_c;
 #[cfg(feature = "crypto")]
 pub mod oms;
+pub mod tpl;
