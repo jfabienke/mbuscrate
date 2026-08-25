@@ -206,6 +206,11 @@ impl RecordingHal {
         self.inner.lock().unwrap().commands.clone()
     }
 
+    /// Snapshot of the recorded `(register_addr, data)` write stream, in order.
+    pub fn reg_writes(&self) -> Vec<(u16, Vec<u8>)> {
+        self.inner.lock().unwrap().reg_writes.clone()
+    }
+
     /// Index of the first recorded write of `opcode`, if any.
     pub fn first_cmd(&self, opcode: u8) -> Option<usize> {
         self.inner
