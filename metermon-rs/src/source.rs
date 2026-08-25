@@ -553,6 +553,17 @@ impl RadioSource {
             Self::SeeedSx1262(r) => r.stop().await,
         }
     }
+
+    /// Diagnostic: the next rejected detection, if this backend surfaces them. Only the
+    /// seeed backend does (via its `drain_rejects` channel); others return `None`. Used by
+    /// the capture path to split "never-detected" from "detected-but-rejected" in the A/B.
+    #[cfg(feature = "seeed-radio")]
+    pub fn try_recv_reject(&mut self) -> Option<crate::source_seeed::WmbusReject> {
+        match self {
+            Self::SeeedSx1262(r) => r.try_recv_reject(),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

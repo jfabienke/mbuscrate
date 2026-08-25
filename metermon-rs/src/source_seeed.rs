@@ -63,12 +63,28 @@ fn board_wiring(
     }
 }
 
+/// A detection the seeed assembler rejected (bad CRC / decode / truncation), surfaced for
+/// A/B mechanism diagnosis. "never-detected" vs "detected-but-rejected" is only separable
+/// when the rejects are captured alongside the accepted frames — the accepted-frame stream
+/// alone cannot show it. Diagnostic only; not part of the normal decode path.
+#[derive(Debug, Clone)]
+pub struct WmbusReject {
+    /// The leading bytes the driver kept for the rejected detection.
+    pub head: Vec<u8>,
+    pub rssi_dbm: i16,
+    pub reason: String,
+    pub len: usize,
+}
+
 /// Live SX1262 wM-Bus source over the seeed driver, board-selectable.
 pub struct SeeedSx1262Source {
     board: Option<String>,
     spi_hz: u32,
     lora: Option<crate::config::LoraListenConfig>,
     frames: Option<mpsc::Receiver<SourceFrame>>,
+    /// Rejected detections from the radio task, for the A/B mechanism split. Drained by
+    /// the capture path when present; other consumers ignore it.
+    rejects: Option<mpsc::Receiver<WmbusReject>>,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     health: Arc<AtomicU8>,
@@ -93,6 +109,7 @@ impl SeeedSx1262Source {
             spi_hz: Self::DEFAULT_SPI_HZ,
             lora: None,
             frames: None,
+            rejects: None,
             shutdown: None,
             task: None,
             health: Arc::new(AtomicU8::new(HEALTH_UNKNOWN)),
@@ -123,108 +140,149 @@ impl SeeedSx1262Source {
             .unwrap_or_else(|| "waveshare-sx1262-pi5".into());
         let health = self.health.clone();
         let (frame_tx, frame_rx) = mpsc::channel::<SourceFrame>(256);
+        let (reject_tx, reject_rx) = mpsc::channel::<WmbusReject>(256);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
-        let task =
-            tokio::spawn(async move {
-                let fail = |what: &str| {
-                    health.store(HEALTH_ERROR, Ordering::Relaxed);
-                    log::error!("seeed SX1262 {what} failed; radio task exiting");
-                };
+        let task = tokio::spawn(async move {
+            let fail = |what: &str| {
+                health.store(HEALTH_ERROR, Ordering::Relaxed);
+                log::error!("seeed SX1262 {what} failed; radio task exiting");
+            };
 
-                let (spi, busy, irq, reset, delay, clock) =
-                    match radio_linux::rpi::sx1262_parts(&wiring, &board, spi_hz) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            log::error!("seeed sx1262_parts: {e}");
-                            return fail("bus open");
-                        }
-                    };
-                let radio =
-                    match Sx1262::new(spi, busy, irq, reset, delay, clock, &board, Hertz(freq_hz))
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(e) => {
-                            log::error!("seeed Sx1262::new: {e:?}");
-                            return fail("init");
-                        }
-                    };
-                // TXEN/RF-switch: Some on Waveshare (inverted polarity from the board profile),
-                // None on WM-1302. Missing it on the Waveshare leaves the LNA disconnected.
-                let sw = match radio_linux::rpi::sx1262_rf_switch(&wiring, &board) {
-                    Ok(s) => s,
+            let (spi, busy, irq, reset, delay, clock) =
+                match radio_linux::rpi::sx1262_parts(&wiring, &board, spi_hz) {
+                    Ok(p) => p,
                     Err(e) => {
-                        log::error!("seeed rf_switch: {e}");
-                        return fail("rf switch");
+                        log::error!("seeed sx1262_parts: {e}");
+                        return fail("bus open");
                     }
                 };
-                let mut radio = radio.with_rf_switch(sw);
-                if let Err(e) = radio.configure(&wmbus_link::config::mode_tc()).await {
-                    log::error!("seeed configure mode T/C: {e:?}");
-                    return fail("configure");
+            let radio = match Sx1262::new(
+                spi,
+                busy,
+                irq,
+                reset,
+                delay,
+                clock,
+                &board,
+                Hertz(freq_hz),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::error!("seeed Sx1262::new: {e:?}");
+                    return fail("init");
                 }
-                if let Err(e) = radio.start_rx().await {
-                    log::error!("seeed start_rx: {e:?}");
-                    return fail("start_rx");
+            };
+            // TXEN/RF-switch: Some on Waveshare (inverted polarity from the board profile),
+            // None on WM-1302. Missing it on the Waveshare leaves the LNA disconnected.
+            let sw = match radio_linux::rpi::sx1262_rf_switch(&wiring, &board) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("seeed rf_switch: {e}");
+                    return fail("rf switch");
                 }
-                health.store(HEALTH_RX, Ordering::Relaxed);
-                log::info!("seeed SX1262 wM-Bus RX armed (board={board_label})");
+            };
+            let mut radio = radio.with_rf_switch(sw);
+            if let Err(e) = radio.configure(&wmbus_link::config::mode_tc()).await {
+                log::error!("seeed configure mode T/C: {e:?}");
+                return fail("configure");
+            }
+            if let Err(e) = radio.start_rx().await {
+                log::error!("seeed start_rx: {e:?}");
+                return fail("start_rx");
+            }
+            health.store(HEALTH_RX, Ordering::Relaxed);
+            log::info!("seeed SX1262 wM-Bus RX armed (board={board_label})");
 
-                let mut asm = ModeTC::new();
-                let mut buf = [0u8; wmbus_link::MAX_FRAME];
-                loop {
-                    tokio::select! {
-                        biased;
-                        // Shutdown only drops receive() when we are tearing down anyway.
-                        _ = &mut shutdown_rx => break,
-                        r = radio.receive(&mut asm, &mut buf) => match r {
-                            Ok(f) => {
-                                health.store(HEALTH_RX, Ordering::Relaxed);
-                                // Marker-first raw (seeed review): drop the leading 0x54 signalling
-                                // byte, keep block CRCs — the 2026-08-21 A/B-validated form into
-                                // mbus-core decode_frame. freq_off_hz is None: no GFSK FEI on SX126x.
-                                let end = f.len;
-                                let bytes = buf[1.min(end)..end].to_vec();
-                                let sf = SourceFrame::Wmbus {
-                                    bytes,
-                                    rssi_dbm: f.rssi.0 as i16,
-                                    freq_off_hz: None,
-                                };
-                                if frame_tx.send(sf).await.is_err() {
-                                    break; // consumer gone
-                                }
+            let mut asm = ModeTC::new();
+            let mut buf = [0u8; wmbus_link::MAX_FRAME];
+            // A/B turnaround instrumentation: the non-receiving time per accepted frame
+            // (build + mpsc send). A large value means the consumer/mpsc hop is stalling
+            // and could drop frames in the busy band — ruling my adapter in or out as the
+            // −100 deficit's cause versus the driver's readout path.
+            let mut frames_ok = 0u64;
+            let mut max_send_us = 0u128;
+            let mut send_stalls = 0u64; // turnarounds over 5 ms
+            loop {
+                tokio::select! {
+                    biased;
+                    // Shutdown only drops receive() when we are tearing down anyway.
+                    _ = &mut shutdown_rx => break,
+                    r = radio.receive(&mut asm, &mut buf) => match r {
+                        Ok(f) => {
+                            health.store(HEALTH_RX, Ordering::Relaxed);
+                            // Marker-first raw (seeed review): drop the leading 0x54 signalling
+                            // byte, keep block CRCs — the 2026-08-21 A/B-validated form into
+                            // mbus-core decode_frame. freq_off_hz is None: no GFSK FEI on SX126x.
+                            let end = f.len;
+                            let bytes = buf[1.min(end)..end].to_vec();
+                            let sf = SourceFrame::Wmbus {
+                                bytes,
+                                rssi_dbm: f.rssi.0 as i16,
+                                freq_off_hz: None,
+                            };
+                            let t0 = std::time::Instant::now();
+                            if frame_tx.send(sf).await.is_err() {
+                                break; // consumer gone
                             }
-                            Err(Error::IrqTimeout) => {
-                                health.store(HEALTH_RX, Ordering::Relaxed); // alive, quiet window
+                            let us = t0.elapsed().as_micros();
+                            frames_ok += 1;
+                            max_send_us = max_send_us.max(us);
+                            if us > 5_000 {
+                                send_stalls += 1;
                             }
-                            Err(e) => {
-                                log::warn!("seeed receive: {e:?}");
-                                health.store(HEALTH_ERROR, Ordering::Relaxed);
-                                // Re-arm from a clean base; also resets the driver rx_index mirror.
-                                if let Err(e2) = radio.start_rx().await {
-                                    log::error!("seeed re-arm after error: {e2:?}");
-                                }
+                            if frames_ok.is_multiple_of(200) {
+                                log::info!(
+                                    "seeed turnaround: {frames_ok} frames, max send {max_send_us}µs, {send_stalls} over 5ms"
+                                );
+                            }
+                        }
+                        Err(Error::IrqTimeout) => {
+                            health.store(HEALTH_RX, Ordering::Relaxed); // alive, quiet window
+                        }
+                        Err(e) => {
+                            log::warn!("seeed receive: {e:?}");
+                            health.store(HEALTH_ERROR, Ordering::Relaxed);
+                            // Re-arm from a clean base; also resets the driver rx_index mirror.
+                            if let Err(e2) = radio.start_rx().await {
+                                log::error!("seeed re-arm after error: {e2:?}");
                             }
                         }
                     }
-                    for rej in radio.drain_rejects() {
-                        log::trace!(
-                            "seeed reject rssi={} len={} reason={}",
-                            rej.rssi.0,
-                            rej.len,
-                            rej.reason
-                        );
-                    }
                 }
-                let _ = radio.standby().await; // quiesce the SPI bus before the task ends
-                log::info!("seeed SX1262 task stopped");
-            });
+                // Surface rejected detections for the A/B mechanism split. `try_send` so a
+                // full diagnostic channel drops rejects rather than back-pressuring RX.
+                for rej in radio.drain_rejects() {
+                    let head_len = (rej.head_len as usize).min(rej.head.len());
+                    let _ = reject_tx.try_send(WmbusReject {
+                        head: rej.head[..head_len].to_vec(),
+                        rssi_dbm: rej.rssi.0 as i16,
+                        reason: rej.reason.to_string(),
+                        len: rej.len as usize,
+                    });
+                }
+            }
+            log::info!(
+                    "seeed task stopping: {frames_ok} frames, max send-gap {max_send_us}µs, {send_stalls} over 5ms"
+                );
+            let _ = radio.standby().await; // quiesce the SPI bus before the task ends
+            log::info!("seeed SX1262 task stopped");
+        });
 
         self.frames = Some(frame_rx);
+        self.rejects = Some(reject_rx);
         self.shutdown = Some(shutdown_tx);
         self.task = Some(task);
         Ok(())
+    }
+
+    /// Non-blocking: the next rejected detection the radio task saw, if any. Diagnostic
+    /// only — used by the capture path to split "never-detected" from "detected-but-
+    /// rejected" in the A/B. Returns `None` on empty or when the task has ended.
+    pub fn try_recv_reject(&mut self) -> Option<WmbusReject> {
+        self.rejects.as_mut().and_then(|rx| rx.try_recv().ok())
     }
 
     /// Non-blocking: hand back the next frame the radio task has delivered, if any.
@@ -267,6 +325,7 @@ impl SeeedSx1262Source {
             let _ = t.await;
         }
         self.frames = None;
+        self.rejects = None;
         self.health.store(HEALTH_UNKNOWN, Ordering::Relaxed);
         Ok(())
     }

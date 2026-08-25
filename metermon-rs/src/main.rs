@@ -99,6 +99,10 @@ enum Cmd {
         /// seconds while a three-minute meter has not spoken once.
         #[arg(long)]
         device: Option<u32>,
+        /// Write per-frame JSON Lines (`{"t":<µs>,"raw":"<hex>","rssi_dbm":<i16>}`)
+        /// instead of plain hex — for A/B verdicting where RSSI and timing matter.
+        #[arg(long)]
+        jsonl: bool,
     },
     /// Read-only RFM69 register dump (requires `radio` feature).
     ///
@@ -510,7 +514,8 @@ fn main() -> Result<()> {
             seconds,
             count,
             device,
-        } => run_capture(&config, &out, seconds, count, device),
+            jsonl,
+        } => run_capture(&config, &out, seconds, count, device, jsonl),
         Cmd::DumpRegs { config } => run_dumpregs(&config),
         Cmd::ProbeRaw {
             out,
@@ -2366,6 +2371,7 @@ fn run_capture(
     seconds: u64,
     count: usize,
     device: Option<u32>,
+    jsonl: bool,
 ) -> Result<()> {
     use std::io::Write;
 
@@ -2425,10 +2431,12 @@ fn run_capture(
         .await?;
         radio.start().await?;
         let mut file = std::fs::File::create(out)?;
-        writeln!(
-            file,
-            "# metermon-rs capture from {spidev} (one raw wM-Bus frame per line, hex)"
-        )?;
+        if !jsonl {
+            writeln!(
+                file,
+                "# metermon-rs capture from {spidev} (one raw wM-Bus frame per line, hex)"
+            )?;
+        }
 
         log::info!("capturing up to {count} frames / {seconds}s from {spidev} -> {out}");
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
@@ -2480,7 +2488,22 @@ fn run_capture(
                             continue;
                         }
                     }
-                    writeln!(file, "{}", hex::encode(&frame))?;
+                    if jsonl {
+                        // Marker-first raw hex (both backends deliver CD/3D-first), the
+                        // sync RSSI, and a capture timestamp in µs for first-to-last-frame
+                        // duration accounting in the A/B verdict.
+                        let t = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_micros())
+                            .unwrap_or(0);
+                        writeln!(
+                            file,
+                            r#"{{"t":{t},"raw":"{}","rssi_dbm":{rssi},"crc_ok":true}}"#,
+                            hex::encode(&frame)
+                        )?;
+                    } else {
+                        writeln!(file, "{}", hex::encode(&frame))?;
+                    }
                     file.flush()?;
                     n += 1;
                     let off_s = off
@@ -2498,6 +2521,25 @@ fn run_capture(
                 }
                 Ok(Err(e)) => log::warn!("recv error: {e}"),
                 Err(_) => break Ok("time limit"),
+            }
+            // Diagnostic (seeed backend + jsonl only): drain rejected detections into the
+            // capture so the A/B can split "never-detected" from "detected-but-rejected".
+            #[cfg(feature = "seeed-radio")]
+            if jsonl {
+                while let Some(rej) = radio.try_recv_reject() {
+                    let t = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_micros())
+                        .unwrap_or(0);
+                    writeln!(
+                        file,
+                        r#"{{"t":{t},"raw":"{}","rssi_dbm":{},"crc_ok":false,"reason":"{}","len":{}}}"#,
+                        hex::encode(&rej.head),
+                        rej.rssi_dbm,
+                        rej.reason,
+                        rej.len
+                    )?;
+                }
             }
         };
 
@@ -2528,6 +2570,7 @@ fn run_capture(
     _seconds: u64,
     _count: usize,
     _device: Option<u32>,
+    _jsonl: bool,
 ) -> Result<()> {
     bail_no_radio("capture")
 }
