@@ -544,7 +544,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1121,7 +1121,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "radio-boards"
 version = "0.1.0"
-source = "git+ssh://git@github.com/jfabienke/seeed-wm1302.git?rev=3755d6d#3755d6da8b26e99792bddf9232b62f21d76d70d5"
+source = "git+ssh://git@github.com/jfabienke/seeed-wm1302.git?rev=02c1537#02c15378485ea415f85f0bfd1087bd9fe1a87cbb"
 dependencies = [
  "radio-core",
 ]
@@ -1129,7 +1129,7 @@ dependencies = [
 [[package]]
 name = "radio-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/jfabienke/seeed-wm1302.git?rev=3755d6d#3755d6da8b26e99792bddf9232b62f21d76d70d5"
+source = "git+ssh://git@github.com/jfabienke/seeed-wm1302.git?rev=02c1537#02c15378485ea415f85f0bfd1087bd9fe1a87cbb"
 dependencies = [
  "bitflags 2.13.1",
  "embedded-hal 1.0.0",
@@ -1140,12 +1140,13 @@ dependencies = [
 [[package]]
 name = "radio-linux"
 version = "0.1.0"
-source = "git+ssh://git@github.com/jfabienke/seeed-wm1302.git?rev=3755d6d#3755d6da8b26e99792bddf9232b62f21d76d70d5"
+source = "git+ssh://git@github.com/jfabienke/seeed-wm1302.git?rev=02c1537#02c15378485ea415f85f0bfd1087bd9fe1a87cbb"
 dependencies = [
  "embedded-hal 1.0.0",
  "embedded-hal-async",
  "embedded-hal-bus",
  "radio-core",
+ "radio-sx126x",
  "rppal",
  "tokio",
 ]
@@ -1153,7 +1154,7 @@ dependencies = [
 [[package]]
 name = "radio-sx126x"
 version = "0.1.0"
-source = "git+ssh://git@github.com/jfabienke/seeed-wm1302.git?rev=3755d6d#3755d6da8b26e99792bddf9232b62f21d76d70d5"
+source = "git+ssh://git@github.com/jfabienke/seeed-wm1302.git?rev=02c1537#02c15378485ea415f85f0bfd1087bd9fe1a87cbb"
 dependencies = [
  "bitflags 2.13.1",
  "embedded-hal 1.0.0",
@@ -1329,7 +1330,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1627,7 +1628,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1980,7 +1981,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 [[package]]
 name = "wmbus-link"
 version = "0.1.0"
-source = "git+ssh://git@github.com/jfabienke/seeed-wm1302.git?rev=3755d6d#3755d6da8b26e99792bddf9232b62f21d76d70d5"
+source = "git+ssh://git@github.com/jfabienke/seeed-wm1302.git?rev=02c1537#02c15378485ea415f85f0bfd1087bd9fe1a87cbb"
 dependencies = [
  "heapless",
  "radio-core",

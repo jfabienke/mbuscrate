@@ -37,8 +37,11 @@ pub(crate) const HEALTH_RX: u8 = 1; // armed and receiving (a frame or an IRQ-ti
 pub(crate) const HEALTH_ERROR: u8 = 2; // a non-timeout error occurred
 
 /// Resolve the config `board` string to the seeed (board profile, pin wiring) pair.
-/// wM-Bus RX is identical on both; only these electrical facts differ.
-fn board_wiring(
+/// wM-Bus RX is identical on both; only these electrical facts differ. Shared with the
+/// LoRa/join paths (`join_responder`, `lora_rx`), which construct the same SX1262 from
+/// the same board wiring — the board choice is a construction-time electrical fact, not a
+/// per-mode one.
+pub(crate) fn board_wiring(
     board: Option<&str>,
 ) -> Result<(
     radio_core::board::Sx1262Board,
