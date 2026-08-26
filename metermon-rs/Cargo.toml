@@ -48,11 +48,11 @@ redb = "4.1.0"
 # stable-by-agreement with the seeed session (design/17). Linux/aarch64 only (radio-linux
 # uses rppal), so these live behind the `seeed-radio` feature, which implies `radio`.
 # Private repo: local + Pi have SSH access; mbuscrate CI needs a read deploy key.
-radio-core = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "02c1537", optional = true }
-radio-sx126x = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "02c1537", features = ["tx"], optional = true }
-radio-boards = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "02c1537", optional = true }
-radio-linux = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "02c1537", optional = true }
-wmbus-link = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "02c1537", optional = true }
+radio-core = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "1d5f3bf", optional = true }
+radio-sx126x = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "1d5f3bf", features = ["tx"], optional = true }
+radio-boards = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "1d5f3bf", optional = true }
+radio-linux = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "1d5f3bf", optional = true }
+wmbus-link = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "1d5f3bf", optional = true }
 
 [features]
 default = []
