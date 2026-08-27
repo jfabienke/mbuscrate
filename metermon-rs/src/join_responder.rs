@@ -488,6 +488,17 @@ impl JoinResponder {
         );
 
         // --- RX2 --- (re-stage in the ~0.8 s gap before the RX2 deadline)
+        //
+        // This fires UNCONDITIONALLY after RX1. A LoRaWAN JoinAccept is not acked, so we
+        // have no feedback saying RX1 was heard — and a device that decoded RX1 never opens
+        // RX2. So whenever RX1 lands, this RX2 downlink is pure airtime: ~1.5 s on air at
+        // SF12/869.525, during which the single radio is deaf to everything else. That is a
+        // deliberate bring-up trade — answering both windows maximizes join success when you
+        // can't know which the device caught, and g3's 10 % duty absorbs it at bring-up
+        // cadence. If joins ever become frequent (a real fleet, not a bench), switch to
+        // RX2-only-as-fallback: fire RX2 only when RX1 could not be staged in time, the
+        // LNS-style fixed-window behaviour. (Non-issue at SF12 uplinks, where the RX1 accept's
+        // airtime already blows the RX2 deadline — see the const-level "Measured caveat".)
         self.stage_downlink_on(RX2_FREQ_HZ, RX2_SF, RX2_POWER_DBM, &accept)?;
         let rx2_staged = rx_at.elapsed();
         let fire_at = rx_at + JOIN_ACCEPT_DELAY2 - TX_LEAD;
