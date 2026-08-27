@@ -26,6 +26,11 @@ mod join_control;
 mod join_control_backend;
 #[cfg(feature = "seeed-radio")]
 mod join_responder;
+// RedbJoinStore's only non-test callers are the LoRaWAN-join handlers (run_lorawan_join +
+// join_control), both seeed-radio/join-control-gated. Under plain `--features radio` the store
+// would be dead code (-D warnings). It's a platform-independent redb store, so keep its tests
+// compiling on every host via `test`, and the module itself only where a real caller exists.
+#[cfg(any(feature = "seeed-radio", test))]
 mod join_store;
 mod keystore;
 #[cfg(feature = "seeed-radio")]
