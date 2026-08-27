@@ -1574,7 +1574,10 @@ fn run_monitor(
 }
 
 /// Load provisioned join credentials: DevEUI (display order) -> AppKey hex.
-#[cfg(feature = "radio")]
+// seeed-radio, not plain radio: `JoinCredential` lives in `join_responder`, which is
+// seeed-radio-gated since the LoRa/join migration. Under `--features radio` alone this
+// referenced an uncompiled module (caught by the radio-feature CI gate, not host builds).
+#[cfg(feature = "seeed-radio")]
 fn load_join_creds(path: &str) -> Result<Vec<join_responder::JoinCredential>> {
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
     let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&text)?;
@@ -2510,11 +2513,16 @@ fn run_capture(
     bail_no_radio("capture")
 }
 
-#[cfg(not(feature = "radio"))]
+// `not(seeed-radio)`, not `not(radio)`: the LoRa/join stubs that call this are gated
+// `not(seeed-radio)`, so under `--features radio` alone (RFM69 without the seeed backend)
+// they are compiled and need `bail_no_radio` in scope. Since seeed-radio implies radio,
+// `not(radio)` ⊂ `not(seeed-radio)`, so this still covers the plain not-radio callers too.
+// (The `{cmd}` string carries whether it wants `radio` or `seeed-radio` specifically.)
+#[cfg(not(feature = "seeed-radio"))]
 fn bail_no_radio(cmd: &str) -> Result<()> {
     anyhow::bail!(
-        "the `{cmd}` subcommand needs the `radio` feature (Raspberry Pi + RFM69). \
-         Build with: cargo build --features radio  (on the Pi). \
-         Use `replay` for the host-independent A/B."
+        "the `{cmd}` subcommand needs radio hardware support. \
+         Build with `--features radio` (RFM69/SX1262 wM-Bus) or `--features seeed-radio` \
+         (LoRa/join) on the Pi. Use `replay` for the host-independent A/B."
     )
 }
