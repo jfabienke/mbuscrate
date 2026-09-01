@@ -31,6 +31,7 @@ use crate::vendors::manufacturer::id_to_manufacturer;
 use crate::wmbus::crypto::AesKey;
 use crate::wmbus::ell::{parse_ell, EllSecurity, CI_ELL_I, CI_ELL_II, CI_ELL_III, CI_ELL_IV};
 use crate::wmbus::oms::{decrypt_mode5_cbc, decrypted_ok};
+use crate::wmbus::tpl::parse_tpl_header;
 
 /// Published, non-secret default keys to test in arm 1. These ship in vendor
 /// software; testing them is the whole point of the audit.
@@ -146,41 +147,41 @@ fn classify(
     keys: &[(&'static str, AesKey)],
 ) -> FrameFinding {
     let ci = payload[0];
-    let after_ci = &payload[1..];
 
     match ci {
         // ---- Arm 1: OMS mode-5 CBC ----
         0x7A | 0x72 => {
-            // short header: ACC STATUS CFG(2); long header: 8-byte TPL addr first.
-            let addr_prefix = if ci == 0x72 { 8 } else { 0 };
-            // acc, then status(1), config(2), then ciphertext.
-            let ct_start = addr_prefix + 4;
-            if after_ci.len() <= ct_start {
-                return FrameFinding {
-                    serial,
-                    mfr,
-                    profile: Profile::Mode5Cbc,
-                    default_hit: None,
-                    plaintext: false,
-                    session_number: None,
-                };
-            }
-            let acc = after_ci[addr_prefix];
-            let ct = &after_ci[ct_start..];
-            // Encrypted region is a multiple of the 16-byte block; trim any trailing
-            // stray bytes rather than fail outright.
-            let usable = ct.len() - (ct.len() % 16);
-            let mut hit = None;
-            if usable >= 16 {
-                for (name, key) in keys {
-                    if let Ok(pt) = decrypt_mode5_cbc(&ct[..usable], &link_address, acc, key) {
-                        if decrypted_ok(&pt) {
-                            hit = Some(*name);
-                            break;
+            // Locate the ACC byte and the ciphertext via the canonical TPL header parser
+            // rather than re-deriving header offsets here — the hand-rolled version this
+            // replaces computed `ct_start = addr_prefix + 4` and read `acc` by index, the
+            // exact class of offset arithmetic `parse_tpl_header` exists to centralise. A
+            // header we cannot parse (truncated) is not auditable, same as before.
+            let hit = match parse_tpl_header(payload) {
+                Ok(hdr) => {
+                    // Short/long TPL headers always carry an ACC byte; `unwrap_or` keeps the
+                    // audit panic-free if that ever changed (0 is unused when no ct follows).
+                    let acc = hdr.access_no.unwrap_or(0);
+                    let ct = payload.get(hdr.header_len..).unwrap_or(&[]);
+                    // Encrypted region is a multiple of the 16-byte block; trim any trailing
+                    // stray bytes rather than fail outright.
+                    let usable = ct.len() - (ct.len() % 16);
+                    let mut hit = None;
+                    if usable >= 16 {
+                        for (name, key) in keys {
+                            if let Ok(pt) =
+                                decrypt_mode5_cbc(&ct[..usable], &link_address, acc, key)
+                            {
+                                if decrypted_ok(&pt) {
+                                    hit = Some(*name);
+                                    break;
+                                }
+                            }
                         }
                     }
+                    hit
                 }
-            }
+                Err(_) => None,
+            };
             FrameFinding {
                 serial,
                 mfr,
@@ -330,6 +331,18 @@ mod tests {
         p
     }
 
+    // A mode-5 long-header payload (starts at CI 0x72): CI + 8-byte TPL address + acc
+    // status cfg cfg + ct. The TPL address bytes are arbitrary — mode-5 CBC keys off the
+    // link-layer address, not the header one — and exist only to push the ciphertext to
+    // the long-header offset (13), the offset the old hand-rolled parser derived by hand.
+    fn mode5_long_payload(acc: u8, ct: &[u8]) -> Vec<u8> {
+        let mut p = vec![0x72];
+        p.extend_from_slice(&[0x2D, 0x2C, 0x70, 0x81, 0x29, 0x55, 0x01, 0x07]); // TPL addr
+        p.extend_from_slice(&[acc, 0x00, 0x00, 0x05]); // acc status cfg cfg
+        p.extend_from_slice(ct);
+        p
+    }
+
     // An ELL-II payload (starts at CI 0x8D): CI cc acc sn(4 LE) body…
     fn ell2_payload(cc: u8, acc: u8, sn: u32, body: &[u8]) -> Vec<u8> {
         let mut p = vec![CI_ELL_II, cc, acc];
@@ -361,6 +374,20 @@ mod tests {
         let acc = 0x2A;
         let ct = mode5_encrypt(&[0x2Fu8; 16], &link(), acc, &key); // idle-fill plaintext
         let v = audit_one(55298170, &mode5_payload(acc, &ct));
+        assert_eq!(v[0].verdict, Verdict::DefaultKey("ZENNER_ZDK"));
+        assert!(v[0].verdict.is_exposure());
+    }
+
+    #[test]
+    fn arm1_flags_a_long_header_meter_on_the_zenner_default() {
+        // The 0x72 long-header ciphertext sits 13 bytes in (CI + 8 addr + acc/status/cfg);
+        // locating it correctly is what `parse_tpl_header` centralises. The old parser's
+        // `addr_prefix = 8` branch was the hand-rolled part this dedup removes, so exercise
+        // it: a long-header frame on the published default must still be flagged.
+        let key = AesKey::from_hex(ZDK).unwrap();
+        let acc = 0x2A;
+        let ct = mode5_encrypt(&[0x2Fu8; 16], &link(), acc, &key);
+        let v = audit_one(55298170, &mode5_long_payload(acc, &ct));
         assert_eq!(v[0].verdict, Verdict::DefaultKey("ZENNER_ZDK"));
         assert!(v[0].verdict.is_exposure());
     }
