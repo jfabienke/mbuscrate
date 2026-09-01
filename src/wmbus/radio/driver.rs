@@ -3016,6 +3016,32 @@ mod tests {
     use crate::wmbus::radio::hal::RecordingHal;
     use crate::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, PacketType, SpreadingFactor};
 
+    /// Dump the exact GFSK RX configure sequence the metermon sx1262 backend applies —
+    /// `configure_for_wmbus(868.95 MHz, 100 kbit/s)` → DIO2-as-RF-switch → boosted RX gain
+    /// → continuous RX (mirrors `metermon-rs/src/source.rs`). Ground truth via RecordingHal,
+    /// no radio. Run with `--nocapture` to read the byte-for-byte command/register stream for
+    /// cross-driver register diffs. Not an assertion — a diagnostic dumper kept in-tree so the
+    /// sequence can be re-emitted whenever a demod-config question comes up.
+    #[test]
+    fn dump_sx1262_wmbus_rx_config() {
+        let hal = RecordingHal::new();
+        let probe = hal.clone();
+        let mut d = Sx126xDriver::new(hal, 32_000_000);
+        d.configure_for_wmbus(868_950_000, 100_000).unwrap();
+        d.set_dio2_as_rf_switch(true).unwrap();
+        d.set_rx_boosted_gain(true).unwrap();
+        d.set_rx_continuous().unwrap();
+        println!(
+            "=== sx1262 backend GFSK RX config (mode C, 868.95 MHz, 100 kbit/s, pd8/sync24) ==="
+        );
+        for (op, data) in probe.commands() {
+            println!("CMD {op:02X} {}", hex::encode(&data));
+        }
+        for (addr, data) in probe.reg_writes() {
+            println!("REG {addr:04X} {}", hex::encode(&data));
+        }
+    }
+
     fn lora_profile() -> LoRaProfile {
         LoRaProfile {
             frequency_hz: 868_100_000,
