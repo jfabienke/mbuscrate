@@ -204,7 +204,9 @@ fn handle_arm(
     rx: &Receiver<Cmd>,
     gwid: &str,
     spidev: &str,
-    pins: &GpioPins,
+    // Vestigial under the seeed driver: the SX1262 wiring is board-derived now. Kept in
+    // the signature so the run-level plumbing is unchanged; see JoinResponder::new.
+    _pins: &GpioPins,
     creds_path: &str,
     join_db: &str,
     arm_window_secs: u64,
@@ -265,15 +267,8 @@ fn handle_arm(
         let store = crate::join_store::RedbJoinStore::open(join_db)
             .map_err(|e| anyhow::anyhow!("opening join store {join_db}: {e}"))?;
         Some(
-            JoinResponder::new(
-                spidev,
-                pins.clone(),
-                arm.channel_hz,
-                arm.sf,
-                creds,
-                Box::new(store),
-            )
-            .context("building join responder")?,
+            JoinResponder::new(spidev, None, arm.channel_hz, arm.sf, creds, Box::new(store))
+                .context("building join responder")?,
         )
     };
 

@@ -48,11 +48,11 @@ redb = "4.1.0"
 # stable-by-agreement with the seeed session (design/17). Linux/aarch64 only (radio-linux
 # uses rppal), so these live behind the `seeed-radio` feature, which implies `radio`.
 # Private repo: local + Pi have SSH access; mbuscrate CI needs a read deploy key.
-radio-core = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "3755d6d", optional = true }
-radio-sx126x = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "3755d6d", features = ["tx"], optional = true }
-radio-boards = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "3755d6d", optional = true }
-radio-linux = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "3755d6d", optional = true }
-wmbus-link = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "3755d6d", optional = true }
+radio-core = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "1d5f3bf", optional = true }
+radio-sx126x = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "1d5f3bf", features = ["tx"], optional = true }
+radio-boards = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "1d5f3bf", optional = true }
+radio-linux = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "1d5f3bf", optional = true }
+wmbus-link = { git = "ssh://git@github.com/jfabienke/seeed-wm1302.git", rev = "1d5f3bf", optional = true }
 
 [features]
 default = []
@@ -70,7 +70,8 @@ seeed-radio = [
 ]
 # The LoRaWAN join-control endpoint and its mock-backend driver. Pulls in the shared
 # `lorawan-join-control` wire-schema crate (a sibling path dep, absent from repo CI) and
-# implies `radio` because the gateway endpoint drives the RF join responder. The
-# host-only backend driver (`join-control-backend`) is pure MQTT but lives behind this
-# same feature because it needs the schema crate.
-join-control = ["dep:lorawan-join-control", "radio"]
+# implies `seeed-radio` because the gateway endpoint drives the RF join responder, which
+# now runs on the seeed SX1262 driver (JoinResponder). The host-only backend driver
+# (`join-control-backend`) is pure MQTT but lives behind this same feature because it
+# needs the schema crate.
+join-control = ["dep:lorawan-join-control", "seeed-radio"]

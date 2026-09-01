@@ -24,11 +24,16 @@ mod health;
 mod join_control;
 #[cfg(feature = "join-control")]
 mod join_control_backend;
-#[cfg(feature = "radio")]
+#[cfg(feature = "seeed-radio")]
 mod join_responder;
+// RedbJoinStore's only non-test callers are the LoRaWAN-join handlers (run_lorawan_join +
+// join_control), both seeed-radio/join-control-gated. Under plain `--features radio` the store
+// would be dead code (-D warnings). It's a platform-independent redb store, so keep its tests
+// compiling on every host via `test`, and the module itself only where a real caller exists.
+#[cfg(any(feature = "seeed-radio", test))]
 mod join_store;
 mod keystore;
-#[cfg(feature = "radio")]
+#[cfg(feature = "seeed-radio")]
 mod lora_rx;
 mod mock_backend;
 mod profiles;
@@ -1579,7 +1584,10 @@ fn run_monitor(
 }
 
 /// Load provisioned join credentials: DevEUI (display order) -> AppKey hex.
-#[cfg(feature = "radio")]
+// seeed-radio, not plain radio: `JoinCredential` lives in `join_responder`, which is
+// seeed-radio-gated since the LoRa/join migration. Under `--features radio` alone this
+// referenced an uncompiled module (caught by the radio-feature CI gate, not host builds).
+#[cfg(feature = "seeed-radio")]
 fn load_join_creds(path: &str) -> Result<Vec<join_responder::JoinCredential>> {
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
     let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&text)?;
@@ -1607,14 +1615,17 @@ fn load_join_creds(path: &str) -> Result<Vec<join_responder::JoinCredential>> {
     Ok(out)
 }
 
-#[cfg(feature = "radio")]
+#[cfg(feature = "seeed-radio")]
 #[allow(clippy::too_many_arguments)]
 fn run_lorawan_join(
     spidev: &str,
-    nss: u8,
-    busy: u8,
-    dio1: u8,
-    reset: u8,
+    // Pin args are vestigial under the seeed driver: the SX1262 wiring comes from the
+    // board profile now, not the CLI. Kept for CLI backward-compat; defaults to the
+    // Waveshare board (the WM1302's coupler-tap TX is deferred until that HAT arrives).
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
     freq_hz: u32,
     sf: u8,
     creds_path: &str,
@@ -1622,25 +1633,12 @@ fn run_lorawan_join(
     capture: Option<&str>,
     seconds: u64,
 ) -> Result<()> {
-    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
     let creds = load_join_creds(creds_path)?;
     let store = join_store::RedbJoinStore::open(join_db)
         .map_err(|e| anyhow::anyhow!("opening join store {join_db}: {e}"))?;
     println!("join state persisted to {join_db}");
-    let mut responder = join_responder::JoinResponder::new(
-        spidev,
-        GpioPins {
-            nss: Some(nss),
-            busy,
-            dio1,
-            dio2: None,
-            reset: Some(reset),
-        },
-        freq_hz,
-        sf,
-        creds,
-        Box::new(store),
-    )?;
+    let mut responder =
+        join_responder::JoinResponder::new(spidev, None, freq_hz, sf, creds, Box::new(store))?;
     if let Some(path) = capture {
         responder.set_capture(path)?;
         println!("capturing frames to {path}");
@@ -1688,7 +1686,7 @@ fn run_lorawan_join(
     )
 }
 
-#[cfg(not(feature = "radio"))]
+#[cfg(not(feature = "seeed-radio"))]
 #[allow(clippy::too_many_arguments)]
 fn run_lorawan_join(
     _spidev: &str,
@@ -1703,7 +1701,7 @@ fn run_lorawan_join(
     _capture: Option<&str>,
     _seconds: u64,
 ) -> Result<()> {
-    bail_no_radio("lorawan-join")
+    bail_no_radio("lorawan-join (needs the seeed-radio feature)")
 }
 
 #[cfg(feature = "join-control")]
@@ -1796,14 +1794,15 @@ fn run_join_control_backend(
     )
 }
 
-#[cfg(feature = "radio")]
+#[cfg(feature = "seeed-radio")]
 #[allow(clippy::too_many_arguments)]
 fn run_lora_tx(
     spidev: &str,
-    nss: u8,
-    busy: u8,
-    dio1: u8,
-    reset: u8,
+    // Vestigial under the seeed driver (board-derived wiring); kept for CLI back-compat.
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
     freq_hz: u32,
     sf: u8,
     bw: u32,
@@ -1812,16 +1811,9 @@ fn run_lora_tx(
     count: u32,
     interval_ms: u64,
 ) -> Result<()> {
-    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
     lora_rx::transmit(
         spidev,
-        GpioPins {
-            nss: Some(nss),
-            busy,
-            dio1,
-            dio2: None,
-            reset: Some(reset),
-        },
+        None,
         freq_hz,
         sf,
         bw,
@@ -1832,7 +1824,7 @@ fn run_lora_tx(
     )
 }
 
-#[cfg(not(feature = "radio"))]
+#[cfg(not(feature = "seeed-radio"))]
 #[allow(clippy::too_many_arguments)]
 fn run_lora_tx(
     _spidev: &str,
@@ -1848,17 +1840,18 @@ fn run_lora_tx(
     _count: u32,
     _interval_ms: u64,
 ) -> Result<()> {
-    bail_no_radio("lora-tx")
+    bail_no_radio("lora-tx (needs the seeed-radio feature)")
 }
 
-#[cfg(feature = "radio")]
+#[cfg(feature = "seeed-radio")]
 #[allow(clippy::too_many_arguments)]
 fn run_lora_rx(
     spidev: &str,
-    nss: u8,
-    busy: u8,
-    dio1: u8,
-    reset: u8,
+    // Vestigial under the seeed driver (board-derived wiring); kept for CLI back-compat.
+    _nss: u8,
+    _busy: u8,
+    _dio1: u8,
+    _reset: u8,
     freq_hz: u32,
     sf: u8,
     bw: u32,
@@ -1870,16 +1863,9 @@ fn run_lora_rx(
     capture: Option<String>,
     seconds: u64,
 ) -> Result<()> {
-    use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
     lora_rx::run(
         spidev,
-        GpioPins {
-            nss: Some(nss),
-            busy,
-            dio1,
-            dio2: None,
-            reset: Some(reset),
-        },
+        None,
         freq_hz,
         sf,
         bw,
@@ -1893,7 +1879,7 @@ fn run_lora_rx(
     )
 }
 
-#[cfg(not(feature = "radio"))]
+#[cfg(not(feature = "seeed-radio"))]
 #[allow(clippy::too_many_arguments)]
 fn run_lora_rx(
     _spidev: &str,
@@ -2575,11 +2561,16 @@ fn run_capture(
     bail_no_radio("capture")
 }
 
-#[cfg(not(feature = "radio"))]
+// `not(seeed-radio)`, not `not(radio)`: the LoRa/join stubs that call this are gated
+// `not(seeed-radio)`, so under `--features radio` alone (RFM69 without the seeed backend)
+// they are compiled and need `bail_no_radio` in scope. Since seeed-radio implies radio,
+// `not(radio)` ⊂ `not(seeed-radio)`, so this still covers the plain not-radio callers too.
+// (The `{cmd}` string carries whether it wants `radio` or `seeed-radio` specifically.)
+#[cfg(not(feature = "seeed-radio"))]
 fn bail_no_radio(cmd: &str) -> Result<()> {
     anyhow::bail!(
-        "the `{cmd}` subcommand needs the `radio` feature (Raspberry Pi + RFM69). \
-         Build with: cargo build --features radio  (on the Pi). \
-         Use `replay` for the host-independent A/B."
+        "the `{cmd}` subcommand needs radio hardware support. \
+         Build with `--features radio` (RFM69/SX1262 wM-Bus) or `--features seeed-radio` \
+         (LoRa/join) on the Pi. Use `replay` for the host-independent A/B."
     )
 }

@@ -1,4 +1,4 @@
-//! LoRaWAN OTAA join responder.
+//! LoRaWAN OTAA join responder, on the seeed SX1262 driver.
 //!
 //! Answers JoinRequests from AppKeys the gateway already holds, so nothing on the
 //! network is in the timing path: RX1 opens 5 s after the uplink ends, and the
@@ -13,6 +13,23 @@
 //! duty-cycle accounting, and a single channel where a real gateway hears eight. It
 //! exists to prove the provisioning chain end to end and to exercise the decode
 //! path; a real LNS would replace it behind the same interface.
+//!
+//! ## Radio layer
+//!
+//! The SX1262 is driven through the seeed `radio-sx126x` driver (the same one the
+//! wM-Bus RX path uses, see [`crate::source_seeed`]). Two consequences shape this file:
+//!
+//! * The driver is `embedded-hal-async`, so every radio call is `async`. This is a
+//!   synchronous responder with precise `std::thread::sleep` window timing (converting
+//!   the whole thing to async would cascade through `join_control`'s sync MQTT loop for
+//!   no benefit), so the driver is driven through an owned current-thread-free
+//!   [`tokio::runtime::Runtime`] with `block_on` around each radio operation. The
+//!   window waits stay on `thread::sleep` — precise, and outside any `block_on`.
+//! * The RF (TX/RX) antenna switch is owned by the driver's `PinSwitch` (from the board
+//!   profile's TXEN wiring), driven inside `prepare_lora_tx`/`fire_lora_tx`. The old
+//!   `pinctrl` subprocess is gone — it cost milliseconds per flip, far too much for a
+//!   receive window, and the driver does it with one GPIO write.
+#![cfg(feature = "seeed-radio")]
 
 use anyhow::{Context, Result};
 use mbus_rs::lorawan::{
@@ -20,12 +37,20 @@ use mbus_rs::lorawan::{
     DataFrame, DownlinkParams, FOpts, JoinAcceptParams, JoinAdmission, JoinRequest, Payload,
     SessionKeys,
 };
-use mbus_rs::wmbus::radio::driver::{LoRaProfile, RadioProfile, Sx126xDriver};
-use mbus_rs::wmbus::radio::hal::raspberry_pi::GpioPins;
-use mbus_rs::wmbus::radio::hal::RaspberryPiHal;
-use mbus_rs::wmbus::radio::modulation::{CodingRate, LoRaBandwidth, SpreadingFactor};
+use radio_core::error::Error;
+use radio_core::lora::{LoraConfig, Profile};
+use radio_core::traits::{DualMode, LoraReceiver};
+use radio_core::units::{Dbm, Hertz};
+use radio_linux::rpi::Sx1262RppalSwitched;
+use radio_sx126x::Sx1262;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+use crate::source_seeed::board_wiring;
+
+/// SPI clock for the join responder's SX1262 (clamped to the board max in `sx1262_parts`).
+/// Matches the wM-Bus RX path's default.
+const SPI_HZ: u32 = 8_000_000;
 
 /// How early to issue SetTx so the preamble is rising as the window opens.
 ///
@@ -54,7 +79,7 @@ const PIN_CHANNEL_MASK: u16 = 0x0001;
 /// EU868 RX2 is fixed at 869.525 MHz, DR0 = **SF12** (not the uplink SF). The earlier
 /// code sent the RX2 accept at the uplink SF, so a standards-compliant RX2 window (SF12)
 /// never heard it; only a device with a non-standard RX2 DR did.
-const RX2_SF: SpreadingFactor = SpreadingFactor::SF12;
+const RX2_SF: u8 = 12;
 /// JOIN_ACCEPT_DELAY2: RX2 opens 1 s after RX1 (6 s after the JoinRequest). We answer it
 /// as a fallback after RX1 (see JOIN_ACCEPT_DELAY1): the fixed 869.525 MHz / SF12 window
 /// every device supports, at full +22 dBm for the downlink margin a distant device needs.
@@ -102,14 +127,6 @@ pub struct JoinedDevice {
     pub keys: SessionKeys,
 }
 
-/// Hold the HAT's antenna switch for receive (`true`) or transmit (`false`).
-fn set_rf_switch(receive: bool) {
-    std::process::Command::new("pinctrl")
-        .args(["set", "6", "op", if receive { "dh" } else { "dl" }])
-        .status()
-        .ok();
-}
-
 /// Per-session state beyond the derived keys: the network downlink counter and
 /// whether the device has accepted the single-channel pin.
 struct SessionState {
@@ -121,7 +138,10 @@ struct SessionState {
 }
 
 pub struct JoinResponder {
-    driver: Sx126xDriver<RaspberryPiHal>,
+    /// Drives the async seeed radio from this synchronous responder. One `block_on` per
+    /// radio operation; the window waits stay on `thread::sleep`, outside it.
+    rt: tokio::runtime::Runtime,
+    radio: Sx1262RppalSwitched,
     creds: Vec<JoinCredential>,
     freq_hz: u32,
     sf: u8,
@@ -135,20 +155,47 @@ pub struct JoinResponder {
 }
 
 impl JoinResponder {
+    /// Build the responder and bring the SX1262 up on `board`'s wiring. `spidev` is kept
+    /// for log continuity; the actual bus/pins come from the board profile (the seeed
+    /// driver owns the wiring), so a mismatch is a debug note, not an override.
     pub fn new(
         spidev: &str,
-        pins: GpioPins,
+        board: Option<&str>,
         freq_hz: u32,
         sf: u8,
         creds: Vec<JoinCredential>,
         store: Box<dyn mbus_rs::lorawan::JoinStore>,
     ) -> Result<Self> {
-        let mut hal = RaspberryPiHal::from_spidev(spidev, &pins).context("opening SPI/GPIO")?;
-        hal.reset().context("reset")?;
-        let mut driver = Sx126xDriver::new(hal, 32_000_000);
-        driver.calibrate(0x7F).context("calibrating")?;
+        let (b, wiring) = board_wiring(board)?;
+        if !spidev.is_empty() && spidev != wiring.spidev {
+            log::debug!(
+                "join responder: config spidev {spidev} differs from the board wiring's {}; \
+                 using the wiring",
+                wiring.spidev
+            );
+        }
+        let (spi, busy, irq, reset, delay, clock) =
+            radio_linux::rpi::sx1262_parts(&wiring, &b, SPI_HZ).context("opening SX1262 bus")?;
+        let rt = tokio::runtime::Runtime::new().context("tokio runtime")?;
+        let radio = rt
+            .block_on(Sx1262::new(
+                spi,
+                busy,
+                irq,
+                reset,
+                delay,
+                clock,
+                &b,
+                Hertz(freq_hz),
+            ))
+            .map_err(|e| anyhow::anyhow!("Sx1262::new: {e:?}"))?;
+        // TXEN/RF-switch: Some on Waveshare (inverted polarity from the board profile),
+        // None on WM-1302. `with_rf_switch` parks it in RX and drives it inside TX.
+        let sw = radio_linux::rpi::sx1262_rf_switch(&wiring, &b).context("rf switch")?;
+        let radio = radio.with_rf_switch(sw);
         Ok(Self {
-            driver,
+            rt,
+            radio,
             creds,
             freq_hz,
             sf,
@@ -158,80 +205,40 @@ impl JoinResponder {
         })
     }
 
-    fn sf_enum(&self) -> SpreadingFactor {
-        match self.sf {
-            5 => SpreadingFactor::SF5,
-            6 => SpreadingFactor::SF6,
-            7 => SpreadingFactor::SF7,
-            8 => SpreadingFactor::SF8,
-            9 => SpreadingFactor::SF9,
-            10 => SpreadingFactor::SF10,
-            11 => SpreadingFactor::SF11,
-            _ => SpreadingFactor::SF12,
-        }
-    }
-
-    fn profile(
-        &self,
-        iq_inverted: bool,
-        frequency_hz: u32,
-        sf: SpreadingFactor,
-        power_dbm: i8,
-    ) -> RadioProfile {
-        RadioProfile::LoRa(LoRaProfile {
-            frequency_hz,
-            sf,
-            bw: LoRaBandwidth::BW125,
-            cr: CodingRate::CR4_5,
-            power_dbm,
-            // Public LoRaWAN sync word; a private-sync receiver is deaf to real
-            // LoRaWAN devices and vice versa.
-            sync_word: Some(0x3444),
-            implicit_header: false,
-            iq_inverted,
-        })
-    }
-
-    /// Enter receive for uplinks: standard IQ, since that is what devices transmit.
+    /// Enter receive for uplinks: standard IQ (what devices transmit), public sync.
     fn arm_uplink_rx(&mut self) -> Result<()> {
-        set_rf_switch(true);
-        self.driver
-            .switch_profile(&self.profile(false, self.freq_hz, self.sf_enum(), 14))
-            .context("uplink profile")?;
-        self.driver.set_dio2_as_rf_switch(true)?;
-        self.driver.set_rx_boosted_gain(true)?;
-        self.driver.set_rx_continuous()?;
-        Ok(())
+        let cfg = LoraConfig::lorawan_uplink(Hertz(self.freq_hz), self.sf);
+        let Self { rt, radio, .. } = self;
+        rt.block_on(async {
+            radio.switch_profile(&Profile::Lora(cfg)).await?;
+            radio.start_lora_rx().await
+        })
+        .map_err(|e| anyhow::anyhow!("arm uplink rx: {e:?}"))
     }
 
     /// Stage a downlink with **inverted IQ**, as every LoRaWAN downlink must be.
-    /// Everything expensive happens here; [`JoinResponder::fire_downlink`] only
-    /// issues SetTx.
+    /// Everything expensive happens here; [`JoinResponder::fire_downlink`] only issues
+    /// SetTx. `prepare_lora_tx` applies the full downlink `LoraConfig` from any current
+    /// profile, so no separate `switch_profile` is needed — and it invalidates the RX
+    /// arming, so callers re-arm (`arm_uplink_rx`) after the fire.
     fn stage_downlink_on(
         &mut self,
-        frequency_hz: u32,
-        sf: SpreadingFactor,
+        freq_hz: u32,
+        sf: u8,
         power_dbm: i8,
         frame: &[u8],
     ) -> Result<()> {
-        self.driver
-            .switch_profile(&self.profile(true, frequency_hz, sf, power_dbm))
-            .context("downlink profile")?;
-        self.driver.set_dio2_as_rf_switch(true)?;
-        // pinctrl spawns a process, which costs milliseconds — far too much to do
-        // inside a receive window, so the antenna switch moves during staging.
-        set_rf_switch(false); // TXEN low = transmit
-        self.driver
-            .lora_prepare_tx(frame)
-            .context("staging downlink")?;
-        Ok(())
+        let cfg = LoraConfig::lorawan_downlink(Hertz(freq_hz), sf);
+        let Self { rt, radio, .. } = self;
+        rt.block_on(radio.prepare_lora_tx(&cfg, frame, Dbm(power_dbm as f32)))
+            .map_err(|e| anyhow::anyhow!("staging downlink: {e:?}"))
     }
 
+    /// Fire the staged downlink (SetTx + TXEN, handled inside the driver). Waits TxDone.
     fn fire_downlink(&mut self) -> Result<()> {
-        let res = self.driver.lora_fire_tx();
-        set_rf_switch(true);
-        res.context("transmitting downlink")?;
-        Ok(())
+        let Self { rt, radio, .. } = self;
+        rt.block_on(radio.fire_lora_tx())
+            .map_err(|e| anyhow::anyhow!("transmitting downlink: {e:?}"))
     }
 
     fn credential_for(&self, dev_eui_le: &[u8; 8]) -> Option<&JoinCredential> {
@@ -297,6 +304,7 @@ impl JoinResponder {
         );
         self.arm_uplink_rx()?;
 
+        let mut buf = [0u8; 256];
         let start = Instant::now();
         let mut last_beat = Instant::now();
         let mut seen = 0u32;
@@ -312,36 +320,39 @@ impl JoinResponder {
                 );
                 last_beat = Instant::now();
             }
-            let pkt = match self.driver.process_irqs_with_mode() {
-                Ok(Some(p)) => p,
-                Ok(None) => {
-                    std::thread::sleep(Duration::from_millis(2));
-                    continue;
-                }
+            // One receive. `IrqTimeout` is the empty-window signal (the call self-bounds
+            // ~1 s), not an error; on a real error, log and keep listening.
+            let rx = {
+                let Self { rt, radio, .. } = self;
+                rt.block_on(radio.receive_lora(&mut buf))
+            };
+            let (n, rssi, snr) = match rx {
+                Ok(f) => (f.len, f.rssi.0 as i16, f.meta.snr_db),
+                Err(Error::IrqTimeout) => continue,
                 Err(e) => {
-                    log::debug!("irq: {e:?}");
+                    log::debug!("receive_lora: {e:?}");
                     continue;
                 }
             };
+            // Own the payload so the &mut self handlers below are free of the buf borrow.
+            let payload = buf[..n].to_vec();
             // The clock starts the moment the frame lands: everything below has to
             // stage and fire the accept before the RX2 deadline (JOIN_ACCEPT_DELAY2).
             let rx_at = Instant::now();
             seen += 1;
-            let rssi = pkt.rssi_dbm;
-            let snr = pkt.lora.as_ref().map(|l| l.snr_db).unwrap_or(f32::NAN);
 
-            if let Ok(jr) = JoinRequest::parse(&pkt.payload) {
+            if let Ok(jr) = JoinRequest::parse(&payload) {
                 let meta = format!(
                     "\"dev_eui\":\"{}\",\"dev_nonce\":{},\"rssi_dbm\":{rssi},\"snr_db\":{snr:.1}",
                     jr.dev_eui_display(),
                     jr.dev_nonce
                 );
-                self.record_capture("join_request", &pkt.payload, None, &meta);
+                self.record_capture("join_request", &payload, None, &meta);
                 self.handle_join(jr, rx_at, rssi, snr, &mut on_join)?;
                 self.arm_uplink_rx()?;
                 continue;
             }
-            match DataFrame::parse(&pkt.payload) {
+            match DataFrame::parse(&payload) {
                 Ok(df) if df.is_uplink() => {
                     let plain = self.sessions.get(&df.dev_addr).map(|s| {
                         df.decrypt_payload(&s.keys.nwk_skey, &s.keys.app_skey, df.fcnt as u32)
@@ -352,18 +363,18 @@ impl JoinResponder {
                         df.fcnt,
                         df.fport.map(|p| p.to_string()).unwrap_or("null".into())
                     );
-                    self.record_capture("uplink", &pkt.payload, plain.as_deref(), &meta);
+                    self.record_capture("uplink", &payload, plain.as_deref(), &meta);
                     self.handle_uplink(&df, rx_at, rssi, snr, &mut on_uplink)?;
                 }
                 _ => {
                     // Capture it anyway: an unrecognised frame is exactly what a new
                     // vendor format looks like before it is understood.
                     let meta = format!("\"rssi_dbm\":{rssi},\"snr_db\":{snr:.1}");
-                    self.record_capture("unparsed", &pkt.payload, None, &meta);
+                    self.record_capture("unparsed", &payload, None, &meta);
                     println!(
                         "  packet {}B rssi {rssi} dBm: neither a JoinRequest nor an uplink: {}",
-                        pkt.payload.len(),
-                        hex::encode(&pkt.payload)
+                        payload.len(),
+                        hex::encode(&payload)
                     )
                 }
             }
@@ -455,7 +466,7 @@ impl JoinResponder {
         // downlink — the standards-correct RX2 (the previous code sent it at the uplink
         // SF, which a compliant SF12 RX2 window could not hear). The high-power sub-band
         // gives a distant device the downlink margin RX1 at +14 dBm may lack.
-        let rx1_sf = self.sf_enum();
+        let rx1_sf = self.sf;
         let rx1_freq = self.freq_hz;
 
         // --- RX1 ---
@@ -477,6 +488,17 @@ impl JoinResponder {
         );
 
         // --- RX2 --- (re-stage in the ~0.8 s gap before the RX2 deadline)
+        //
+        // This fires UNCONDITIONALLY after RX1. A LoRaWAN JoinAccept is not acked, so we
+        // have no feedback saying RX1 was heard — and a device that decoded RX1 never opens
+        // RX2. So whenever RX1 lands, this RX2 downlink is pure airtime: ~1.5 s on air at
+        // SF12/869.525, during which the single radio is deaf to everything else. That is a
+        // deliberate bring-up trade — answering both windows maximizes join success when you
+        // can't know which the device caught, and g3's 10 % duty absorbs it at bring-up
+        // cadence. If joins ever become frequent (a real fleet, not a bench), switch to
+        // RX2-only-as-fallback: fire RX2 only when RX1 could not be staged in time, the
+        // LNS-style fixed-window behaviour. (Non-issue at SF12 uplinks, where the RX1 accept's
+        // airtime already blows the RX2 deadline — see the const-level "Measured caveat".)
         self.stage_downlink_on(RX2_FREQ_HZ, RX2_SF, RX2_POWER_DBM, &accept)?;
         let rx2_staged = rx_at.elapsed();
         let fire_at = rx_at + JOIN_ACCEPT_DELAY2 - TX_LEAD;
@@ -531,7 +553,7 @@ impl JoinResponder {
         on_uplink: &mut impl FnMut(u32, u16, &[u8], i16, f32),
     ) -> Result<()> {
         // Copy out the keys/pin-state so no borrow of self.sessions is held across the
-        // downlink fire path below (which needs &mut self.driver).
+        // downlink fire path below (which needs &mut self.radio).
         let (nwk, app, already_pinned) = match self.sessions.get(&df.dev_addr) {
             Some(s) => (s.keys.nwk_skey, s.keys.app_skey, s.pinned),
             None => {
@@ -616,7 +638,7 @@ impl JoinResponder {
 
         // Data RX1 is the uplink channel and SF (RX1DROffset 0) — the same channel we
         // received on, since this is a single-channel responder.
-        self.stage_downlink_on(self.freq_hz, self.sf_enum(), 14, &frame)?;
+        self.stage_downlink_on(self.freq_hz, self.sf, 14, &frame)?;
         let fire_at = rx_at + RX1_DATA_DELAY - TX_LEAD;
         let now = Instant::now();
         if fire_at > now {
